@@ -1,0 +1,720 @@
+"""Orchestration: recording -> transcript -> index.
+
+Two entry points that matter.
+
+`finalize` runs the moment recording stops. It splits the aggregate-device
+capture into the two channels, writes the manifest into the inbox last, and
+returns. It never transcribes, because Jacob has just walked out of a meeting
+and the only job here is getting the audio safe.
+
+`process` runs in the watcher. It is the slow half: transcribe, diarize the
+multi-person channels, merge, detect names, write the transcript, index it,
+archive the audio.
+
+Diarization sits between transcription and merging because the merge groups
+turns by voice, so the speaker has to be attached to each segment before turns
+are formed.
+
+`ingest` is split out from `process` so notes arriving late, or an embedding
+model change, only cost a reindex rather than a re-transcription.
+"""
+
+from __future__ import annotations
+
+import logging
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+from . import audio, records
+from .chunking import chunk_turns, context_header
+from .config import Config
+from .diarize import (
+    Diarizer,
+    DiarizationUnavailable,
+    assign_speakers,
+)
+from .merge import merge_segments, split_long_turns
+from .models import MIC, ROOM, SYS, Segment, SpeakerSpan
+from .names import (
+    attendee_suggestion,
+    detect_names,
+    infer_speaker_names,
+    speaker_guess_map,
+)
+from .quips import profile_speakers
+from .records import Manifest, Transcript
+from .store import MeetingStore
+from .summarize import DEFERRED_SUMMARY, Summarizer, SummaryUnavailable
+from .transcribe import Transcriber
+
+log = logging.getLogger(__name__)
+
+
+def _processing_status(
+    cfg: Config,
+    meeting_id: str,
+    phase: str,
+    percent: int,
+    detail: str = "",
+) -> None:
+    """Publish a tiny atomic status file for the SwiftBar menu."""
+    records.write_json_atomic(
+        cfg.processing_status,
+        {
+            "meeting_id": meeting_id,
+            "phase": phase,
+            "percent": min(max(int(percent), 0), 100),
+            "detail": detail,
+            "updated_epoch": int(datetime.now().timestamp()),
+        },
+    )
+
+
+def _clear_processing_status(cfg: Config, meeting_id: str) -> None:
+    try:
+        current = records.read_notes(cfg.processing_status)
+        if current.get("meeting_id") == meeting_id:
+            cfg.processing_status.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# stop-of-recording
+# ---------------------------------------------------------------------------
+
+def active_capture(cfg: Config) -> Path | None:
+    """The raw file the current recording is writing to, if one is running."""
+    try:
+        lines = (cfg.root / ".recording").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    return Path(lines[2]) if len(lines) > 2 and lines[2] else None
+
+
+def stranded_captures(cfg: Config) -> list[Path]:
+    """Raw captures in in-progress that no longer belong to a recording.
+
+    finalize deliberately leaves a capture it refuses exactly where it is, so a
+    rejected meeting stays recoverable instead of being deleted. The cost is
+    that nothing then points at it, so it has to be reported -- two meetings
+    once sat here for an hour with no sign of them anywhere.
+    """
+    active = active_capture(cfg)
+    if not cfg.in_progress_dir.exists():
+        return []
+    return sorted(p for p in cfg.in_progress_dir.glob("*__raw.wav") if p != active)
+
+
+def finalize(
+    cfg: Config,
+    raw_path: Path,
+    started_at: str = "",
+    mode: str = "call",
+    expected_duration_s: float = 0.0,
+) -> Manifest:
+    """Split a raw capture into channels and publish it to the inbox.
+
+    mode="call"  two channels: Jacob on the mic, everyone else on system audio.
+    mode="room"  one channel from the microphone, carrying several people none
+                 of whom can be told apart. Labelled "Unknown" rather than
+                 "Jacob", because attributing the whole room to Jacob would be
+                 wrong in a way nobody would ever notice afterwards.
+    """
+    if mode not in ("call", "room"):
+        raise ValueError(f"unknown recording mode {mode!r}; expected call or room")
+    cfg.ensure_dirs()
+    raw_path = Path(raw_path)
+    if not raw_path.exists():
+        raise FileNotFoundError(raw_path)
+
+    meeting_id = raw_path.name.split("__")[0]
+    info = audio.probe(raw_path)
+
+    # A capture of literal zeros is never a quiet meeting; it means the audio
+    # never arrived. Refusing here leaves the raw file where it is and tells
+    # Jacob now, instead of publishing a meeting whose transcript would come
+    # back empty an hour later with nothing to explain why.
+    if audio.is_silent(raw_path):
+        raise audio.AudioError(
+            f"{raw_path.name} contains no audio at all (digital silence for "
+            f"{info['duration']:.0f}s). The recording was not saved.\n"
+            f"macOS gives an app that lacks microphone access silence rather "
+            f"than an error, so check System Settings > Privacy & Security > "
+            f"Microphone and enable whatever started the recording (SwiftBar "
+            f"for the menu bar, your terminal for the command line)."
+        )
+
+    # File duration must track elapsed wall time. A live 48 -> 16 kHz
+    # conversion once wrote only 52 seconds of samples during a 193-second
+    # meeting, making both playback and speech roughly 3.7x too fast. A valid
+    # recording can differ by a fraction of a second while ffmpeg starts and
+    # stops, but never by minutes.
+    if expected_duration_s > 0:
+        difference = abs(info["duration"] - expected_duration_s)
+        tolerance = max(2.0, expected_duration_s * 0.05)
+        if difference > tolerance:
+            raise audio.AudioError(
+                f"{raw_path.name} has {info['duration']:.1f}s of audio but the "
+                f"recording ran for {expected_duration_s:.1f}s. The capture "
+                f"clock lost {difference:.1f}s, so publishing it would create "
+                f"a sped-up, incomplete transcript. The raw file was kept at "
+                f"{raw_path} for recovery."
+            )
+
+    channels: dict[str, str] = {}
+    if mode == "room":
+        # System audio is ignored entirely: in a meeting room there is nothing
+        # playing through the laptop, and a silent channel would only give
+        # Whisper somewhere to hallucinate.
+        room_path = cfg.inbox_dir / f"{meeting_id}__room.wav"
+        audio.extract_mono(raw_path, room_path, cfg.audio.mic_channels, cfg.audio.sample_rate)
+        channels[ROOM] = room_path.name
+    else:
+        mic_path = cfg.inbox_dir / f"{meeting_id}__mic.wav"
+        sys_path = cfg.inbox_dir / f"{meeting_id}__sys.wav"
+        audio.extract_mono(raw_path, mic_path, cfg.audio.mic_channels, cfg.audio.sample_rate)
+        audio.extract_mono(raw_path, sys_path, cfg.audio.sys_channels, cfg.audio.sample_rate)
+        channels[MIC] = mic_path.name
+        channels[SYS] = sys_path.name
+
+    # Keep the raw multi-channel capture next to the split channels until the
+    # meeting is processed. It is the only copy of the unmixed audio, and if
+    # the channel mapping in config turns out to be wrong, it is what makes
+    # that recoverable rather than lost.
+    raw_kept = cfg.inbox_dir / raw_path.name
+    shutil.move(str(raw_path), str(raw_kept))
+
+    manifest = Manifest(
+        meeting_id=meeting_id,
+        channels=channels,
+        started_at=started_at,
+        ended_at=datetime.now().isoformat(timespec="seconds"),
+        duration_s=info["duration"],
+        raw_file=raw_kept.name,
+    )
+    # Written last: the watcher triggers on manifests only, so nothing can be
+    # picked up before both channels are fully on disk.
+    manifest.write(cfg.inbox_dir / f"{meeting_id}.json")
+    log.info(
+        "finalized meeting=%s mode=%s duration=%.1fs", meeting_id, mode, info["duration"]
+    )
+    return manifest
+
+
+# ---------------------------------------------------------------------------
+# indexing
+# ---------------------------------------------------------------------------
+
+def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
+    """(Re)index a meeting from its stored transcript and notes."""
+    transcript_path = cfg.transcript_json(meeting_id)
+    if not transcript_path.exists():
+        raise FileNotFoundError(
+            f"no transcript for {meeting_id} at {transcript_path}"
+        )
+
+    transcript = Transcript.read(transcript_path)
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    previous_md = cfg.transcript_md(meeting_id)
+    transcript.title = records.meeting_title(notes, transcript)
+    transcript.md_name = records.markdown_filename(meeting_id, transcript.title)
+    transcript.write(transcript_path)
+    label = records.date_label(meeting_id)
+
+    # Names Jacob has confirmed for diarized voices. Read at index time rather
+    # than baked into the transcript, so naming a voice later is a reindex.
+    roster = records.speaker_roster(notes)
+    labeller = cfg.turn_labeller(roster)
+
+    detected = attendee_suggestion(transcript.detected_names)
+    header = ""
+    if cfg.chunk.include_context_header:
+        header = context_header(
+            date_label=label,
+            attendees=notes.get("attendees", ""),
+            detected_names=detected,
+            notes=notes.get("notes", ""),
+        )
+
+    chunks = chunk_turns(
+        transcript.turns,
+        target_chars=cfg.chunk.target_chars,
+        overlap_turns=cfg.chunk.overlap_turns,
+        label_fn=labeller,
+        header=header,
+    )
+
+    try:
+        epoch = int(records.parse_meeting_id(meeting_id).timestamp())
+        date_only = records.parse_meeting_id(meeting_id).date().isoformat()
+    except ValueError:
+        epoch, date_only = 0, ""
+
+    metadatas = []
+    for chunk in chunks:
+        metadatas.append(
+            {
+                "meeting_id": meeting_id,
+                "date": date_only,
+                "date_label": label,
+                "epoch": epoch,
+                "chunk_index": chunk.index,
+                "start_s": round(chunk.start, 2),
+                "end_s": round(chunk.end, 2),
+                # The resolved labels actually used in the chunk text, so
+                # filtering on a speaker and reading the chunk agree.
+                "speakers": chunk.speakers or [cfg.label(c) for c in chunk.channels],
+                "attendees": notes.get("attendees", ""),
+                "notes": notes.get("notes", ""),
+                "detected_names": detected,
+                "identified_speakers": ", ".join(
+                    sorted({v for v in roster.values() if v})
+                ),
+                "has_notes": bool(notes.get("notes") or notes.get("attendees")),
+                "duration_s": round(transcript.duration_s, 1),
+                "title": transcript.title,
+                "transcript_path": str(cfg.transcript_md(meeting_id)),
+            }
+        )
+
+    count = store.replace_meeting(
+        meeting_id,
+        documents=[c.text for c in chunks],
+        metadatas=metadatas,
+    )
+
+    # Re-render the markdown so notes and speaker names show up in the
+    # readable transcript too. The file is named from the title, so a later
+    # notes popup can rename it; drop the previous name if it changed.
+    md_path = cfg.transcript_md(meeting_id)
+    records.write_text_atomic(
+        md_path,
+        records.render_markdown(transcript, labeller, notes),
+    )
+    if previous_md != md_path and previous_md.exists():
+        previous_md.unlink()
+    stamped = cfg.transcript_json(meeting_id).with_suffix(".md")
+    if stamped != md_path and stamped.exists():
+        stamped.unlink()
+
+    if notes and not notes.get("applied", True):
+        records.mark_notes_applied(cfg.notes_json(meeting_id))
+
+    return count
+
+
+def apply_summary(
+    cfg: Config,
+    meeting_id: str,
+    summarizer: Summarizer,
+    store: MeetingStore,
+) -> bool:
+    """Fill in a deferred summary and re-render the readable transcript.
+
+    Returns True when a summary was written. Leaves the meeting unchanged if
+    there is no speech to summarise.
+    """
+    path = cfg.transcript_json(meeting_id)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    transcript = Transcript.read(path)
+    if not transcript.turns:
+        return False
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    roster = records.speaker_roster(notes)
+    _processing_status(cfg, meeting_id, "Writing summary", 85)
+    try:
+        transcript.summary = summarizer.summarize(
+            transcript.turns, cfg.turn_labeller(roster)
+        )
+        transcript.summary_model = cfg.summary.model
+        transcript.summary_error = ""
+        transcript.write(path)
+        ingest(cfg, meeting_id, store)
+        return True
+    finally:
+        _clear_processing_status(cfg, meeting_id)
+
+
+def needs_summary(transcript: Transcript) -> bool:
+    """True when capture finished without a summary, and there is speech."""
+    if not transcript.turns:
+        return False
+    if transcript.summary.strip():
+        return False
+    return True
+
+
+def rediarize(
+    cfg: Config,
+    meeting_id: str,
+    diarizer: Diarizer,
+    store: MeetingStore,
+    summarizer: Summarizer | None = None,
+) -> Transcript:
+    """Recompute speakers from archived audio without rerunning Whisper.
+
+    Speaker count corrections should cost minutes, not a second full
+    transcription. The original channel WAVs are retained for exactly this
+    sort of derived-data rebuild.
+    """
+    transcript_path = cfg.transcript_json(meeting_id)
+    if not transcript_path.exists():
+        raise FileNotFoundError(transcript_path)
+    transcript = Transcript.read(transcript_path)
+
+    targets: list[tuple[str, Path]] = []
+    for channel in diarizer.config.diarize_channels:
+        path = cfg.audio_archive_dir / f"{meeting_id}__{channel}.wav"
+        if path.exists() and diarizer.channel_enabled(channel):
+            targets.append((channel, path))
+    if not targets:
+        raise FileNotFoundError(
+            f"no retained diarizable audio for meeting {meeting_id}"
+        )
+
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    expected_speakers = records.expected_diarized_speakers(
+        notes,
+        {channel for channel, _ in targets},
+        cfg.names.own_names,
+    )
+    _processing_status(
+        cfg,
+        meeting_id,
+        "Identifying speakers",
+        65,
+        (
+            f"using {expected_speakers} listed voices"
+            if expected_speakers
+            else "automatic speaker count"
+        ),
+    )
+    try:
+        spans: list[SpeakerSpan] = []
+        for channel, path in targets:
+            spans.extend(
+                diarizer.diarize_file(
+                    path,
+                    channel,
+                    expected_speakers=expected_speakers,
+                )
+            )
+
+        target_channels = {channel for channel, _ in targets}
+        for segment in transcript.segments:
+            if segment.channel in target_channels:
+                segment.speaker = None
+        assign_speakers(transcript.segments, spans)
+
+        turns = merge_segments(
+            transcript.segments,
+            coalesce_gap_s=cfg.chunk.coalesce_gap_s,
+            max_turn_s=cfg.chunk.max_turn_s,
+        )
+        transcript.turns = split_long_turns(
+            turns, max_chars=cfg.chunk.max_turn_chars
+        )
+        transcript.speaker_spans = spans
+        transcript.speaker_guesses = (
+            infer_speaker_names(
+                transcript.turns,
+                own_names=cfg.names.own_names,
+                own_label=cfg.own_label,
+            )
+            if cfg.names.enabled and spans
+            else []
+        )
+        transcript.speaker_profiles = profile_speakers(
+            transcript.turns,
+            guesses=speaker_guess_map(transcript.speaker_guesses),
+        )
+        transcript.diarize_model = cfg.diarize.model if spans else ""
+        transcript.diarize_error = ""
+
+        # The old summary referred to obsolete Speaker N labels. Rewrite it
+        # now when Ollama is available; otherwise remove the misleading text
+        # and let `ma summarize --today` fill it later.
+        transcript.summary = ""
+        transcript.summary_model = ""
+        if summarizer is not None and summarizer.enabled and summarizer.is_running():
+            _processing_status(cfg, meeting_id, "Writing summary", 82)
+            roster = records.speaker_roster(notes)
+            transcript.summary = summarizer.summarize(
+                transcript.turns, cfg.turn_labeller(roster)
+            )
+            transcript.summary_model = cfg.summary.model
+            transcript.summary_error = ""
+        else:
+            transcript.summary_error = DEFERRED_SUMMARY
+
+        transcript.write(transcript_path)
+        _processing_status(cfg, meeting_id, "Indexing for search", 96)
+        ingest(cfg, meeting_id, store)
+        return Transcript.read(transcript_path)
+    finally:
+        _clear_processing_status(cfg, meeting_id)
+
+
+# ---------------------------------------------------------------------------
+# processing
+# ---------------------------------------------------------------------------
+
+def process(
+    cfg: Config,
+    manifest_path: Path,
+    transcriber: Transcriber,
+    store: MeetingStore,
+    diarizer: "Diarizer | None" = None,
+    summarizer: "Summarizer | None" = None,
+) -> str:
+    """Process one inbox manifest end to end. Returns the meeting id."""
+    cfg.ensure_dirs()
+    manifest_path = Path(manifest_path)
+    manifest = Manifest.read(manifest_path)
+    meeting_id = manifest.meeting_id
+
+    # Claim the meeting by moving its files out of the inbox. A move is atomic
+    # within a filesystem, so two watchers could never both claim it.
+    claimed = _claim(cfg, manifest, manifest_path)
+    _processing_status(cfg, meeting_id, "Preparing audio", 3)
+
+    try:
+        # Driven by the manifest, not a fixed list, so a room recording with a
+        # single channel and a call with two go through the same path.
+        segments: list[Segment] = []
+        if not manifest.channels:
+            raise ValueError(f"manifest for {meeting_id} lists no channels")
+        channels = sorted(manifest.channels.items())
+        last_progress = -1
+        for channel_index, (channel, filename) in enumerate(channels):
+            path = cfg.processing_dir / filename
+            channel_start = 8 + channel_index * 52 / len(channels)
+            channel_width = 52 / len(channels)
+
+            def report(fraction: float, *, name=channel) -> None:
+                nonlocal last_progress
+                percent = int(channel_start + channel_width * fraction)
+                if percent > last_progress:
+                    last_progress = percent
+                    _processing_status(
+                        cfg,
+                        meeting_id,
+                        "Transcribing",
+                        percent,
+                        f"{name} audio",
+                    )
+
+            report(0.0)
+            segments.extend(
+                transcriber.transcribe_file(
+                    path,
+                    channel,
+                    duration_s=manifest.duration_s,
+                    progress=report,
+                )
+            )
+
+        _processing_status(cfg, meeting_id, "Identifying speakers", 65)
+        spans, diarize_error = _diarize_channels(cfg, manifest, segments, diarizer)
+
+        turns = merge_segments(
+            segments,
+            coalesce_gap_s=cfg.chunk.coalesce_gap_s,
+            max_turn_s=cfg.chunk.max_turn_s,
+        )
+        turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
+
+        candidates = (
+            detect_names(turns, own_names=cfg.names.own_names, min_count=cfg.names.min_count)
+            if cfg.names.enabled
+            else []
+        )
+
+        # Which name belongs to which voice. Only ever a suggestion for the
+        # dialog; nothing here labels a turn.
+        guesses = (
+            infer_speaker_names(
+                turns, own_names=cfg.names.own_names, own_label=cfg.own_label
+            )
+            if cfg.names.enabled and spans
+            else []
+        )
+        profiles = profile_speakers(turns, guesses=speaker_guess_map(guesses))
+
+        summary, summary_error = "", ""
+        if summarizer is not None and summarizer.enabled:
+            if not summarizer.is_running():
+                # Do not start Ollama from the watcher. The transcript is
+                # complete without a summary; SwiftBar "Summarize today's
+                # meetings" fills this in later.
+                summary_error = DEFERRED_SUMMARY
+                log.info("ollama not running; summary deferred for meeting=%s", meeting_id)
+            else:
+                _processing_status(cfg, meeting_id, "Writing summary", 82)
+                try:
+                    notes = records.read_notes(cfg.notes_json(meeting_id))
+                    roster = records.speaker_roster(notes)
+                    summary = summarizer.summarize(turns, cfg.turn_labeller(roster))
+                except SummaryUnavailable as exc:
+                    summary_error = str(exc)
+                    log.error("summary unavailable for meeting=%s: %s", meeting_id, exc)
+                except Exception as exc:
+                    summary_error = f"local summary failed: {exc}"
+                    log.exception("summary failed for meeting=%s", meeting_id)
+
+        _processing_status(cfg, meeting_id, "Saving transcript", 92)
+        transcript = Transcript(
+            meeting_id=meeting_id,
+            segments=segments,
+            turns=turns,
+            detected_names=candidates,
+            duration_s=manifest.duration_s,
+            started_at=manifest.started_at,
+            ended_at=manifest.ended_at,
+            model=cfg.whisper.model,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            summary=summary,
+            summary_model=cfg.summary.model if summary else "",
+            summary_error=summary_error,
+            speaker_spans=spans,
+            speaker_profiles=profiles,
+            speaker_guesses=guesses,
+            diarize_model=cfg.diarize.model if spans else "",
+            diarize_error=diarize_error,
+        )
+        transcript.write(cfg.transcript_json(meeting_id))
+
+        _processing_status(cfg, meeting_id, "Indexing for search", 96)
+        ingest(cfg, meeting_id, store)
+
+        # Only now is it safe to move the audio out of processing: the
+        # transcript is on disk and the chunks are in Chroma.
+        _archive_audio(cfg, claimed)
+        log.info(
+            "processed meeting=%s turns=%d voices=%d names=%s",
+            meeting_id,
+            len(turns),
+            len(profiles),
+            attendee_suggestion(candidates) or "-",
+        )
+        _clear_processing_status(cfg, meeting_id)
+        return meeting_id
+
+    except Exception:
+        _clear_processing_status(cfg, meeting_id)
+        log.exception("processing failed for meeting=%s, moving to failed/", meeting_id)
+        _move_all(claimed, cfg.failed_dir)
+        raise
+
+
+def _diarize_channels(
+    cfg: Config,
+    manifest: Manifest,
+    segments: list[Segment],
+    diarizer: "Diarizer | None",
+) -> tuple[list[SpeakerSpan], str]:
+    """Diarize the multi-person channels and attribute segments, in place.
+
+    Returns the spans and an error string that is empty on success.
+
+    Diarization failing is deliberately NOT fatal, which is the one place this
+    module steps away from "fail loudly and keep the audio". The reasoning: a
+    transcript with no speaker labels is a mild loss, and it is still complete,
+    searchable and correct. Quarantining the meeting instead would turn a
+    missing local model file into a lost meeting, and Jacob would not find out
+    until he went looking for it. The error is recorded in the
+    transcript and logged at error level, so the degradation is visible rather
+    than silent.
+    """
+    if diarizer is None or not diarizer.enabled:
+        return [], ""
+
+    targets = [
+        (channel, filename)
+        for channel, filename in sorted(manifest.channels.items())
+        if diarizer.channel_enabled(channel)
+    ]
+    if not targets:
+        return [], ""
+
+    notes = records.read_notes(cfg.notes_json(manifest.meeting_id))
+    expected_speakers = records.expected_diarized_speakers(
+        notes,
+        {channel for channel, _ in targets},
+        cfg.names.own_names,
+    )
+    if expected_speakers:
+        log.info(
+            "using %d listed speaker(s) to constrain diarization for meeting=%s",
+            expected_speakers,
+            manifest.meeting_id,
+        )
+
+    spans: list[SpeakerSpan] = []
+    try:
+        for channel, filename in targets:
+            spans.extend(
+                diarizer.diarize_file(
+                    cfg.processing_dir / filename,
+                    channel,
+                    expected_speakers=expected_speakers,
+                )
+            )
+    except DiarizationUnavailable as exc:
+        log.error("diarization unavailable, continuing without speakers: %s", exc)
+        return [], str(exc)
+    except Exception as exc:
+        log.exception("diarization failed, continuing without speakers")
+        return [], f"diarization failed: {exc}"
+
+    assigned = assign_speakers(segments, spans)
+    log.info(
+        "diarized channels=%s spans=%d segments_attributed=%d/%d",
+        ",".join(c for c, _ in targets),
+        len(spans),
+        assigned,
+        len(segments),
+    )
+    return spans, ""
+
+
+def _claim(cfg: Config, manifest: Manifest, manifest_path: Path) -> list[Path]:
+    """Move a meeting's files from inbox to processing. Returns new paths."""
+    moved: list[Path] = []
+    names = list(manifest.channels.values())
+    if manifest.raw_file:
+        names.append(manifest.raw_file)
+    for name in names:
+        src = cfg.inbox_dir / name
+        if src.exists():
+            dst = cfg.processing_dir / name
+            shutil.move(str(src), str(dst))
+            moved.append(dst)
+    dst_manifest = cfg.processing_dir / manifest_path.name
+    shutil.move(str(manifest_path), str(dst_manifest))
+    moved.append(dst_manifest)
+    return moved
+
+
+def _archive_audio(cfg: Config, claimed: list[Path]) -> None:
+    for path in claimed:
+        if not path.exists():
+            continue
+        if path.suffix == ".json":
+            path.unlink()  # manifest has served its purpose
+        else:
+            dst = cfg.audio_archive_dir / path.name
+            shutil.move(str(path), str(dst))
+
+
+def _move_all(paths: list[Path], destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in paths:
+        if path.exists():
+            try:
+                shutil.move(str(path), str(destination / path.name))
+            except OSError:
+                log.exception("could not move %s to %s", path, destination)

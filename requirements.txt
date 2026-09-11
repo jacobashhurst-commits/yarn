@@ -1,0 +1,14 @@
+# Transcription. 1.1.0 is the first release with large-v3-turbo support.
+faster-whisper>=1.1.0
+
+# Vector store. The pipeline and chroma-mcp must agree on the embedding
+# function; both use Chroma's default, so keep them on compatible versions.
+chromadb>=0.5.0
+
+# Speaker diarization: an ungated ONNX runtime for the `sys` and `room`
+# channels. Model weights come from sherpa-onnx's GitHub releases and inference
+# is entirely local; no account, token, or hosted API is used.
+sherpa-onnx>=1.12.0
+
+# Tests only.
+pytest>=8.0

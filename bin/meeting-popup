@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# The optional on-stop popup. Two dialogs, both dismissible, neither required.
+#
+#   meeting-popup <meeting_id> [--attendees "John, Marina"]
+#
+# Escape or "Not now" on either dialog skips it. If both come back empty,
+# nothing is written at all and the meeting is processed exactly as if this
+# script had never run.
+#
+# Called in the background by `rec stop`, and again by the watcher once names
+# have been detected in the transcript (with --attendees pre-filled).
+
+set -uo pipefail
+
+MA="${MA_BIN:-ma}"
+
+meeting_id="${1:-}"
+[[ -n "$meeting_id" ]] || { echo "usage: meeting-popup <meeting_id> [--attendees ...]" >&2; exit 2; }
+shift
+
+attendees_prefill=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --attendees) attendees_prefill="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+# Arguments are passed through argv rather than interpolated into the script
+# text, so apostrophes and quotes in a meeting note can't break the AppleScript.
+ask() {
+  osascript - "$1" "$2" "$3" <<'APPLESCRIPT' 2>/dev/null || true
+on run argv
+  set dialogTitle to item 1 of argv
+  set dialogPrompt to item 2 of argv
+  set defaultText to item 3 of argv
+  try
+    set theResult to display dialog dialogPrompt ¬
+      with title dialogTitle ¬
+      default answer defaultText ¬
+      buttons {"Not now", "Save"} ¬
+      default button "Save" ¬
+      cancel button "Not now" ¬
+      giving up after 600
+    return text returned of theResult
+  on error
+    return ""
+  end try
+end run
+APPLESCRIPT
+}
+
+if [[ -n "$attendees_prefill" ]]; then
+  notes_prompt="Anything worth remembering about this meeting? (optional)"
+  people_prompt="These names came up in the conversation. Correct them if needed, or dismiss."
+else
+  notes_prompt="Anything worth remembering about this meeting? (optional)"
+  people_prompt="Who spoke in this recording? Include yourself and anyone heard over a phone or video call. Separate names with commas. (optional)"
+fi
+
+notes="$(ask "Meeting notes" "$notes_prompt" "")"
+attendees="$(ask "Who was there?" "$people_prompt" "$attendees_prefill")"
+
+# Trim whitespace, so a dialog containing only spaces counts as dismissed.
+notes="$(printf '%s' "$notes" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+attendees="$(printf '%s' "$attendees" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+if [[ -z "$notes" && -z "$attendees" ]]; then
+  exit 0
+fi
+
+"$MA" notes "$meeting_id" --notes "$notes" --attendees "$attendees" >/dev/null

@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+#
+# "Who was Speaker 2?" -- one dismissible dialog per unidentified voice.
+#
+#   speaker-popup <meeting_id>
+#
+# Launched in the background by the watcher once a transcript exists, which is
+# the earliest this dialog can possibly work: at `rec stop` nothing has been
+# transcribed yet, so there are no voices to ask about and nothing to quote.
+#
+# Every dialog is optional. "Not now" stops the whole sequence, Escape does the
+# same, and an empty answer skips that one voice. Anything not answered keeps
+# its honest "Speaker N" label in the transcript. Nothing here can change the
+# recording, and the only thing it changes about the transcript is the labels
+# Jacob himself supplied.
+#
+# The pending list and the quips are read from `ma speakers --pending-tsv`
+# rather than passed in on the command line, because a quip is a verbatim
+# sentence from a private meeting and argv shows up in `ps` for every user on
+# the machine.
+
+set -uo pipefail
+
+MA="${MA_BIN:-ma}"
+
+meeting_id="${1:-}"
+[[ -n "$meeting_id" ]] || { echo "usage: speaker-popup <meeting_id>" >&2; exit 2; }
+
+command -v "$MA" >/dev/null 2>&1 || {
+  echo "speaker-popup: '$MA' not found on PATH" >&2
+  exit 1
+}
+
+# Arguments go through argv, never interpolated into the script text, so an
+# apostrophe in a quip cannot break the AppleScript or inject into it.
+ask() {
+  osascript - "$1" "$2" "$3" <<'APPLESCRIPT' 2>/dev/null
+on run argv
+  set dialogTitle to item 1 of argv
+  set dialogPrompt to item 2 of argv
+  set defaultText to item 3 of argv
+  try
+    set theResult to display dialog dialogPrompt ¬
+      with title dialogTitle ¬
+      default answer defaultText ¬
+      buttons {"Not now", "Save"} ¬
+      default button "Save" ¬
+      cancel button "Not now" ¬
+      giving up after 600
+    if gave up of theResult then
+      return "__TIMEOUT__"
+    end if
+    return text returned of theResult
+  on error
+    return "__CANCELLED__"
+  end try
+end run
+APPLESCRIPT
+}
+
+notice() {
+  osascript - "$1" <<'APPLESCRIPT' 2>/dev/null
+on run argv
+  try
+    display dialog (item 1 of argv) ¬
+      with title "Check the detected speakers" ¬
+      buttons {"Review detected voices"} ¬
+      default button "Review detected voices"
+  end try
+end run
+APPLESCRIPT
+}
+
+warning="$("$MA" speakers "$meeting_id" --review-warning 2>/dev/null)"
+[[ -n "$warning" ]] && notice "$warning"
+
+pending="$("$MA" speakers "$meeting_id" --pending-tsv 2>/dev/null)"
+[[ -n "$pending" ]] || exit 0
+
+total="$(printf '%s\n' "$pending" | grep -c '' )"
+position=0
+declare -a updates=()
+
+# A here-string, not a pipe: a pipeline would run this loop in a subshell and
+# the collected answers would be discarded at the end of it.
+while IFS=$'\t' read -r key display detail quip guess; do
+  [[ -n "$key" ]] || continue
+  position=$((position + 1))
+
+  prompt="$display of $total"
+  [[ -n "$detail" ]] && prompt="$prompt — $detail"
+  if [[ -n "$quip" ]]; then
+    prompt="$prompt"$'\n\n'"They said: \"$quip\""
+  fi
+  prompt="$prompt"$'\n\n'"Who was this? (leave blank to skip)"
+  if [[ -n "$guess" ]]; then
+    prompt="$prompt"$'\n'"Suggested from the conversation — correct it if it's wrong."
+  fi
+
+  answer="$(ask "Identify this speaker" "$prompt" "$guess")"
+
+  # Cancel or Escape means "stop asking", not "skip this one". Pressing Escape
+  # five times to get rid of a dialog nobody wanted is not a user experience.
+  [[ "$answer" == "__CANCELLED__" ]] && break
+  [[ "$answer" == "__TIMEOUT__" ]] && break
+
+  answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  [[ -n "$answer" ]] || continue
+  updates+=("--set" "$key=$answer")
+done <<< "$pending"
+
+# One write for the whole sequence, so the watcher reindexes once rather than
+# once per voice.
+if [[ ${#updates[@]} -gt 0 ]]; then
+  "$MA" speakers "$meeting_id" "${updates[@]}" >/dev/null 2>&1 || {
+    echo "speaker-popup: could not save speaker names for $meeting_id" >&2
+    exit 1
+  }
+fi
+
+exit 0

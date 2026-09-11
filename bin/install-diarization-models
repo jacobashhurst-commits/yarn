@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Download the ungated sherpa-onnx diarization models from GitHub releases.
+
+set -euo pipefail
+
+command -v ma >/dev/null 2>&1 || {
+  echo "install-diarization-models: 'ma' is not on PATH" >&2
+  exit 1
+}
+command -v curl >/dev/null 2>&1 || {
+  echo "install-diarization-models: curl is required" >&2
+  exit 1
+}
+
+eval "$(ma rec-config)"
+segmentation="$MA_DIARIZE_SEGMENTATION_MODEL"
+embedding="$MA_DIARIZE_EMBEDDING_MODEL"
+model_dir="$(dirname "$embedding")"
+
+if [[ -f "$segmentation" && -f "$embedding" ]]; then
+  echo "diarization models already installed in $model_dir"
+  exit 0
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$model_dir"
+
+echo "downloading local speaker segmentation model..."
+curl -fL --retry 3 -o "$tmp/segmentation.tar.bz2" \
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+tar -xjf "$tmp/segmentation.tar.bz2" -C "$model_dir"
+
+echo "downloading local speaker embedding model..."
+curl -fL --retry 3 -o "$embedding.partial" \
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+mv "$embedding.partial" "$embedding"
+
+echo "installed local diarization models in $model_dir"

@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+#
+# Manual recording control. Nothing here ever starts on its own.
+#
+#   rec start [call|room]   begin recording (default: call)
+#   rec stop                end recording, hand off, offer the popup
+#   rec toggle [call|room]  one command for a single hotkey
+#   rec status              is it recording, in which mode, for how long
+#
+# Modes:
+#   call  a video call. Your mic is you, system audio is everyone else, and
+#         the transcript says who said what.
+#   room  everyone in a physical room on your microphone. One channel, and
+#         every turn is labelled "Unknown" -- because it genuinely is.
+#
+# Bind `rec toggle` to a hotkey (Raycast, Alfred, Shortcuts, skhd) or run it
+# from a terminal. Recording only ever starts because you asked it to.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MA="${MA_BIN:-ma}"
+RECORDER_LABEL="com.meetingarchive.recorder"
+
+if ! command -v "$MA" >/dev/null 2>&1; then
+  echo "rec: '$MA' not found on PATH. Install the package (pip install -e .)" >&2
+  exit 1
+fi
+
+# Single source of truth for config: ask the Python side. That includes where
+# the recorder binary is, because `ma` on PATH is usually a symlink into the
+# virtualenv and its sibling directory does not contain ma-capture.
+eval "$("$MA" rec-config)"
+MA_CAPTURE="$MA_CAPTURE_BIN"
+[[ -x "$MA_CAPTURE" ]] || \
+  echo "rec: warning: recorder not found at $MA_CAPTURE; re-run 'pip install -e .'" >&2
+
+STATE_FILE="$MA_ROOT/.recording"
+REQUEST_FILE="$MA_ROOT/.capture-request"
+ERROR_FILE="$MA_ROOT/.capture-error"
+mkdir -p "$MA_IN_PROGRESS" "$MA_LOGS"
+
+# Everything a stop needs to say out loud ends up here. `rec stop` is usually
+# launched from the menu bar, which discards stderr, so a refusal that is only
+# printed is a refusal nobody ever sees -- which is exactly how two meetings
+# once ended up stranded in in-progress with no explanation anywhere.
+log_line() {
+  printf '%s rec: %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$*" >> "$MA_LOGS/rec.log"
+}
+
+# The message is passed as an argument rather than interpolated into the
+# AppleScript, so a quote in an ffmpeg error cannot break the dialog.
+alert() {
+  nohup /usr/bin/osascript \
+    -e 'on run argv' \
+    -e 'display alert "Meeting Archive" message (item 1 of argv) as critical' \
+    -e 'end run' \
+    -- "$1" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
+die() { log_line "$*"; alert "$*"; echo "rec: $*" >&2; exit 1; }
+
+is_recording() {
+  [[ -f "$STATE_FILE" ]] || return 1
+  local pid
+  pid="$(sed -n 1p "$STATE_FILE")"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+do_start() {
+  local mode="${1:-call}"
+  if [[ "$mode" != "call" && "$mode" != "room" ]]; then
+    die "unknown mode '$mode'; expected call or room"
+  fi
+  if is_recording; then
+    die "already recording (started $(sed -n 4p "$STATE_FILE"))"
+  fi
+  # A stale state file means a previous ffmpeg died. Recover, don't refuse.
+  [[ -f "$STATE_FILE" ]] && rm -f "$STATE_FILE"
+
+  [[ "$MA_DEVICE_SELECTOR" == "-1" || -z "$MA_DEVICE_SELECTOR" ]] && \
+    die "audio device is not set. Run 'ma devices' and set audio.device_name."
+
+  local meeting_id raw started_at started_epoch
+  meeting_id="$(date +%Y-%m-%dT%H-%M-%S)"
+  raw="$MA_IN_PROGRESS/${meeting_id}__raw.wav"
+
+  local required_channels
+  required_channels="$MA_MIC_REQUIRED_CHANNELS"
+  [[ "$mode" == "call" ]] && required_channels="$MA_CALL_REQUIRED_CHANNELS"
+
+  local pid
+  # `die` inside a command substitution only kills the subshell, so the exit
+  # status has to be checked here or a failed start would carry on with an
+  # empty pid and look like a successful recording.
+  if recorder_agent_installed; then
+    pid="$(start_via_launchd "$raw" "$required_channels")" || exit 1
+  else
+    pid="$(start_directly "$raw" "$required_channels")" || exit 1
+  fi
+  [[ -n "$pid" ]] || die "recording did not start"
+
+  # Start time means "ffmpeg is now receiving samples", not "the user
+  # clicked". The device probe and launchd startup take a few seconds; counting
+  # those would make every short recording appear to have lost audio.
+  started_at="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  # Also stored as epoch seconds. The menu bar needs elapsed time, and
+  # `date +%s` arithmetic is portable where parsing an ISO string back with
+  # `date -j -f` is BSD-only and fails silently into a blank timer.
+  started_epoch="$(date +%s)"
+
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$pid" "$meeting_id" "$raw" "$started_at" "$mode" "$started_epoch" > "$STATE_FILE"
+  echo "recording: $meeting_id (mode: $mode)"
+}
+
+
+# Microphone permission on macOS belongs to the "responsible process", which
+# for anything the menu bar launches is SwiftBar -- an app that declares no
+# NSMicrophoneUsageDescription and so can never hold that permission. Rather
+# than fail, macOS feeds it silence. Handing the capture to launchd makes the
+# recorder responsible for itself, so the permission is asked for once and
+# granted to this tool.
+recorder_agent_installed() {
+  launchctl print "gui/$(id -u)/$RECORDER_LABEL" >/dev/null 2>&1
+}
+
+
+# Both start paths run the same program, `ma-capture`, and it does its own
+# device checks. The only difference is who its parent is, which is the whole
+# point: launchd for the menu bar, the terminal for the command line.
+write_request() {
+  local raw="$1" required_channels="$2"
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$raw" "$MA_DEVICE_SELECTOR" "$MA_SAMPLE_RATE" "$required_channels" "$MA_LOGS" \
+    > "$REQUEST_FILE"
+  rm -f "$ERROR_FILE"
+}
+
+# The recorder creates the wav only after the device has proven it is really
+# delivering audio, so the file appearing is the signal that recording has
+# begun. A failure arrives instead as a message in the error file.
+await_capture() {
+  local raw="$1" pid="$2" waited=0
+  while (( waited < 150 )); do
+    if [[ -s "$ERROR_FILE" ]]; then
+      local message
+      message="$(cat "$ERROR_FILE")"
+      rm -f "$ERROR_FILE"
+      die "$message"
+    fi
+    [[ -s "$raw" ]] && return 0
+    kill -0 "$pid" 2>/dev/null || \
+      die "the recorder exited before it started recording; see $MA_LOGS/recorder.log"
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  die "the recorder did not start within 15s; see $MA_LOGS/recorder.log"
+}
+
+
+start_via_launchd() {
+  local raw="$1" required_channels="$2"
+  write_request "$raw" "$required_channels"
+
+  launchctl kickstart -k "gui/$(id -u)/$RECORDER_LABEL" >/dev/null 2>&1 \
+    || die "could not start the recorder job. Re-run ui/install-ui.sh."
+
+  # The job takes a moment to appear, and its pid is the one `rec stop` has to
+  # signal, so it has to be read back from launchd rather than assumed.
+  local waited=0 pid=""
+  while (( waited < 100 )); do
+    if [[ -s "$ERROR_FILE" ]]; then
+      local message
+      message="$(cat "$ERROR_FILE")"
+      rm -f "$ERROR_FILE"
+      die "$message"
+    fi
+    pid="$(launchctl print "gui/$(id -u)/$RECORDER_LABEL" 2>/dev/null \
+      | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)"
+    [[ -n "$pid" ]] && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [[ -n "$pid" ]] || die "the recorder job did not start; see $MA_LOGS/recorder.log"
+
+  await_capture "$raw" "$pid"
+  printf '%s' "$pid"
+}
+
+
+# Used from a terminal, where the terminal itself holds the microphone
+# permission and launchd is unnecessary.
+start_directly() {
+  local raw="$1" required_channels="$2"
+  write_request "$raw" "$required_channels"
+
+  nohup "$MA_CAPTURE" "$REQUEST_FILE" >>"$MA_LOGS/rec.log" 2>&1 &
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+
+  await_capture "$raw" "$pid"
+  printf '%s' "$pid"
+}
+
+
+do_stop() {
+  [[ -f "$STATE_FILE" ]] || die "not recording"
+
+  local pid meeting_id raw started_at mode started_epoch expected_duration
+  pid="$(sed -n 1p "$STATE_FILE")"
+  meeting_id="$(sed -n 2p "$STATE_FILE")"
+  raw="$(sed -n 3p "$STATE_FILE")"
+  started_at="$(sed -n 4p "$STATE_FILE")"
+  # Older state files have no mode line; default rather than fail a stop.
+  mode="$(sed -n 5p "$STATE_FILE")"
+  [[ -n "$mode" ]] || mode="call"
+  started_epoch="$(sed -n 6p "$STATE_FILE")"
+  if [[ "$started_epoch" =~ ^[0-9]+$ ]]; then
+    expected_duration=$(( $(date +%s) - started_epoch ))
+  else
+    expected_duration=0
+  fi
+
+  # SIGINT, not SIGKILL: ffmpeg needs to write the wav header on the way out.
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -INT "$pid" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 20 ]]; do
+      sleep 0.5
+      waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "rec: ffmpeg did not exit cleanly, forcing" >&2
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  rm -f "$STATE_FILE"
+
+  [[ -s "$raw" ]] || die "capture file is empty: $raw"
+
+  # Splits the channels and publishes the manifest. The watcher takes it from
+  # here; this command does not transcribe and does not block.
+  #
+  # Stop is nearly always clicked in the menu bar, which throws stderr away, so
+  # a refusal has to be captured and put on screen. Without this, a rejected
+  # recording just vanished: no inbox entry, no progress, no error.
+  local finalized errors
+  errors="$(mktemp -t rec-finalize)"
+  if finalized="$("$MA" finalize "$raw" --started-at "$started_at" --mode "$mode" \
+      --expected-duration "$expected_duration" 2>"$errors")"; then
+    cat "$errors" >> "$MA_LOGS/rec.log"
+    rm -f "$errors"
+    log_line "saved $finalized"
+    echo "saved: $finalized"
+  else
+    cat "$errors" >> "$MA_LOGS/rec.log"
+    # The log lines carry a timestamp prefix; the message does not.
+    local message
+    message="$(sed -n 's/^[0-9-]* [0-9:,]* ERROR *[^:]*: //p' "$errors" | tail -1)"
+    [[ -n "$message" ]] || message="$(tail -1 "$errors")"
+    rm -f "$errors"
+    log_line "finalize refused $meeting_id: $message"
+    alert "$meeting_id was not saved.
+
+$message"
+    echo "rec: $message" >&2
+    exit 1
+  fi
+
+  # Fire and forget. Dismissing this, or never seeing it, changes nothing.
+  if [[ -x "$SCRIPT_DIR/meeting-popup" ]]; then
+    nohup "$SCRIPT_DIR/meeting-popup" "$finalized" >/dev/null 2>&1 &
+    disown || true
+  fi
+}
+
+do_status() {
+  if is_recording; then
+    echo "recording $(sed -n 2p "$STATE_FILE") since $(sed -n 4p "$STATE_FILE")" \
+         "(mode: $(sed -n 5p "$STATE_FILE" || echo call))"
+  else
+    echo "not recording"
+    [[ -f "$STATE_FILE" ]] && echo "(stale state file present; 'rec start' will clear it)"
+  fi
+}
+
+case "${1:-}" in
+  start)  do_start "${2:-call}" ;;
+  stop)   do_stop ;;
+  toggle) if is_recording; then do_stop; else do_start "${2:-call}"; fi ;;
+  status) do_status ;;
+  *) echo "usage: rec {start|stop|toggle|status} [call|room]" >&2; exit 2 ;;
+esac

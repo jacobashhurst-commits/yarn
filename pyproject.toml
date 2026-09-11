@@ -1,0 +1,33 @@
+[project]
+name = "meeting-archive"
+version = "0.1.0"
+description = "Local, manually triggered meeting transcription and semantic search archive"
+requires-python = ">=3.11"
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "chromadb>=0.5.0",
+    "sherpa-onnx>=1.12.0",
+    # Capture goes through CoreAudio, not ffmpeg. The wheel carries its own
+    # libportaudio, so this adds no system dependency. See capture.py for what
+    # ffmpeg was doing to the audio.
+    "sounddevice>=0.4.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+ma = "meeting_archive.cli:main"
+# Its own entry point rather than an `ma` subcommand, so a meeting-long
+# recording does not sit there holding Chroma and Whisper in memory.
+ma-capture = "meeting_archive.capture:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["meeting_archive"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

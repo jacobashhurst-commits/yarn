@@ -1,0 +1,131 @@
+# Copy to ~/.config/meeting-archive/config.toml and edit.
+# Everything here has a default except audio.device_index, which is specific
+# to your machine. Run `ma devices` to find it.
+
+root = "~/meeting-archive"
+own_label = "Jacob"
+other_label = "Other"
+# Label for in-room recordings, where one microphone carries several people and
+# none of them can be told apart. Don't set this to your own name: attributing
+# a whole room to yourself is wrong in a way you'd never notice later.
+room_label = "Unknown"
+collection = "meetings"
+
+# Audio is kept this many days after a meeting is transcribed, then deleted.
+# Transcripts are kept forever. Audio for a meeting that failed to transcribe
+# is never deleted, whatever this says.
+audio_retention_days = 7
+
+[audio]
+# Index of the macOS aggregate device combining your mic and BlackHole.
+# Prefer the stable name: AVFoundation indices change whenever devices such as
+# AirPods connect. device_index remains as a fallback for unnamed hardware.
+device_name = "Aggregate Device"
+device_index = -1
+
+# Which channels of that device belong to whom, 0-based, in the aggregate
+# device's own channel order. The Subdevices strip in Audio MIDI Setup shows
+# the order, and it follows the order you ticked the devices, NOT the order
+# they appear in the list. Two common layouts:
+#
+#   BlackHole ticked first, mic second:   sys = [0, 1], mic = [2]
+#   mic ticked first, BlackHole second:   mic = [0],    sys = [1, 2]
+#
+# Get this backwards and everything still appears to work -- transcripts are
+# written, search returns hits -- but every speaker label is reversed. Verify
+# by playing back the two split files before trusting it.
+#
+# In room mode only mic_channels is used; system audio is ignored entirely.
+mic_channels = [2]
+sys_channels = [0, 1]
+sample_rate = 16000
+
+[whisper]
+# large-v3-turbo is the right default: near large-v3 accuracy at a fraction of
+# the decode cost. Drop to "medium" or "small" only if your machine can't keep
+# up with the length of meetings you record.
+model = "large-v3-turbo"
+
+# whisper.cpp is the only one of these engines with a Metal path, and on Apple
+# Silicon that is worth about 10x for byte-identical weights. faster-whisper
+# stays available for CUDA servers, and as the fallback if the binary or the
+# converted model goes missing: set engine = "faster_whisper".
+engine = "whisper_cpp"
+command = "/opt/homebrew/bin/whisper-cli"
+model_path = "~/yarn/meeting-archive/models/whisper-cpp/ggml-model.bin"
+# Metal does the decoding; these threads feed it.
+num_threads = 8
+
+# device and compute_type are only read when engine = "faster_whisper".
+device = "cpu"
+compute_type = "int8"
+# The model is downloaded during setup; meeting processing never checks a
+# remote model host.
+local_files_only = true
+language = "en"
+# Greedy decoding (beam_size = 1) finished 10% sooner but changed 8% of the
+# words on a 10-minute recording, so the beam search earns its keep.
+beam_size = 5
+
+# The "everyone else" channel is mostly silence whenever you're the one
+# talking, and long silence is where Whisper starts inventing text. faster-
+# whisper's default only strips silence longer than 2000ms, which is far too
+# permissive for a half-empty channel.
+vad_filter = true
+vad_min_silence_ms = 700
+condition_on_previous_text = false
+
+[diarize]
+# Distinguish individual voices on the system-audio and room channels. Runtime
+# and model files are open downloads from sherpa-onnx's GitHub releases; no
+# account or token is used and inference is entirely local.
+enabled = true
+model = "sherpa-onnx-pyannote-segmentation-3.0"
+segmentation_model = "~/meeting-archive/models/diarization/sherpa-onnx-pyannote-segmentation-3-0/model.onnx"
+embedding_model = "~/meeting-archive/models/diarization/speaker-embedding.onnx"
+num_threads = 8
+cluster_threshold = 0.9
+diarize_channels = ["sys", "room"]
+# 0 lets the model determine the number of speakers.
+min_speakers = 0
+max_speakers = 0
+min_span_s = 0.6
+# Once transcription finishes, show optional dialogs with one recognisable
+# quote per unidentified voice.
+identify_popup = true
+
+[chunk]
+target_chars = 1200
+overlap_turns = 1
+max_turn_chars = 1500
+# Same speaker, gap under this, becomes one turn.
+coalesce_gap_s = 2.0
+max_turn_s = 90.0
+# Prepend "Meeting <date> | Present: ... | Notes: ..." to each chunk before
+# embedding. Costs a little precision, buys a lot of recall on queries like
+# "what did John say about pricing".
+include_context_header = true
+
+[names]
+enabled = true
+# Your own names, so your self-introductions and people greeting you don't get
+# suggested as attendees. Include nicknames.
+own_names = ["Jacob", "Jake"]
+# Show a second dismissible popup with detected names, but only when the
+# on-stop popup was dismissed without an attendee list.
+suggest_popup = true
+# Raise to 2 to only suggest names heard in more than one turn: fewer
+# suggestions, higher confidence.
+min_count = 1
+
+[summary]
+# A proper summary is produced locally after transcription. The model must
+# already exist in `ollama list`; the archive never downloads one implicitly.
+enabled = true
+command = "/usr/local/bin/ollama"
+# Probe only. Do not use `ollama list` to detect this — that starts the daemon.
+host = "http://127.0.0.1:11434"
+model = "qwen3.5:9b"
+timeout_s = 600
+# Longer transcripts are summarized in chunks and combined locally.
+chunk_chars = 40000
