@@ -22,7 +22,7 @@ import logging
 import time
 from pathlib import Path
 
-from . import pipeline, popup, records
+from . import jobs, pipeline, popup, records, resources
 from .config import Config
 from .diarize import Diarizer
 from .names import attendee_suggestion
@@ -36,6 +36,8 @@ log = logging.getLogger(__name__)
 
 def run(cfg: Config, interval: float = 5.0, once: bool = False) -> None:
     cfg.ensure_dirs()
+    resources.nice_background()
+    jobs.recover_stale(cfg)
     transcriber = Transcriber(cfg.whisper)
     diarizer = Diarizer(cfg.diarize)
     summarizer = Summarizer(cfg.summary)
@@ -67,6 +69,14 @@ def sweep_inbox(
     for manifest_path in sorted(cfg.inbox_dir.glob("*.json")):
         if manifest_path.name.endswith(".partial"):
             continue
+        if jobs.is_paused(cfg):
+            log.info("processing paused; leaving %s in the inbox", manifest_path.name)
+            break
+        if resources.should_defer_heavy_stage(cfg):
+            log.info(
+                "deferring processing while a recording is under memory pressure"
+            )
+            break
         try:
             meeting_id = pipeline.process(
                 cfg, manifest_path, transcriber, store, diarizer, summarizer

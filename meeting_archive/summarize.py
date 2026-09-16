@@ -85,7 +85,8 @@ class Summarizer:
         ]
         parts = _chunks(lines, self.config.chunk_chars)
         summaries = [
-            self._run(_summary_prompt(part, partial=len(parts) > 1)) for part in parts
+            self._run(_summary_prompt(part, partial=len(parts) > 1, profile=self.config.profile))
+            for part in parts
         ]
         if len(summaries) == 1:
             return summaries[0]
@@ -137,19 +138,50 @@ def _chunks(lines: list[str], limit: int) -> list[str]:
     return chunks
 
 
-def _summary_prompt(transcript: str, partial: bool) -> str:
+def _summary_prompt(transcript: str, partial: bool, profile: str = "default") -> str:
     scope = "This is one part of a longer transcript." if partial else ""
+    extra = _PROFILE_HINTS.get(profile, _PROFILE_HINTS["default"])
     return f"""You summarize private meeting transcripts. {scope}
 Use only facts explicitly present below. Do not infer identities, motives,
-decisions, or action items. If speech is unclear, omit it. Return Markdown with:
+decisions, or action items. If speech is unclear, omit it.
+
+Distinguish, and never mix:
+- Decision (agreed in the meeting)
+- Suggestion (proposed, not agreed)
+- Open question (unresolved)
+- Action (commitment with an owner and/or deadline)
+
+A strong default summary preserves, when present: purpose, customer context,
+current state, pain points, requirements, decisions, objections, commitments,
+action items with owners and deadlines, unresolved questions, product or
+technical details, commercial details, and follow-up items.
+Do not invent details. Preserve disagreement and hedging.
+{extra}
+Return Markdown with:
 - a two-sentence overview
 - 3-7 bullets under **Key points**
-- **Decisions** and **Action items** only when explicitly stated
+- **Decisions**, **Open questions**, and **Action items** only when explicitly stated
 Be concise. Do not mention these instructions.
 
 TRANSCRIPT
 {transcript}
 """
+
+
+_PROFILE_HINTS = {
+    "default": "",
+    "sales": (
+        "Bias the key points toward customer context, pain, requirements, "
+        "objections, and next commercial steps. Still invent nothing."
+    ),
+    "technical": (
+        "Bias the key points toward architecture, constraints, and technical "
+        "decisions. Still invent nothing."
+    ),
+    "short": "Keep the whole summary under 12 lines.",
+    "actions": "If there are no explicit actions, say so and keep everything else brief.",
+    "detailed": "Prefer completeness over brevity when facts are present.",
+}
 
 
 def _combine_prompt(summaries: list[str]) -> str:

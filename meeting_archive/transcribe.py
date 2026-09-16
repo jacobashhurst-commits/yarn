@@ -77,6 +77,10 @@ class Transcriber:
             )
         return self._model
 
+    def unload(self) -> None:
+        """Drop the in-process faster-whisper weights. whisper.cpp is a subprocess."""
+        self._model = None
+
     def transcribe_file(
         self,
         path: Path,

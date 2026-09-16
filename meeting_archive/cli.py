@@ -8,6 +8,13 @@
     ma notes <id> ...         save popup output (internal)
     ma watch                  the long-running processor
     ma process [<id>]         process the inbox once, then exit
+    ma queue                  show the persistent processing queue
+    ma pause / resume         pause or resume background processing
+    ma import-audio PATH      convert a recording and enqueue it
+    ma import-transcript PATH archive a coworker transcript without Whisper
+    ma library                list meetings; --html writes a local viewer
+    ma keep-audio / delete-audio
+    ma setting KEY VALUE      recognise_known, speaker_engine, audio_retention
     ma rediarize <id>         rebuild speaker labels without rerunning Whisper
     ma ingest <id>            reindex one meeting from its transcript
     ma rebuild                reindex every transcript on disk
@@ -16,6 +23,7 @@
     ma search <query>         sanity-check search without going through MCP
     ma names <id>             show detected names and the evidence for each
     ma speakers <id>          show diarized voices; --set key=name to name one
+    ma benchmark              run local benchmark_audio/ files if present
     ma status                 counts and recent meetings
 """
 
@@ -29,8 +37,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import audio, capture, models, pipeline, records, retention, watcher
-from .config import Config, load_config
+from . import audio, capture, jobs, models, pipeline, records, retention, watcher
+from .config import Config, load_config, write_setting
 from .diarize import Diarizer
 from .models import format_timestamp
 from .records import Transcript
@@ -450,6 +458,17 @@ def cmd_speakers(cfg: Config, args) -> int:
             speakers=updates,
             applied=False,
         )
+        try:
+            from . import speakers as speaker_memory
+
+            for name in updates.values():
+                speaker_memory.remember_confirmation(
+                    cfg, name=name, meeting_id=args.meeting_id
+                )
+        except Exception:
+            logging.getLogger("meeting_archive").exception(
+                "could not update speaker library for %s", args.meeting_id
+            )
         for key, name in sorted(updates.items()):
             print(f"{key} -> {name}")
         print("run `ma ingest` or let the watcher pick it up to relabel the transcript")
@@ -608,7 +627,118 @@ def cmd_prune(cfg: Config, args) -> int:
     print(("dry run -- " if args.dry_run else "") + result.summary())
     for name in result.kept_no_transcript:
         print(f"  kept (no transcript): {name}")
+    for name in result.kept_override:
+        print(f"  kept (keep_audio): {name}")
     return 0
+
+
+def cmd_queue(cfg: Config, args) -> int:
+    items = jobs.list_jobs(cfg)
+    if not items:
+        print("queue is empty")
+        return 0
+    for job in items:
+        print(
+            f"{job.meeting_id}  {job.state:<10}  {job.current_stage:<12}  "
+            f"{job.source}  {job.error}".rstrip()
+        )
+    return 0
+
+
+def cmd_pause(cfg: Config, args) -> int:
+    jobs.set_paused(cfg, True, reason="manual")
+    print("processing paused; recording is unaffected")
+    return 0
+
+
+def cmd_resume(cfg: Config, args) -> int:
+    jobs.set_paused(cfg, False)
+    print("processing resumed")
+    return 0
+
+
+def cmd_import_audio(cfg: Config, args) -> int:
+    from .imports import ImportFailed, import_audio
+
+    try:
+        manifest = import_audio(cfg, args.path, title=args.title)
+    except ImportFailed as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(f"queued {manifest.meeting_id} ({manifest.duration_s:.1f}s)")
+    return 0
+
+
+def cmd_import_transcript(cfg: Config, args) -> int:
+    from .imports import ImportFailed, import_transcript
+
+    try:
+        store = MeetingStore(cfg.chroma_dir, cfg.collection)
+        transcript = import_transcript(cfg, args.path, title=args.title, store=store)
+    except ImportFailed as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(f"imported {transcript.meeting_id} ({len(transcript.turns)} turn(s))")
+    return 0
+
+
+def cmd_library(cfg: Config, args) -> int:
+    from . import library
+
+    rows = library.list_meetings(cfg)
+    if args.html:
+        path = library.render_html(cfg, rows)
+        print(path)
+        return 0
+    if not rows:
+        print("no meetings")
+        return 0
+    for row in rows:
+        mins = int(row.duration_s // 60)
+        secs = int(row.duration_s % 60)
+        print(
+            f"{row.date}  {row.state:<10}  {mins}m{secs:02d}s  "
+            f"{row.title}  speakers={row.speakers}  "
+            f"{'summary' if row.has_summary else 'no-summary'}"
+        )
+    return 0
+
+
+def cmd_keep_audio(cfg: Config, args) -> int:
+    retention.set_keep_audio(cfg, args.meeting_id, True)
+    print(f"{args.meeting_id}: keep_audio on")
+    return 0
+
+
+def cmd_delete_audio(cfg: Config, args) -> int:
+    try:
+        removed = retention.delete_meeting_audio(cfg, args.meeting_id)
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(f"deleted {len(removed)} audio file(s)")
+    return 0
+
+
+def cmd_setting(cfg: Config, args) -> int:
+    raw = args.value.strip()
+    lowered = raw.lower()
+    if args.key in {"recognise_known", "cleanup_enabled", "pause_on_pressure"}:
+        if lowered not in {"on", "off", "true", "false", "1", "0"}:
+            print("value must be on or off", file=sys.stderr)
+            return 1
+        value: bool | str = lowered in {"on", "true", "1"}
+    else:
+        value = raw
+    write_setting(cfg, args.key, value)
+    print(f"{args.key} = {value}")
+    return 0
+
+
+def cmd_benchmark(cfg: Config, args) -> int:
+    from .benchmark import run_benchmark
+
+    return run_benchmark(cfg)
 
 
 def cmd_search(cfg: Config, args) -> int:
@@ -652,6 +782,10 @@ def cmd_status(cfg: Config, args) -> int:
     print(f"root:        {cfg.root}")
     print(f"transcripts: {len(transcripts)}")
     print(f"inbox:       {len(list(cfg.inbox_dir.glob('*.json')))} waiting")
+    queued = jobs.queued(cfg)
+    print(f"queue:       {len(queued)} job(s)")
+    for job in queued[:5]:
+        print(f"  {job.meeting_id}  {job.state}  {job.current_stage}")
     print(f"failed:      {len(list(cfg.failed_dir.glob('*.json')))}")
     # A raw capture left here while nothing is recording is a meeting that was
     # never published: finalize refused it, or the recorder died. It would
@@ -664,7 +798,7 @@ def cmd_status(cfg: Config, args) -> int:
     audio_files = [p for p in cfg.audio_archive_dir.glob("*") if p.is_file()]
     size_mb = sum(p.stat().st_size for p in audio_files) / (1024 * 1024)
     print(f"audio kept:  {len(audio_files)} file(s), {size_mb:.1f} MB "
-          f"(retention {cfg.audio_retention_days}d)")
+          f"(retention {cfg.audio_retention})")
     try:
         store = MeetingStore(cfg.chroma_dir, cfg.collection)
         print(f"indexed:     {store.count()} chunks")
@@ -796,6 +930,60 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_names)
 
     sub.add_parser("status", help="archive summary").set_defaults(func=cmd_status)
+
+    sub.add_parser("queue", help="show the processing queue").set_defaults(
+        func=cmd_queue
+    )
+    sub.add_parser("pause", help="pause background processing").set_defaults(
+        func=cmd_pause
+    )
+    sub.add_parser("resume", help="resume background processing").set_defaults(
+        func=cmd_resume
+    )
+
+    p = sub.add_parser("import-audio", help="import a recording into the archive")
+    p.add_argument("path", type=Path)
+    p.add_argument("--title", default="")
+    p.set_defaults(func=cmd_import_audio)
+
+    p = sub.add_parser(
+        "import-transcript", help="import a coworker transcript without Whisper"
+    )
+    p.add_argument("path", type=Path)
+    p.add_argument("--title", default="")
+    p.set_defaults(func=cmd_import_transcript)
+
+    p = sub.add_parser("library", help="list meetings in the archive")
+    p.add_argument("--html", action="store_true")
+    p.set_defaults(func=cmd_library)
+
+    p = sub.add_parser("keep-audio", help="exempt a meeting from audio pruning")
+    p.add_argument("meeting_id")
+    p.set_defaults(func=cmd_keep_audio)
+
+    p = sub.add_parser(
+        "delete-audio", help="delete archived audio for a transcribed meeting"
+    )
+    p.add_argument("meeting_id")
+    p.set_defaults(func=cmd_delete_audio)
+
+    p = sub.add_parser("setting", help="write a machine-local Yarn setting")
+    p.add_argument(
+        "key",
+        choices=(
+            "recognise_known",
+            "speaker_engine",
+            "audio_retention",
+            "cleanup_enabled",
+            "pause_on_pressure",
+        ),
+    )
+    p.add_argument("value")
+    p.set_defaults(func=cmd_setting)
+
+    sub.add_parser(
+        "benchmark", help="time local benchmark_audio/ files if present"
+    ).set_defaults(func=cmd_benchmark)
     return parser
 
 

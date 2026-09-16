@@ -122,6 +122,8 @@ class Manifest:
     ended_at: str = ""
     duration_s: float = 0.0
     raw_file: str = ""
+    source: str = "native"
+    title: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -131,6 +133,8 @@ class Manifest:
             "ended_at": self.ended_at,
             "duration_s": round(self.duration_s, 3),
             "raw_file": self.raw_file,
+            "source": self.source,
+            "title": self.title,
         }
 
     @classmethod
@@ -142,6 +146,8 @@ class Manifest:
             ended_at=d.get("ended_at", ""),
             duration_s=float(d.get("duration_s") or 0.0),
             raw_file=d.get("raw_file", ""),
+            source=d.get("source", "native"),
+            title=d.get("title", ""),
         )
 
     @classmethod
@@ -186,6 +192,10 @@ class Transcript:
     # Set when diarization was wanted but could not run. Recorded rather than
     # raised: a missing local model file must not cost a transcript.
     diarize_error: str = ""
+    source: str = "native"
+    whisper_engine: str = ""
+    # Turns as they were before optional cleanup. Empty means cleanup never ran.
+    raw_turns: list[Turn] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -219,6 +229,12 @@ class Transcript:
             d["speaker_guesses"] = [g.to_dict() for g in self.speaker_guesses]
         if self.speaker_spans:
             d["speaker_spans"] = [s.to_dict() for s in self.speaker_spans]
+        if self.source and self.source != "native":
+            d["source"] = self.source
+        if self.whisper_engine:
+            d["whisper_engine"] = self.whisper_engine
+        if self.raw_turns:
+            d["raw_turns"] = [t.to_dict() for t in self.raw_turns]
         return d
 
     @classmethod
@@ -260,6 +276,9 @@ class Transcript:
             ],
             diarize_model=d.get("diarize_model", ""),
             diarize_error=d.get("diarize_error", ""),
+            source=d.get("source", "native"),
+            whisper_engine=d.get("whisper_engine", ""),
+            raw_turns=[Turn.from_dict(t) for t in d.get("raw_turns") or []],
         )
 
     def unnamed_speakers(self, roster: dict | None = None) -> list[SpeakerProfile]:
@@ -390,6 +409,7 @@ def empty_notes(meeting_id: str) -> dict:
         "notes": "",
         "attendees": "",
         "speakers": {},
+        "keep_audio": False,
         "applied": True,
         "updated_at": "",
     }
@@ -467,6 +487,7 @@ def write_notes(
     attendees: str = "",
     speakers: dict | None = None,
     applied: bool = False,
+    keep_audio: bool | None = None,
 ) -> dict:
     """Save popup output. `applied=False` tells the watcher to reindex."""
     existing = read_notes(path)
@@ -484,6 +505,9 @@ def write_notes(
         "notes": notes or existing.get("notes", ""),
         "attendees": attendees or existing.get("attendees", ""),
         "speakers": merged_speakers,
+        "keep_audio": (
+            bool(existing.get("keep_audio")) if keep_audio is None else bool(keep_audio)
+        ),
         "applied": applied,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }

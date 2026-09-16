@@ -155,8 +155,9 @@ def test_resolve_device_finds_an_exact_name(monkeypatch):
 def test_resolve_device_refuses_too_few_channels(monkeypatch):
     """Call mode needs the mic and system audio; one channel cannot carry both."""
     install_fake_devices(monkeypatch, [MIC, AGGREGATE])
-    with pytest.raises(CaptureError, match="needs 3"):
+    with pytest.raises(CaptureError, match="needs 3") as caught:
         resolve_device("MacBook Pro Microphone", 3)
+    assert "Start Room" in str(caught.value)
 
 
 def test_resolve_device_lists_what_is_available_when_the_name_is_wrong(monkeypatch):

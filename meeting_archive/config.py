@@ -100,6 +100,25 @@ class DiarizeConfig:
     min_span_s: float = 0.6
     # Ask who each unidentified voice was, once the transcript exists.
     identify_popup: bool = True
+    # sherpa is the stable engine. pyannote is experimental; compare runs both.
+    engine: str = "sherpa"
+
+
+@dataclass
+class CleanupConfig:
+    enabled: bool = False
+
+
+@dataclass
+class SpeakersMemoryConfig:
+    recognise_known: bool = False
+
+
+@dataclass
+class ProcessingConfig:
+    # When a recording is live and the machine is under memory pressure, wait
+    # to start Whisper/Ollama. An in-flight stage still finishes.
+    pause_on_pressure: bool = True
 
 
 @dataclass
@@ -128,6 +147,8 @@ class SummaryConfig:
     timeout_s: int = 600
     # Longer transcripts are summarized in local chunks, then combined.
     chunk_chars: int = 40000
+    # default | sales | technical | short | actions | detailed
+    profile: str = "default"
 
 
 @dataclass
@@ -140,12 +161,16 @@ class Config:
     room_label: str = "Unknown"
     collection: str = "meetings"
     audio_retention_days: int = 7
+    audio_retention: str = "1_week"
     audio: AudioConfig = field(default_factory=AudioConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     diarize: DiarizeConfig = field(default_factory=DiarizeConfig)
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
     names: NamesConfig = field(default_factory=NamesConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    speakers_memory: SpeakersMemoryConfig = field(default_factory=SpeakersMemoryConfig)
+    processing: ProcessingConfig = field(default_factory=ProcessingConfig)
 
     # --- derived paths ---
     @property
@@ -185,6 +210,10 @@ class Config:
         return self.root / "logs"
 
     @property
+    def jobs_dir(self) -> Path:
+        return self.root / "jobs"
+
+    @property
     def processing_status(self) -> Path:
         return self.root / ".processing-status.json"
 
@@ -199,6 +228,7 @@ class Config:
             self.notes_dir,
             self.chroma_dir,
             self.logs_dir,
+            self.jobs_dir,
         ]
 
     def ensure_dirs(self) -> None:
@@ -307,6 +337,10 @@ def load_config(path: Path | None = None) -> Config:
             setattr(cfg, key, data[key])
     if "audio_retention_days" in data:
         cfg.audio_retention_days = int(data["audio_retention_days"])
+        cfg.audio_retention = retention_name(cfg.audio_retention_days)
+    if "audio_retention" in data:
+        cfg.audio_retention = str(data["audio_retention"])
+        cfg.audio_retention_days = retention_days(cfg.audio_retention)
 
     a = data.get("audio", {})
     if "device_index" in a:
@@ -352,6 +386,7 @@ def load_config(path: Path | None = None) -> Config:
         "max_speakers",
         "min_span_s",
         "identify_popup",
+        "engine",
     ):
         if key in d:
             setattr(cfg.diarize, key, d[key])
@@ -374,8 +409,83 @@ def load_config(path: Path | None = None) -> Config:
             setattr(cfg.names, key, n[key])
 
     s = data.get("summary", {})
-    for key in ("enabled", "command", "host", "model", "timeout_s", "chunk_chars"):
+    for key in ("enabled", "command", "host", "model", "timeout_s", "chunk_chars", "profile"):
         if key in s:
             setattr(cfg.summary, key, s[key])
 
+    c2 = data.get("cleanup", {})
+    if "enabled" in c2:
+        cfg.cleanup.enabled = bool(c2["enabled"])
+
+    sm = data.get("speakers_memory", {}) or data.get("speakers", {})
+    if "recognise_known" in sm:
+        cfg.speakers_memory.recognise_known = bool(sm["recognise_known"])
+
+    p = data.get("processing", {})
+    if "pause_on_pressure" in p:
+        cfg.processing.pause_on_pressure = bool(p["pause_on_pressure"])
+
+    _apply_settings_overlay(cfg)
     return cfg
+
+
+RETENTION_DAYS = {
+    "1_week": 7,
+    "week": 7,
+    "1_month": 30,
+    "month": 30,
+    "never": 0,
+}
+
+
+def retention_days(name: str) -> int:
+    if str(name).isdigit() or (str(name).startswith("-") and str(name)[1:].isdigit()):
+        return int(name)
+    return RETENTION_DAYS.get(str(name), 7)
+
+
+def retention_name(days: int) -> str:
+    if days <= 0:
+        return "never"
+    if days >= 28:
+        return "1_month"
+    return "1_week"
+
+
+def _apply_settings_overlay(cfg: Config) -> None:
+    """Machine-local toggles written by `ma setting` / SwiftBar.
+
+    Stored next to the archive so they do not require rewriting config.toml.
+    """
+    path = cfg.root / ".yarn-settings.json"
+    if not path.exists():
+        return
+    try:
+        overlay = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if "audio_retention" in overlay:
+        cfg.audio_retention = str(overlay["audio_retention"])
+        cfg.audio_retention_days = retention_days(cfg.audio_retention)
+    if "recognise_known" in overlay:
+        cfg.speakers_memory.recognise_known = bool(overlay["recognise_known"])
+    if "speaker_engine" in overlay:
+        cfg.diarize.engine = str(overlay["speaker_engine"])
+    if "cleanup_enabled" in overlay:
+        cfg.cleanup.enabled = bool(overlay["cleanup_enabled"])
+    if "pause_on_pressure" in overlay:
+        cfg.processing.pause_on_pressure = bool(overlay["pause_on_pressure"])
+
+
+def write_setting(cfg: Config, key: str, value) -> dict:
+    path = cfg.root / ".yarn-settings.json"
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    data[key] = value
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _apply_settings_overlay(cfg)
+    return data

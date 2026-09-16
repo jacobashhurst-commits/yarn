@@ -75,6 +75,10 @@ class Diarizer:
         """The mic channel is excluded here, not by the caller forgetting to."""
         return self.enabled and channel in self.config.diarize_channels
 
+    def unload(self) -> None:
+        """Drop cached sherpa pipelines so Neo can free a few hundred MB."""
+        self._pipelines.clear()
+
     @property
     def pipeline(self):
         """The automatic/default pipeline, retained for compatibility."""

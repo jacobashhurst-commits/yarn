@@ -9,3 +9,4 @@ dist/
 *.wav
 .env
 .env.*
+benchmark_audio/

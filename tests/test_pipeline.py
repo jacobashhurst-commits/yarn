@@ -494,7 +494,7 @@ def test_process_reports_progress_phases_and_clears_when_done(cfg, monkeypatch):
     monkeypatch.setattr(
         pipeline,
         "_processing_status",
-        lambda cfg, meeting_id, phase, percent, detail="": events.append(
+        lambda cfg, meeting_id, phase, percent, detail="", **_kwargs: events.append(
             (phase, percent, detail)
         ),
     )
@@ -516,9 +516,13 @@ def test_process_reports_progress_phases_and_clears_when_done(cfg, monkeypatch):
     assert "Transcribing" in phases
     assert "Identifying speakers" in phases
     assert "Saving transcript" in phases
-    assert "Indexing for search" in phases
+    assert "Indexing" in phases
     assert phases[-1] == "cleared"
     assert all(0 <= percent <= 100 for _, percent, _ in events)
+    # Honest progress: no invented global 65/82 waypoints.
+    speaker_events = [percent for phase, percent, _ in events if phase == "Identifying speakers"]
+    assert speaker_events
+    assert all(p == 0 for p in speaker_events)
 
 
 @needs_ffmpeg

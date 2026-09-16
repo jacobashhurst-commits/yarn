@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# SwiftBar helper: pick a file and import it into the Yarn archive.
+set -euo pipefail
+kind="${1:-audio}"
+ma_bin="${2:-ma}"
+file="$(/usr/bin/osascript -e 'POSIX path of (choose file)' 2>/dev/null || true)"
+file="${file//$'\r'/}"
+[[ -n "${file:-}" ]] || exit 0
+case "$kind" in
+  audio) exec "$ma_bin" import-audio "$file" ;;
+  transcript) exec "$ma_bin" import-transcript "$file" ;;
+  *) echo "usage: yarn-import audio|transcript [ma-bin]" >&2; exit 2 ;;
+esac

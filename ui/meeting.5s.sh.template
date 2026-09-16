@@ -17,7 +17,10 @@ TRANSCRIPTS="$MA_ROOT/transcripts"
 INBOX="$MA_ROOT/recordings/inbox"
 FAILED="$MA_ROOT/recordings/failed"
 IN_PROGRESS="$MA_ROOT/recordings/in-progress"
+JOBS="$MA_ROOT/jobs"
 PROCESS_STATUS="$MA_ROOT/.processing-status.json"
+PROCESS_CONTROL="$MA_ROOT/.processing-control.json"
+SETTINGS="$MA_ROOT/.yarn-settings.json"
 
 recording=false
 meeting_id=""
@@ -48,23 +51,44 @@ elapsed() {
 
 count_files() { ls -1 "$1" 2>/dev/null | grep -c "$2" || true; }
 
+json_raw() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  plutil -extract "$key" raw -o - "$file" 2>/dev/null || true
+}
+
 processing=false
 phase=""
 percent=0
 detail=""
+indeterminate=false
 if [[ -f "$PROCESS_STATUS" ]]; then
-  phase="$(plutil -extract phase raw -o - "$PROCESS_STATUS" 2>/dev/null || true)"
-  percent="$(plutil -extract percent raw -o - "$PROCESS_STATUS" 2>/dev/null || true)"
-  detail="$(plutil -extract detail raw -o - "$PROCESS_STATUS" 2>/dev/null || true)"
-  updated="$(plutil -extract updated_epoch raw -o - "$PROCESS_STATUS" 2>/dev/null || true)"
-  if [[ -n "$phase" && "$percent" =~ ^[0-9]+$ && "$updated" =~ ^[0-9]+$ ]] \
+  phase="$(json_raw "$PROCESS_STATUS" phase)"
+  percent="$(json_raw "$PROCESS_STATUS" percent)"
+  detail="$(json_raw "$PROCESS_STATUS" detail)"
+  updated="$(json_raw "$PROCESS_STATUS" updated_epoch)"
+  indeterminate="$(json_raw "$PROCESS_STATUS" indeterminate)"
+  if [[ -n "$phase" && "$updated" =~ ^[0-9]+$ ]] \
       && (( $(date +%s) - updated < 7200 )); then
     processing=true
   fi
 fi
 
+paused=false
+if [[ -f "$PROCESS_CONTROL" ]]; then
+  paused_flag="$(json_raw "$PROCESS_CONTROL" paused)"
+  [[ "$paused_flag" == "true" || "$paused_flag" == "1" ]] && paused=true
+fi
+
+recognise="$(json_raw "$SETTINGS" recognise_known)"
+engine="$(json_raw "$SETTINGS" speaker_engine)"
+retention="$(json_raw "$SETTINGS" audio_retention)"
+[[ -n "$engine" ]] || engine="sherpa"
+[[ -n "$retention" ]] || retention="1_week"
+
 progress_bar() {
   local value="$1" width=18 bar="" i filled
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
   filled=$(( value * width / 100 ))
   for ((i=0; i<width; i++)); do
     if (( i < filled )); then bar="${bar}█"; else bar="${bar}░"; fi
@@ -72,7 +96,20 @@ progress_bar() {
   printf '%s' "$bar"
 }
 
+stage_line() {
+  if [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
+    printf '%s%s' "$phase" "${detail:+ — $detail}"
+  else
+    printf '%s %s%%%s' "$phase" "$percent" "${detail:+ — $detail}"
+  fi
+}
+
+pending="$(count_files "$INBOX" '\.json$')"
+queue_jobs="$(count_files "$JOBS" '\.json$')"
+
 # ---- menu bar title ----
+# Recording and processing are independent: a live capture always wins the
+# icon, but processing stays visible in the menu underneath.
 if $recording; then
   el="$(elapsed)"
   if [[ "$mode" == "room" ]]; then
@@ -80,39 +117,67 @@ if $recording; then
   else
     echo "🔴 ${el}"
   fi
-  echo "---"
-  echo "Recording since ${started_at:-unknown} | size=11 color=#888888"
-  echo "Mode: ${mode} | size=11 color=#888888"
-  echo "---"
-  echo "Stop recording | bash=\"$REC\" param1=stop terminal=false refresh=true"
 elif $processing; then
-  echo "⏳ ${percent}%"
-  echo "---"
-  echo "Processing meeting | size=12"
-  echo "$(progress_bar "$percent")  ${percent}% | font=Menlo size=11"
-  echo "${phase}${detail:+ — $detail} | size=11 color=#888888"
+  if [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
+    echo "⏳ ${phase:-Processing}"
+  else
+    echo "⏳ ${percent}%"
+  fi
+elif $paused; then
+  echo "⏸"
 else
   echo "⏺"
-  echo "---"
-  echo "Start recording | size=12 color=#888888"
-  echo "Laptop mic — room or speaker call (recommended) | bash=\"$REC\" param1=start param2=room terminal=false refresh=true"
-  echo "Mic + computer audio — use with headphones | bash=\"$REC\" param1=start param2=call terminal=false refresh=true"
 fi
+
+echo "---"
+echo "Recording | size=12 color=#888888"
+if $recording; then
+  echo "Recording since ${started_at:-unknown} | size=11 color=#888888"
+  echo "Mode: ${mode} | size=11 color=#888888"
+  echo "Stop recording | bash=\"$REC\" param1=stop terminal=false refresh=true"
+else
+  echo "Start Room — laptop mic (recommended) | bash=\"$REC\" param1=start param2=room terminal=false refresh=true"
+  echo "Start Call — mic + computer audio | bash=\"$REC\" param1=start param2=call terminal=false refresh=true"
+fi
+
+echo "---"
+echo "Processing | size=12 color=#888888"
+if $processing; then
+  echo "$(stage_line) | size=11 color=#cc8800"
+  if [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
+    echo "$(progress_bar "$percent")  ${percent}% | font=Menlo size=11 color=#cc8800"
+  fi
+elif $paused; then
+  echo "Paused | size=11 color=#888888"
+else
+  echo "Idle | size=11 color=#888888"
+fi
+if [[ "$pending" -gt 0 ]]; then
+  echo "Queue: $pending meeting(s) in inbox | size=11 color=#cc8800"
+elif [[ "$queue_jobs" -gt 0 ]]; then
+  echo "Jobs on disk: $queue_jobs | size=11 color=#888888"
+fi
+if $paused; then
+  echo "Resume processing | bash=\"$MA\" param1=resume terminal=false refresh=true"
+else
+  echo "Pause processing | bash=\"$MA\" param1=pause terminal=false refresh=true"
+fi
+echo "Summarise pending | bash=\"$MA\" param1=summarize param2=--today terminal=false refresh=true"
+
+echo "---"
+echo "Quick actions | size=12 color=#888888"
+echo "Import recording | bash=\"$(dirname "$REC")/yarn-import\" param1=audio param2=\"$MA\" terminal=false refresh=true"
+echo "Import transcript | bash=\"$(dirname "$REC")/yarn-import\" param1=transcript param2=\"$MA\" terminal=false refresh=true"
+echo "Open library | bash=/bin/bash param1=-lc param2='$MA library --html >/dev/null; open \"$MA_ROOT/library.html\"' terminal=false refresh=true"
+echo "Open transcripts folder | bash=/usr/bin/open param1=\"$TRANSCRIPTS\" terminal=false"
+echo "Open Ollama | bash=/usr/bin/open param1=-a param2=Ollama terminal=false"
 
 # ---- archive state ----
 transcripts="$(find "$TRANSCRIPTS" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
-pending="$(count_files "$INBOX" '\.json$')"
 failed="$(count_files "$FAILED" '\.json$')"
 
 echo "---"
 echo "$transcripts meeting(s) archived | size=11 color=#888888"
-if $processing; then
-  echo "⏳ ${phase}: ${percent}%${detail:+ — $detail} | size=11 color=#cc8800"
-  echo "$(progress_bar "$percent") | font=Menlo size=11 color=#cc8800"
-fi
-if [[ "$pending" -gt 0 ]]; then
-  echo "⏳ $pending transcribing | size=11 color=#cc8800"
-fi
 if [[ "$failed" -gt 0 ]]; then
   echo "⚠️ $failed failed — audio kept | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 fi
@@ -125,8 +190,22 @@ if ! $recording; then
     echo "-- Run: ma recover | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$IN_PROGRESS\" terminal=false"
   fi
 fi
+
 echo "---"
-echo "Open Ollama | bash=/usr/bin/open param1=-a param2=Ollama terminal=false"
-echo "Summarize today's meetings | bash=\"$MA\" param1=summarize param2=--today terminal=false refresh=true"
-echo "Open transcripts folder | bash=/usr/bin/open param1=\"$TRANSCRIPTS\" terminal=false"
+echo "Settings | size=12 color=#888888"
+if [[ "$recognise" == "true" || "$recognise" == "1" ]]; then
+  echo "Recognise known speakers: On | bash=\"$MA\" param1=setting param2=recognise_known param3=off terminal=false refresh=true"
+else
+  echo "Recognise known speakers: Off | bash=\"$MA\" param1=setting param2=recognise_known param3=on terminal=false refresh=true"
+fi
+echo "Speaker engine: ${engine} | size=11 color=#888888"
+echo "-- Stable (Sherpa) | bash=\"$MA\" param1=setting param2=speaker_engine param3=sherpa terminal=false refresh=true"
+echo "-- Experimental (pyannote) | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true"
+echo "-- Compare both | bash=\"$MA\" param1=setting param2=speaker_engine param3=compare terminal=false refresh=true"
+echo "Audio retention: ${retention} | size=11 color=#888888"
+echo "-- 1 week | bash=\"$MA\" param1=setting param2=audio_retention param3=1_week terminal=false refresh=true"
+echo "-- 1 month | bash=\"$MA\" param1=setting param2=audio_retention param3=1_month terminal=false refresh=true"
+echo "-- Never | bash=\"$MA\" param1=setting param2=audio_retention param3=never terminal=false refresh=true"
+echo "Diagnostics | bash=\"$MA\" param1=doctor terminal=true"
+echo "Logs | bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 echo "Refresh | refresh=true"

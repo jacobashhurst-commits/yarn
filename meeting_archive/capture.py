@@ -167,7 +167,9 @@ def resolve_device(name: str, required_channels: int):
         raise CaptureError(
             f'device "{match["name"]}" offers {match["max_input_channels"]} '
             f"input channel(s), but this mode needs {required_channels}. "
-            f"Check the Aggregate Device channel layout in Audio MIDI Setup."
+            "Call mode records mic + computer audio and needs a multi-channel "
+            "Aggregate Device (BlackHole + microphone). Use Start Room for "
+            "the laptop microphone alone."
         )
     return match
 

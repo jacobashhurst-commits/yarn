@@ -151,8 +151,18 @@ await_capture() {
       die "$message"
     fi
     [[ -s "$raw" ]] && return 0
-    kill -0 "$pid" 2>/dev/null || \
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # Fast failures can exit before the error file is visible on this
+      # iteration. Wait once more rather than showing a generic "exited".
+      sleep 0.2
+      if [[ -s "$ERROR_FILE" ]]; then
+        local late
+        late="$(cat "$ERROR_FILE")"
+        rm -f "$ERROR_FILE"
+        die "$late"
+      fi
       die "the recorder exited before it started recording; see $MA_LOGS/recorder.log"
+    fi
     sleep 0.1
     waited=$((waited + 1))
   done

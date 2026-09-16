@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
-from . import audio, records
+from . import audio, jobs, metrics, records, resources
 from .chunking import chunk_turns, context_header
 from .config import Config
 from .diarize import (
@@ -57,18 +58,29 @@ def _processing_status(
     phase: str,
     percent: int,
     detail: str = "",
+    *,
+    audio_position_s: float | None = None,
+    audio_duration_s: float | None = None,
+    indeterminate: bool = False,
 ) -> None:
-    """Publish a tiny atomic status file for the SwiftBar menu."""
-    records.write_json_atomic(
-        cfg.processing_status,
-        {
-            "meeting_id": meeting_id,
-            "phase": phase,
-            "percent": min(max(int(percent), 0), 100),
-            "detail": detail,
-            "updated_epoch": int(datetime.now().timestamp()),
-        },
-    )
+    """Publish a tiny atomic status file for the SwiftBar menu.
+
+    `percent` is stage-local and only meaningful when we have a real signal.
+    Indeterminate stages still send 0 rather than inventing 65 or 82.
+    """
+    payload = {
+        "meeting_id": meeting_id,
+        "phase": phase,
+        "percent": min(max(int(percent), 0), 100),
+        "detail": detail,
+        "updated_epoch": int(datetime.now().timestamp()),
+        "indeterminate": bool(indeterminate),
+    }
+    if audio_position_s is not None:
+        payload["audio_position_s"] = round(float(audio_position_s), 1)
+    if audio_duration_s is not None:
+        payload["audio_duration_s"] = round(float(audio_duration_s), 1)
+    records.write_json_atomic(cfg.processing_status, payload)
 
 
 def _clear_processing_status(cfg: Config, meeting_id: str) -> None:
@@ -193,10 +205,12 @@ def finalize(
         ended_at=datetime.now().isoformat(timespec="seconds"),
         duration_s=info["duration"],
         raw_file=raw_kept.name,
+        source="native",
     )
     # Written last: the watcher triggers on manifests only, so nothing can be
     # picked up before both channels are fully on disk.
     manifest.write(cfg.inbox_dir / f"{meeting_id}.json")
+    jobs.enqueue(cfg, meeting_id, source="native", duration_s=info["duration"])
     log.info(
         "finalized meeting=%s mode=%s duration=%.1fs", meeting_id, mode, info["duration"]
     )
@@ -385,12 +399,13 @@ def rediarize(
         cfg,
         meeting_id,
         "Identifying speakers",
-        65,
+        0,
         (
             f"using {expected_speakers} listed voices"
             if expected_speakers
             else "automatic speaker count"
         ),
+        indeterminate=True,
     )
     try:
         spans: list[SpeakerSpan] = []
@@ -462,6 +477,28 @@ def rediarize(
 # processing
 # ---------------------------------------------------------------------------
 
+def _fmt_clock(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _release_if_needed(obj) -> None:
+    if not resources.is_low_memory_machine():
+        return
+    unload = getattr(obj, "unload", None)
+    if callable(unload):
+        unload()
+
+
+def _whisper_engine(transcriber) -> str:
+    config = getattr(transcriber, "config", None)
+    return str(getattr(config, "engine", "") or "")
+
+
 def process(
     cfg: Config,
     manifest_path: Path,
@@ -479,7 +516,14 @@ def process(
     # Claim the meeting by moving its files out of the inbox. A move is atomic
     # within a filesystem, so two watchers could never both claim it.
     claimed = _claim(cfg, manifest, manifest_path)
-    _processing_status(cfg, meeting_id, "Preparing audio", 3)
+    job = jobs.enqueue(
+        cfg,
+        meeting_id,
+        source=manifest.source or "native",
+        duration_s=manifest.duration_s,
+        title=manifest.title,
+    )
+    _processing_status(cfg, meeting_id, "Preparing audio", 0, indeterminate=True)
 
     try:
         # Driven by the manifest, not a fixed list, so a room recording with a
@@ -487,38 +531,99 @@ def process(
         segments: list[Segment] = []
         if not manifest.channels:
             raise ValueError(f"manifest for {meeting_id} lists no channels")
-        channels = sorted(manifest.channels.items())
-        last_progress = -1
-        for channel_index, (channel, filename) in enumerate(channels):
-            path = cfg.processing_dir / filename
-            channel_start = 8 + channel_index * 52 / len(channels)
-            channel_width = 52 / len(channels)
 
-            def report(fraction: float, *, name=channel) -> None:
-                nonlocal last_progress
-                percent = int(channel_start + channel_width * fraction)
-                if percent > last_progress:
+        skip_whisper = job.stage_done("transcribe") and cfg.transcript_json(
+            meeting_id
+        ).exists()
+        if skip_whisper:
+            existing = Transcript.read(cfg.transcript_json(meeting_id))
+            segments = list(existing.segments)
+        else:
+            jobs.begin_stage(cfg, job, "transcribe")
+            transcribe_started = time.perf_counter()
+            channels = sorted(manifest.channels.items())
+            last_progress = -1
+            n_channels = max(len(channels), 1)
+            for channel_index, (channel, filename) in enumerate(channels):
+                path = cfg.processing_dir / filename
+
+                def report(
+                    fraction: float, *, name=channel, index=channel_index
+                ) -> None:
+                    nonlocal last_progress
+                    overall = (index + fraction) / n_channels
+                    percent = int(overall * 100)
+                    if percent <= last_progress:
+                        return
                     last_progress = percent
+                    position = overall * (manifest.duration_s or 0.0)
+                    detail = f"{name} audio"
+                    if manifest.duration_s:
+                        detail = (
+                            f"{_fmt_clock(position)} / "
+                            f"{_fmt_clock(manifest.duration_s)} {name}"
+                        )
                     _processing_status(
                         cfg,
                         meeting_id,
                         "Transcribing",
                         percent,
-                        f"{name} audio",
+                        detail,
+                        audio_position_s=position,
+                        audio_duration_s=manifest.duration_s or None,
                     )
 
-            report(0.0)
-            segments.extend(
-                transcriber.transcribe_file(
-                    path,
-                    channel,
-                    duration_s=manifest.duration_s,
-                    progress=report,
+                report(0.0)
+                segments.extend(
+                    transcriber.transcribe_file(
+                        path,
+                        channel,
+                        duration_s=manifest.duration_s,
+                        progress=report,
+                    )
                 )
+            jobs.finish_stage(cfg, job, "transcribe")
+            metrics.record(
+                cfg,
+                meeting_id=meeting_id,
+                stage="transcribe",
+                engine=_whisper_engine(transcriber),
+                model=cfg.whisper.model,
+                meeting_duration_s=manifest.duration_s,
+                wall_s=time.perf_counter() - transcribe_started,
             )
+            _release_if_needed(transcriber)
 
-        _processing_status(cfg, meeting_id, "Identifying speakers", 65)
+        jobs.begin_stage(cfg, job, "diarize")
+        _processing_status(
+            cfg,
+            meeting_id,
+            "Identifying speakers",
+            0,
+            "Analysing speaker segments",
+            indeterminate=True,
+        )
+        diarize_started = time.perf_counter()
         spans, diarize_error = _diarize_channels(cfg, manifest, segments, diarizer)
+        jobs.finish_stage(
+            cfg,
+            job,
+            "diarize",
+            status=jobs.STAGE_FAILED if diarize_error else jobs.DONE,
+            error=diarize_error,
+        )
+        metrics.record(
+            cfg,
+            meeting_id=meeting_id,
+            stage="diarize",
+            engine=cfg.diarize.engine,
+            model=cfg.diarize.model,
+            meeting_duration_s=manifest.duration_s,
+            wall_s=time.perf_counter() - diarize_started,
+            success=not diarize_error,
+            error=diarize_error,
+        )
+        _release_if_needed(diarizer)
 
         turns = merge_segments(
             segments,
@@ -544,28 +649,123 @@ def process(
         )
         profiles = profile_speakers(turns, guesses=speaker_guess_map(guesses))
 
+        if cfg.speakers_memory.recognise_known:
+            jobs.begin_stage(cfg, job, "recognise")
+            _processing_status(
+                cfg,
+                meeting_id,
+                "Recognising known speakers",
+                0,
+                f"0 / {len(profiles)} voices",
+                indeterminate=True,
+            )
+            try:
+                from . import speakers as speaker_memory
+
+                extra = speaker_memory.suggest_matches(
+                    profiles, speaker_memory.load_library(cfg)
+                )
+                named = {guess.speaker for guess in guesses}
+                guesses.extend(g for g in extra if g.speaker not in named)
+                jobs.finish_stage(
+                    cfg, job, "recognise", detail=f"{len(extra)} suggestion(s)"
+                )
+            except Exception as exc:
+                log.exception("speaker memory failed for meeting=%s", meeting_id)
+                jobs.finish_stage(
+                    cfg, job, "recognise", status=jobs.STAGE_FAILED, error=str(exc)
+                )
+        else:
+            jobs.finish_stage(cfg, job, "recognise", status=jobs.SKIPPED)
+
+        raw_turns: list = []
+        if cfg.cleanup.enabled and summarizer is not None:
+            jobs.begin_stage(cfg, job, "cleanup")
+            _processing_status(
+                cfg,
+                meeting_id,
+                "Cleaning transcript",
+                0,
+                "Proofreading ASR",
+                indeterminate=True,
+            )
+            try:
+                from . import cleanup as cleanup_mod
+
+                notes = records.read_notes(cfg.notes_json(meeting_id))
+                cleaned = cleanup_mod.cleanup_turns(
+                    turns,
+                    cfg.turn_labeller(records.speaker_roster(notes)),
+                    summarizer,
+                )
+                raw_turns = list(turns)
+                turns = cleaned
+                jobs.finish_stage(cfg, job, "cleanup")
+            except Exception as exc:
+                log.warning("cleanup skipped for meeting=%s: %s", meeting_id, exc)
+                jobs.finish_stage(
+                    cfg, job, "cleanup", status=jobs.SKIPPED, error=str(exc)
+                )
+                raw_turns = []
+        else:
+            jobs.finish_stage(cfg, job, "cleanup", status=jobs.SKIPPED)
+
         summary, summary_error = "", ""
         if summarizer is not None and summarizer.enabled:
+            jobs.begin_stage(cfg, job, "summarize")
             if not summarizer.is_running():
                 # Do not start Ollama from the watcher. The transcript is
                 # complete without a summary; SwiftBar "Summarize today's
                 # meetings" fills this in later.
                 summary_error = DEFERRED_SUMMARY
                 log.info("ollama not running; summary deferred for meeting=%s", meeting_id)
+                jobs.finish_stage(
+                    cfg, job, "summarize", status=jobs.SKIPPED, error=summary_error
+                )
             else:
-                _processing_status(cfg, meeting_id, "Writing summary", 82)
+                _processing_status(
+                    cfg,
+                    meeting_id,
+                    "Writing summary",
+                    0,
+                    f"Generating with {cfg.summary.model}",
+                    indeterminate=True,
+                )
+                summary_started = time.perf_counter()
                 try:
                     notes = records.read_notes(cfg.notes_json(meeting_id))
                     roster = records.speaker_roster(notes)
                     summary = summarizer.summarize(turns, cfg.turn_labeller(roster))
+                    jobs.finish_stage(cfg, job, "summarize")
+                    metrics.record(
+                        cfg,
+                        meeting_id=meeting_id,
+                        stage="summarize",
+                        engine="ollama",
+                        model=cfg.summary.model,
+                        meeting_duration_s=manifest.duration_s,
+                        wall_s=time.perf_counter() - summary_started,
+                    )
                 except SummaryUnavailable as exc:
                     summary_error = str(exc)
                     log.error("summary unavailable for meeting=%s: %s", meeting_id, exc)
+                    jobs.finish_stage(
+                        cfg, job, "summarize", status=jobs.SKIPPED, error=summary_error
+                    )
                 except Exception as exc:
                     summary_error = f"local summary failed: {exc}"
                     log.exception("summary failed for meeting=%s", meeting_id)
+                    jobs.finish_stage(
+                        cfg,
+                        job,
+                        "summarize",
+                        status=jobs.STAGE_FAILED,
+                        error=summary_error,
+                    )
+        else:
+            jobs.finish_stage(cfg, job, "summarize", status=jobs.SKIPPED)
 
-        _processing_status(cfg, meeting_id, "Saving transcript", 92)
+        _processing_status(cfg, meeting_id, "Saving transcript", 0, indeterminate=True)
         transcript = Transcript(
             meeting_id=meeting_id,
             segments=segments,
@@ -584,15 +784,24 @@ def process(
             speaker_guesses=guesses,
             diarize_model=cfg.diarize.model if spans else "",
             diarize_error=diarize_error,
+            source=manifest.source or "native",
+            whisper_engine=_whisper_engine(transcriber),
+            raw_turns=raw_turns,
         )
         transcript.write(cfg.transcript_json(meeting_id))
 
-        _processing_status(cfg, meeting_id, "Indexing for search", 96)
-        ingest(cfg, meeting_id, store)
+        jobs.begin_stage(cfg, job, "index")
+        _processing_status(
+            cfg, meeting_id, "Indexing", 0, "Writing search chunks", indeterminate=True
+        )
+        n_chunks = ingest(cfg, meeting_id, store)
+        jobs.finish_stage(cfg, job, "index", detail=f"{n_chunks} chunks")
 
         # Only now is it safe to move the audio out of processing: the
         # transcript is on disk and the chunks are in Chroma.
         _archive_audio(cfg, claimed)
+        titled = Transcript.read(cfg.transcript_json(meeting_id))
+        jobs.complete(cfg, job, title=titled.title)
         log.info(
             "processed meeting=%s turns=%d voices=%d names=%s",
             meeting_id,
@@ -603,7 +812,8 @@ def process(
         _clear_processing_status(cfg, meeting_id)
         return meeting_id
 
-    except Exception:
+    except Exception as exc:
+        jobs.fail(cfg, job, str(exc), stage=job.current_stage)
         _clear_processing_status(cfg, meeting_id)
         log.exception("processing failed for meeting=%s, moving to failed/", meeting_id)
         _move_all(claimed, cfg.failed_dir)
