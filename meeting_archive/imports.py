@@ -79,6 +79,9 @@ def import_audio(cfg: Config, src: Path, *, title: str = "") -> Manifest:
         duration_s=info["duration"],
         title=manifest.title,
     )
+    from . import queue as queue_mod
+
+    queue_mod.refresh(cfg)
     return manifest
 
 

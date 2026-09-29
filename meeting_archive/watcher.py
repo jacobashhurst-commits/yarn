@@ -10,8 +10,9 @@ Two things are watched:
   inbox/   manifests from `ma finalize` -> transcribe and index
   notes/   notes files with applied=false -> reindex that meeting only
 
-The notes pass is what makes the popup non-blocking. Processing starts the
-moment recording stops, and if Jacob types his notes ten minutes later the
+The notes pass is what makes the popup non-blocking. On-stop notes appear
+immediately; transcription follows the Process-when setting (after each
+meeting, evening, or manual). If Jacob types notes ten minutes later the
 meeting is simply reindexed with them. If he dismisses the popup, nothing
 happens at all.
 """
@@ -23,7 +24,7 @@ import time
 from pathlib import Path
 
 from . import jobs, pipeline, popup, records, resources
-from .config import Config
+from .config import Config, _apply_settings_overlay
 from .diarize import Diarizer
 from .names import attendee_suggestion
 from .records import Transcript
@@ -45,9 +46,18 @@ def run(cfg: Config, interval: float = 5.0, once: bool = False) -> None:
 
     log.info("watching %s (interval=%.0fs)", cfg.inbox_dir, interval)
     while True:
+        handled = 0
         try:
+            _apply_settings_overlay(cfg)
+            from . import queue as queue_mod
+
+            jobs.recover_stale(cfg)
+            queue_mod.refresh(cfg)
             handled = sweep_inbox(cfg, transcriber, store, diarizer, summarizer)
             handled += sweep_notes(cfg, store)
+            if handled == 0:
+                handled += sweep_summaries(cfg, summarizer, store)
+            queue_mod.refresh(cfg)
         except Exception:  # keep the watcher alive across any single failure
             log.exception("sweep failed")
             handled = 0
@@ -64,22 +74,38 @@ def sweep_inbox(
     store: MeetingStore,
     diarizer: "Diarizer | None" = None,
     summarizer: "Summarizer | None" = None,
+    *,
+    force: bool = False,
 ) -> int:
+    from .summarize import should_attempt_summary
+
     handled = 0
     for manifest_path in sorted(cfg.inbox_dir.glob("*.json")):
         if manifest_path.name.endswith(".partial"):
             continue
-        if jobs.is_paused(cfg):
+        if not force and jobs.is_paused(cfg):
             log.info("processing paused; leaving %s in the inbox", manifest_path.name)
             break
-        if resources.should_defer_heavy_stage(cfg):
+        if not force and resources.should_defer_heavy_stage(cfg):
             log.info(
                 "deferring processing while a recording is under memory pressure"
             )
             break
         try:
+            meeting_id = records.Manifest.read(manifest_path).meeting_id
+        except (OSError, ValueError):
+            meeting_id = manifest_path.stem
+        if not force and not should_attempt_summary(cfg, meeting_id):
+            continue
+        try:
             meeting_id = pipeline.process(
-                cfg, manifest_path, transcriber, store, diarizer, summarizer
+                cfg,
+                manifest_path,
+                transcriber,
+                store,
+                diarizer,
+                summarizer,
+                force=force,
             )
         except Exception:
             # process() has already logged and quarantined the files.
@@ -114,6 +140,54 @@ def sweep_notes(cfg: Config, store: MeetingStore) -> int:
             handled += 1
         except Exception:
             log.exception("could not apply notes for meeting=%s", meeting_id)
+    return handled
+
+
+def sweep_summaries(
+    cfg: Config,
+    summarizer: "Summarizer | None",
+    store: MeetingStore,
+    *,
+    force: bool = False,
+) -> int:
+    """Retry summaries that sleep, a closed lid, or evening-batch left pending.
+
+    One meeting per automatic sweep so a new inbox item still wins the next
+    loop. An explicit Process run drains everything waiting.
+    """
+    from .summarize import should_attempt_summary
+
+    if summarizer is None or not summarizer.enabled:
+        return 0
+    if not force:
+        if jobs.is_paused(cfg):
+            return 0
+        if resources.recording_active(cfg) or resources.should_defer_heavy_stage(cfg):
+            return 0
+    if not summarizer.is_running():
+        return 0
+
+    handled = 0
+    for path in sorted(cfg.transcripts_dir.rglob("*.json")):
+        meeting_id = path.stem
+        try:
+            transcript = Transcript.read(path)
+        except (OSError, ValueError):
+            continue
+        if not pipeline.needs_summary(transcript):
+            continue
+        if not force and not should_attempt_summary(cfg, meeting_id):
+            continue
+        try:
+            if pipeline.apply_summary(cfg, meeting_id, summarizer, store):
+                log.info("filled pending summary for meeting=%s", meeting_id)
+                handled += 1
+                if not force:
+                    return handled
+        except Exception:
+            log.exception("could not summarize meeting=%s", meeting_id)
+            if not force:
+                return handled
     return handled
 
 

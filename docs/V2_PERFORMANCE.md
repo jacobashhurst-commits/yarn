@@ -8,7 +8,9 @@ meetings produce numbers. Do not invent a single quality score.
 MacBook Neo — Apple Silicon A18 Pro, 8 GB unified memory.
 
 Quality defaults do not change on this machine. Scheduling and model
-lifecycle do.
+lifecycle do. The same Whisper large-v3-turbo and qwen3.5:9b run on both
+laptops; a more powerful machine finishes the same model faster and can
+keep it warm. It is not a reason to pick a worse model on Neo.
 
 ## Baseline (pre-V2, 2026-09-11, work laptop)
 

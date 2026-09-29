@@ -78,6 +78,7 @@ class Diarizer:
     def unload(self) -> None:
         """Drop cached sherpa pipelines so Neo can free a few hundred MB."""
         self._pipelines.clear()
+        unload_embedding_extractors()
 
     @property
     def pipeline(self):
@@ -354,3 +355,87 @@ def speaker_keys(segments: list[Segment]) -> list[str]:
         if segment.speaker and segment.speaker not in seen:
             seen[segment.speaker] = segment.start
     return sorted(seen, key=lambda k: (seen[k], k))
+
+
+# Extractors are separate from the diarization pipeline so a confirmation
+# dialog can fingerprint a 6-second clip without loading the segmenter.
+_embedding_extractors: dict[str, object] = {}
+
+
+def unload_embedding_extractors() -> None:
+    _embedding_extractors.clear()
+
+
+def embed_file(config: DiarizeConfig, path: Path) -> list[float]:
+    """Voice fingerprint from a short wav. Empty if the model or file is missing.
+
+    Stored on the known-speaker record together with a snippet under
+    speakers/clips/. Meeting audio can be pruned later; this vector is what
+    remains for automatic suggestions.
+    """
+    model = Path(config.embedding_model).expanduser()
+    if not model.is_file():
+        log.warning("speaker embedding model missing: %s", model)
+        return []
+    try:
+        samples, sample_rate = _read_mono_wav(path)
+    except (OSError, wave.Error, ValueError) as exc:
+        log.warning("could not read %s for speaker embedding: %s", path, exc)
+        return []
+    if samples.size == 0:
+        return []
+    try:
+        extractor = _embedding_extractor(config, model)
+        stream = extractor.create_stream()
+        _feed_embedding_stream(stream, sample_rate, samples)
+        if hasattr(extractor, "is_ready") and not extractor.is_ready(stream):
+            log.warning("speaker embedding extractor not ready for %s", path.name)
+            return []
+        vector = extractor.compute(stream)
+    except Exception as exc:
+        log.warning("speaker embedding failed for %s: %s", path.name, exc)
+        return []
+    return [float(x) for x in vector]
+
+
+def _read_mono_wav(path: Path):
+    import numpy as np
+
+    with wave.open(str(path), "rb") as wav:
+        channels = wav.getnchannels()
+        width = wav.getsampwidth()
+        sample_rate = wav.getframerate()
+        frames = wav.readframes(wav.getnframes())
+    if width != 2:
+        raise ValueError(f"{path.name} is not 16-bit PCM")
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+    return samples, sample_rate
+
+
+def _embedding_extractor(config: DiarizeConfig, model: Path):
+    key = str(model)
+    cached = _embedding_extractors.get(key)
+    if cached is not None:
+        return cached
+    import sherpa_onnx
+
+    extractor_config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+        model=key,
+        num_threads=config.num_threads,
+    )
+    if hasattr(extractor_config, "validate") and not extractor_config.validate():
+        raise ValueError("sherpa-onnx rejected the speaker embedding configuration")
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(extractor_config)
+    _embedding_extractors[key] = extractor
+    return extractor
+
+
+def _feed_embedding_stream(stream, sample_rate: int, samples) -> None:
+    try:
+        stream.accept_waveform(sample_rate=sample_rate, waveform=samples)
+    except TypeError:
+        stream.accept_waveform(sample_rate, samples)
+    if hasattr(stream, "input_finished"):
+        stream.input_finished()

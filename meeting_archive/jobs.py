@@ -310,15 +310,28 @@ def recover_stale(cfg: Config) -> int:
     """
     recovered = 0
     for job in list_jobs(cfg):
+        transcript_path = cfg.transcript_json(job.meeting_id)
+        # A job that never left "queued" even though the transcript exists is
+        # leftover metadata, not work. Showing it as queued in the library
+        # looks like the meeting never processed.
+        if job.state == QUEUED and transcript_path.exists():
+            title = job.title
+            try:
+                from .records import Transcript
+
+                title = Transcript.read(transcript_path).title or title
+            except (OSError, ValueError):
+                pass
+            complete(cfg, job, title=title)
+            recovered += 1
+            continue
         if job.state != RUNNING:
             continue
         failed_manifest = cfg.failed_dir / f"{job.meeting_id}.json"
         if failed_manifest.exists():
             fail(cfg, job, "interrupted and quarantined")
         else:
-            if cfg.transcript_json(job.meeting_id).exists() and not job.stage_done(
-                "transcribe"
-            ):
+            if transcript_path.exists() and not job.stage_done("transcribe"):
                 finish_stage(cfg, job, "transcribe", status=DONE, detail="found on disk")
             job.state = QUEUED
             job.error = "requeued after interruption"

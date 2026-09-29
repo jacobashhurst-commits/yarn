@@ -8,17 +8,32 @@ import time
 import wave
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 
-from meeting_archive import jobs, library, pipeline, resources, retention, watcher
+from meeting_archive import cli, jobs, library, pipeline, records, resources, retention, watcher
 from meeting_archive.capture import WavWriter
 from meeting_archive.cleanup import _parse_cleaned
 from meeting_archive.config import Config, retention_days, write_setting
 from meeting_archive.imports import ImportFailed, import_transcript
-from meeting_archive.models import MIC, ROOM, Segment, SpeakerProfile, Turn
+from meeting_archive.models import MIC, ROOM, SYS, Segment, SpeakerProfile, Turn
 from meeting_archive.quips import profile_speakers
 from meeting_archive.records import Manifest, Transcript
-from meeting_archive.speakers import KnownSpeaker, suggest_matches
+from meeting_archive.speakers import (
+    KnownSpeaker,
+    capture_identity,
+    clips_dir,
+    embeddings_for_profiles,
+    forget_speaker,
+    leftover_assignment,
+    load_library,
+    meeting_banner,
+    remember_confirmation,
+    render_voices_html,
+    snippet_window,
+    suggest_matches,
+)
 from tests.test_pipeline import FakeStore, FakeTranscriber, make_wav, write_transcript
 
 FFMPEG = __import__("shutil").which("ffmpeg")
@@ -136,6 +151,97 @@ def test_recover_stale_requeues_a_running_job(cfg):
     assert jobs.recover_stale(cfg) == 1
     loaded = jobs.load(cfg, "2026-09-17T13-00-00")
     assert loaded.state == jobs.QUEUED
+
+
+def test_recover_stale_completes_a_queued_job_that_already_has_a_transcript(cfg):
+    write_transcript(cfg, "2026-09-17T14-00-00", [Turn(ROOM, 0.0, 1.0, "Hi")])
+    jobs.enqueue(cfg, "2026-09-17T14-00-00", title="stale")
+    assert jobs.recover_stale(cfg) == 1
+    loaded = jobs.load(cfg, "2026-09-17T14-00-00")
+    assert loaded.state == jobs.COMPLETE
+
+
+def test_library_treats_deferred_summary_as_pending_not_a_failure(cfg):
+    transcript = write_transcript(
+        cfg, "2026-09-17T15-00-00", [Turn(ROOM, 0.0, 1.0, "Hi")]
+    )
+    transcript.summary_error = "deferred: Ollama was not running"
+    transcript.write(cfg.transcript_json(transcript.meeting_id))
+    html = library.render_html(cfg).read_text(encoding="utf-8")
+    assert "Summary pending" in html
+    assert "class=note" in html
+    assert "class=err" not in html
+
+
+def test_sweep_summaries_retries_an_interrupted_summary(cfg):
+    meeting_id = "2026-09-25T10-00-00"
+    transcript = write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "We should ship.")])
+    transcript.summary = ""
+    transcript.summary_error = "deferred: local summary timed out"
+    transcript.write(cfg.transcript_json(meeting_id))
+
+    class Later:
+        enabled = True
+
+        def is_running(self):
+            return True
+
+        def summarize(self, turns, label_fn):
+            return "Ship it."
+
+    assert watcher.sweep_summaries(cfg, Later(), FakeStore()) == 1
+    filled = Transcript.read(cfg.transcript_json(meeting_id))
+    assert filled.summary == "Ship it."
+    assert filled.summary_error == ""
+
+
+def test_sweep_summaries_respects_manual_schedule(cfg):
+    meeting_id = "2026-09-25T11-00-00"
+    write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "Hi")])
+    cfg.summary.when = "manual"
+
+    class Boom:
+        enabled = True
+
+        def is_running(self):
+            return True
+
+        def summarize(self, turns, label_fn):
+            raise AssertionError("manual mode must not auto-summarize")
+
+    assert watcher.sweep_summaries(cfg, Boom(), FakeStore()) == 0
+
+
+def test_summarize_when_setting_overlay(cfg):
+    write_setting(cfg, "summarize_when", "evening")
+    other = Config(root=cfg.root)
+    from meeting_archive.config import _apply_settings_overlay
+
+    _apply_settings_overlay(other)
+    assert other.summary.when == "evening"
+
+
+@needs_ffmpeg
+def test_discard_aborted_starts_leaves_real_stranded_captures(cfg):
+    import struct
+    import wave
+
+    def write_pcm(path: Path, seconds: float) -> None:
+        frames = int(16000 * seconds)
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(struct.pack("<" + "h" * frames, *([0] * frames)))
+
+    stub = cfg.in_progress_dir / "2026-09-17T09-07-45__raw.wav"
+    kept = cfg.in_progress_dir / "2026-09-17T09-20-00__raw.wav"
+    write_pcm(stub, 6.0)
+    write_pcm(kept, 40.0)
+    removed = pipeline.discard_aborted_starts(cfg)
+    assert stub.name in removed
+    assert not stub.exists()
+    assert kept.exists()
 
 
 def test_wav_writer_stays_accurate_under_cpu_load(tmp_path):
@@ -362,3 +468,348 @@ def test_cleanup_maps_lines_without_inventing_turns():
     assert cleaned[0].speaker == "room-1"
     assert cleaned[0].text == "Hello there."
     assert cleaned[1].text == "We should meet Tuesday."
+
+
+def _three_voices(cfg, meeting_id: str) -> list[SpeakerProfile]:
+    turns = [
+        Turn(ROOM, 0.0, 4.0, "I handle billing at Zuora.", speaker="room-1"),
+        Turn(ROOM, 5.0, 8.0, "I came up from Brighton.", speaker="room-2"),
+        Turn(ROOM, 9.0, 12.0, "Let's ship Friday.", speaker="room-3"),
+    ]
+    profiles = profile_speakers(turns)
+    Transcript(
+        meeting_id=meeting_id,
+        turns=turns,
+        speaker_profiles=profiles,
+        title="Discovery with Acme",
+        diarize_model="test",
+    ).write(cfg.transcript_json(meeting_id))
+    return profiles
+
+
+def test_meeting_banner_includes_notes_and_title(cfg):
+    meeting_id = "2026-09-25T10-00-00"
+    _three_voices(cfg, meeting_id)
+    records.write_notes(
+        cfg.notes_json(meeting_id),
+        meeting_id,
+        notes="pricing follow-up after the demo",
+        attendees="Adam, Ben, Marina",
+    )
+    banner = meeting_banner(cfg, meeting_id)
+    assert "25 Sep 2026" in banner or "2026" in banner
+    assert "Discovery with Acme" in banner
+    assert "pricing follow-up after the demo" in banner
+    assert "Adam, Ben, Marina" in banner
+
+
+def test_leftover_assignment_names_the_last_listed_person():
+    profiles = [
+        SpeakerProfile(speaker="room-1", channel=ROOM),
+        SpeakerProfile(speaker="room-2", channel=ROOM),
+        SpeakerProfile(speaker="room-3", channel=ROOM),
+    ]
+    result = leftover_assignment(
+        profiles,
+        {"room-1": "Adam", "room-2": "Ben"},
+        ["Adam", "Ben", "Marina"],
+        ["Jacob"],
+    )
+    assert result == ("room-3", "Marina")
+
+
+def test_leftover_assignment_does_not_guess_when_two_voices_remain():
+    profiles = [
+        SpeakerProfile(speaker="room-1", channel=ROOM),
+        SpeakerProfile(speaker="room-2", channel=ROOM),
+        SpeakerProfile(speaker="room-3", channel=ROOM),
+    ]
+    assert leftover_assignment(
+        profiles, {"room-1": "Adam"}, ["Adam", "Ben", "Marina"], ["Jacob"]
+    ) is None
+
+
+def test_leftover_assignment_ignores_own_name_on_a_call():
+    profiles = [
+        SpeakerProfile(speaker="sys-1", channel=SYS),
+        SpeakerProfile(speaker="sys-2", channel=SYS),
+    ]
+    result = leftover_assignment(
+        profiles,
+        {"sys-1": "Adam"},
+        ["Jacob", "Adam", "Marina"],
+        ["Jacob"],
+    )
+    assert result == ("sys-2", "Marina")
+
+
+def test_leftover_assignment_needs_an_attendee_list():
+    profiles = [
+        SpeakerProfile(speaker="room-1", channel=ROOM),
+        SpeakerProfile(speaker="room-2", channel=ROOM),
+    ]
+    assert leftover_assignment(profiles, {"room-1": "Adam"}, [], ["Jacob"]) is None
+
+
+def test_naming_two_of_three_assumes_the_last(cfg, capsys):
+    meeting_id = "2026-09-25T11-00-00"
+    _three_voices(cfg, meeting_id)
+    records.write_notes(
+        cfg.notes_json(meeting_id), meeting_id, attendees="Adam, Ben, Marina"
+    )
+    args = SimpleNamespace(
+        meeting_id=meeting_id,
+        set=["room-1=Adam", "room-2=Ben"],
+        pending_tsv=False,
+        review_warning=False,
+    )
+    assert cli.cmd_speakers(cfg, args) == 0
+    roster = records.speaker_roster(records.read_notes(cfg.notes_json(meeting_id)))
+    assert roster["room-3"] == "Marina"
+    assert "ASSUMED" in capsys.readouterr().out
+    from meeting_archive.speakers import load_library
+
+    names = {person.name for person in load_library(cfg)}
+    assert names == {"Adam", "Ben", "Marina"}
+
+
+def test_snippet_window_prefers_the_quip_turn():
+    profile = SpeakerProfile(
+        speaker="room-2",
+        channel=ROOM,
+        first_at=1.0,
+        quip="I came up from Brighton.",
+    )
+    transcript = Transcript(
+        meeting_id="m",
+        turns=[
+            Turn(ROOM, 1.0, 2.0, "Hi.", speaker="room-2"),
+            Turn(ROOM, 10.0, 16.0, "I came up from Brighton.", speaker="room-2"),
+        ],
+    )
+    start, duration = snippet_window(transcript, profile)
+    assert start == pytest.approx(10.25)
+    assert duration == pytest.approx(3.5)
+
+
+def test_snippet_window_skips_overlapping_speech():
+    from meeting_archive.speakers import speaker_excerpt
+
+    profile = SpeakerProfile(
+        speaker="room-2",
+        channel=ROOM,
+        first_at=1.0,
+        quip="I came up from Brighton.",
+    )
+    transcript = Transcript(
+        meeting_id="m",
+        turns=[
+            Turn(ROOM, 10.0, 16.0, "I came up from Brighton.", speaker="room-2"),
+            Turn(ROOM, 12.0, 14.0, "Hang on.", speaker="room-1"),
+            Turn(ROOM, 20.0, 24.0, "I handle billing.", speaker="room-2"),
+        ],
+    )
+    start, duration = snippet_window(transcript, profile)
+    assert start == pytest.approx(20.25)
+    assert duration == pytest.approx(3.5)
+    excerpt = speaker_excerpt(transcript, profile)
+    assert "I came up from Brighton." in excerpt
+    assert "I handle billing." in excerpt
+
+
+def test_known_speakers_html_lists_confirmed_voices(cfg):
+    remember_confirmation(cfg, name="Marina", meeting_id="2026-09-25T11-00-00")
+    path = render_voices_html(cfg)
+    text = path.read_text(encoding="utf-8")
+    assert "Marina" in text
+    assert "Known speakers" in text
+    assert "confirmation" in text
+
+
+def test_embed_file_without_model_returns_empty(tmp_path):
+    from meeting_archive.config import DiarizeConfig
+    from meeting_archive.diarize import embed_file
+
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"not-a-wav")
+    config = DiarizeConfig(embedding_model=str(tmp_path / "missing.onnx"))
+    assert embed_file(config, wav) == []
+
+
+def _stub_clip_extract(monkeypatch, payload: bytes = b""):
+    blob = payload or (b"RIFF" + b"identity-snippet" + b"\x00" * 40)
+
+    def fake_extract(src, dest, start, duration):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob)
+        return dest
+
+    monkeypatch.setattr("meeting_archive.audio.extract_clip", fake_extract)
+
+
+def test_validated_identity_clip_survives_audio_prune(cfg, monkeypatch):
+    meeting_id = "2026-08-01T10-00-00"
+    profiles = _three_voices(cfg, meeting_id)
+    transcript = Transcript.read(cfg.transcript_json(meeting_id))
+    src = cfg.audio_archive_dir / f"{meeting_id}__room.wav"
+    src.write_bytes(b"x" * 1024)
+    _stub_clip_extract(monkeypatch)
+    monkeypatch.setattr(
+        "meeting_archive.diarize.embed_file",
+        lambda config, path: [0.2, 0.8],
+    )
+
+    clip, embedding = capture_identity(cfg, transcript, profiles[1], "Marina")
+    assert clip == "marina.wav"
+    assert embedding == [0.2, 0.8]
+    remember_confirmation(
+        cfg, name="Marina", meeting_id=meeting_id, embedding=embedding, clip=clip
+    )
+    identity = clips_dir(cfg) / "marina.wav"
+    assert identity.exists()
+
+    now = time.time()
+    os.utime(src, (now - 30 * 86400,) * 2)
+    os.utime(identity, (now - 30 * 86400,) * 2)
+    result = retention.prune(cfg, now=now)
+    assert src.name in result.deleted
+    assert not src.exists()
+    assert identity.exists()
+    people = load_library(cfg)
+    assert people[0].embedding == [0.2, 0.8]
+    assert people[0].clip == "marina.wav"
+
+
+def test_first_validated_clip_is_not_overwritten(cfg, monkeypatch):
+    meeting_id = "2026-09-25T11-00-00"
+    profiles = _three_voices(cfg, meeting_id)
+    transcript = Transcript.read(cfg.transcript_json(meeting_id))
+    (cfg.audio_archive_dir / f"{meeting_id}__room.wav").write_bytes(b"x" * 100)
+    payloads = iter(
+        [
+            b"first-validated-clip" + b"\x00" * 40,
+            b"second-meeting-clipxx" + b"\x00" * 40,
+        ]
+    )
+
+    def fake_extract(src, dest, start, duration):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(next(payloads))
+        return dest
+
+    monkeypatch.setattr("meeting_archive.audio.extract_clip", fake_extract)
+    monkeypatch.setattr(
+        "meeting_archive.diarize.embed_file", lambda *args, **kwargs: [1.0]
+    )
+    capture_identity(cfg, transcript, profiles[0], "Adam")
+    first = (clips_dir(cfg) / "adam.wav").read_bytes()
+    capture_identity(cfg, transcript, profiles[0], "Adam")
+    assert (clips_dir(cfg) / "adam.wav").read_bytes() == first
+    assert list(clips_dir(cfg).glob(".embed-*")) == []
+
+
+def test_forget_speaker_deletes_identity_clip(cfg):
+    folder = clips_dir(cfg)
+    folder.mkdir(parents=True, exist_ok=True)
+    clip = folder / "marina.wav"
+    clip.write_bytes(b"snippet")
+    remember_confirmation(
+        cfg, name="Marina", meeting_id="2026-09-25T11-00-00", clip="marina.wav"
+    )
+    assert forget_speaker(cfg, "Marina")
+    assert not clip.exists()
+    assert load_library(cfg) == []
+
+
+def test_embeddings_for_profiles_do_not_write_library_clips(cfg, monkeypatch):
+    meeting_id = "2026-09-25T12-00-00"
+    profiles = _three_voices(cfg, meeting_id)
+    (cfg.audio_archive_dir / f"{meeting_id}__room.wav").write_bytes(b"x" * 100)
+    _stub_clip_extract(monkeypatch)
+    monkeypatch.setattr(
+        "meeting_archive.diarize.embed_file",
+        lambda config, path: [0.5, 0.5],
+    )
+    turns = Transcript.read(cfg.transcript_json(meeting_id)).turns
+    vectors = embeddings_for_profiles(cfg, meeting_id, turns, profiles)
+    assert set(vectors) == {p.speaker for p in profiles}
+    assert list(clips_dir(cfg).glob("*.wav")) == []
+
+
+def test_queue_counts_inbox_and_pending_summaries(cfg):
+    from meeting_archive import queue as queue_mod
+
+    _inbox_meeting(cfg, "2026-09-26T09-00-00")
+    write_transcript(cfg, "2026-09-26T08-00-00", [Turn(ROOM, 0.0, 1.0, "Hi")])
+    payload = queue_mod.refresh(cfg)
+    assert payload["inbox"] == 1
+    assert payload["summaries_pending"] == 1
+    assert payload["remaining"] == 2
+
+
+def test_queue_exclude_skips_the_meeting_currently_running(cfg):
+    from meeting_archive import queue as queue_mod
+
+    write_transcript(cfg, "2026-09-26T08-00-00", [Turn(ROOM, 0.0, 1.0, "Hi")])
+    _inbox_meeting(cfg, "2026-09-26T09-00-00")
+    payload = queue_mod.refresh(cfg, exclude="2026-09-26T08-00-00")
+    assert payload["remaining"] == 1
+    assert payload["summaries_pending"] == 0
+
+
+def test_sweep_inbox_holds_today_until_evening(cfg, monkeypatch):
+    from datetime import datetime as dt
+
+    from meeting_archive import summarize as summarize_mod
+
+    class Frozen(dt):
+        @classmethod
+        def now(cls, tz=None):
+            return dt(2026, 9, 26, 11, 0, 0)
+
+    monkeypatch.setattr(summarize_mod, "datetime", Frozen)
+    cfg.summary.when = "evening"
+    cfg.summary.evening_hour = 18
+    _inbox_meeting(cfg, "2026-09-26T10-00-00")
+    _inbox_meeting(cfg, "2026-09-25T16-00-00")
+    count = watcher.sweep_inbox(cfg, FakeTranscriber(), FakeStore())
+    assert count == 1
+    assert (cfg.inbox_dir / "2026-09-26T10-00-00.json").exists()
+    assert cfg.transcript_json("2026-09-25T16-00-00").exists()
+
+
+def test_sweep_inbox_force_ignores_manual_schedule(cfg):
+    cfg.summary.when = "manual"
+    _inbox_meeting(cfg, "2026-09-26T11-00-00")
+    assert watcher.sweep_inbox(cfg, FakeTranscriber(), FakeStore()) == 0
+    assert watcher.sweep_inbox(
+        cfg, FakeTranscriber(), FakeStore(), force=True
+    ) == 1
+    assert cfg.transcript_json("2026-09-26T11-00-00").exists()
+
+
+def test_begin_work_counts_one_of_five_then_advances(cfg):
+    from meeting_archive import queue as queue_mod
+
+    ids = [f"2026-09-26T10-0{i}-00" for i in range(5)]
+    for meeting_id in ids:
+        _inbox_meeting(cfg, meeting_id)
+
+    first = queue_mod.begin_work(cfg, ids[0])
+    assert first["current"] == 1
+    assert first["total"] == 5
+    assert first["remaining"] == 4
+    again = queue_mod.begin_work(cfg, ids[0])
+    assert again["current"] == 1
+
+    (cfg.inbox_dir / f"{ids[0]}.json").unlink()
+    queue_mod.end_work(cfg, ids[0])
+    after = queue_mod.begin_work(cfg, ids[0])
+    assert after["current"] == 1
+
+    queue_mod.end_work(cfg, ids[0])
+    second = queue_mod.begin_work(cfg, ids[1])
+    assert second["current"] == 2
+    assert second["total"] == 5
+    assert second["remaining"] == 3
+

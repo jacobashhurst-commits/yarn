@@ -14,6 +14,10 @@ Guards before anything is deleted:
 
 A meeting that failed to transcribe keeps its audio indefinitely. A deferred
 summary does not block deletion: the transcript is already the durable record.
+
+Known-speaker snippets under `{root}/speakers/clips/` are identity assets, not
+meeting audio. This module never looks there; pruning a recording must not
+erase a validated voice print.
 """
 
 from __future__ import annotations

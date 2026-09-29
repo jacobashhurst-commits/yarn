@@ -43,12 +43,15 @@ on run argv
     set theResult to display dialog dialogPrompt ¬
       with title dialogTitle ¬
       default answer defaultText ¬
-      buttons {"Not now", "Save"} ¬
+      buttons {"Not now", "Play clip", "Save"} ¬
       default button "Save" ¬
       cancel button "Not now" ¬
       giving up after 600
     if gave up of theResult then
       return "__TIMEOUT__"
+    end if
+    if button returned of theResult is "Play clip" then
+      return "__PLAY__"
     end if
     return text returned of theResult
   on error
@@ -59,11 +62,11 @@ APPLESCRIPT
 }
 
 notice() {
-  osascript - "$1" <<'APPLESCRIPT' 2>/dev/null
+  osascript - "$1" "$2" <<'APPLESCRIPT' 2>/dev/null
 on run argv
   try
-    display dialog (item 1 of argv) ¬
-      with title "Check the detected speakers" ¬
+    display dialog (item 2 of argv) ¬
+      with title (item 1 of argv) ¬
       buttons {"Review detected voices"} ¬
       default button "Review detected voices"
   end try
@@ -71,38 +74,85 @@ end run
 APPLESCRIPT
 }
 
+context_ok() {
+  osascript - "$1" "$2" <<'APPLESCRIPT' 2>/dev/null
+on run argv
+  try
+    set theResult to display dialog (item 2 of argv) ¬
+      with title (item 1 of argv) ¬
+      buttons {"Not now", "Identify speakers"} ¬
+      default button "Identify speakers" ¬
+      cancel button "Not now"
+    return button returned of theResult
+  on error
+    return "__CANCELLED__"
+  end try
+end run
+APPLESCRIPT
+}
+
+banner="$("$MA" speakers "$meeting_id" --meeting-banner 2>/dev/null)"
+[[ -n "$banner" ]] || banner="$meeting_id"
+
+intro="This is the meeting to name voices for:
+
+$banner
+
+You'll get one dialog per unidentified voice. The quote is on this screen;
+Play clip is extra if you want to hear them."
+
+ready="$(context_ok "Which meeting is this?" "$intro")"
+[[ "$ready" == "__CANCELLED__" ]] && exit 0
+
 warning="$("$MA" speakers "$meeting_id" --review-warning 2>/dev/null)"
-[[ -n "$warning" ]] && notice "$warning"
+[[ -n "$warning" ]] && notice "Check the detected speakers" "$warning"
 
 pending="$("$MA" speakers "$meeting_id" --pending-tsv 2>/dev/null)"
 [[ -n "$pending" ]] || exit 0
 
+known="$("$MA" voices --names 2>/dev/null | tr -d '\r')"
 total="$(printf '%s\n' "$pending" | grep -c '' )"
 position=0
 declare -a updates=()
+stopped=0
 
 # A here-string, not a pipe: a pipeline would run this loop in a subshell and
 # the collected answers would be discarded at the end of it.
-while IFS=$'\t' read -r key display detail quip guess; do
+while IFS=$'\t' read -r key display detail quip guess excerpt; do
   [[ -n "$key" ]] || continue
   position=$((position + 1))
 
-  prompt="$display of $total"
+  prompt="$banner"$'\n\n'"$display of $total"
   [[ -n "$detail" ]] && prompt="$prompt — $detail"
-  if [[ -n "$quip" ]]; then
-    prompt="$prompt"$'\n\n'"They said: \"$quip\""
+  said="${excerpt:-$quip}"
+  if [[ -n "$said" ]]; then
+    prompt="$prompt"$'\n\n'"What they said:"$'\n'"\"$said\""
+  else
+    prompt="$prompt"$'\n\n'"No distinctive quote for this voice — play the clip."
   fi
   prompt="$prompt"$'\n\n'"Who was this? (leave blank to skip)"
+  prompt="$prompt"$'\n'"Play clip to hear them. The text above stays on screen."
   if [[ -n "$guess" ]]; then
     prompt="$prompt"$'\n'"Suggested from the conversation — correct it if it's wrong."
   fi
+  if [[ -n "$known" ]]; then
+    prompt="$prompt"$'\n'"People you've named before: $known"
+  fi
 
-  answer="$(ask "Identify this speaker" "$prompt" "$guess")"
-
-  # Cancel or Escape means "stop asking", not "skip this one". Pressing Escape
-  # five times to get rid of a dialog nobody wanted is not a user experience.
-  [[ "$answer" == "__CANCELLED__" ]] && break
-  [[ "$answer" == "__TIMEOUT__" ]] && break
+  while true; do
+    answer="$(ask "Identify this speaker" "$prompt" "$guess")"
+    if [[ "$answer" == "__PLAY__" ]]; then
+      "$MA" speakers "$meeting_id" --play "$key" >/dev/null 2>&1 || true
+      continue
+    fi
+    # Cancel or Escape means "stop asking", not "skip this one".
+    if [[ "$answer" == "__CANCELLED__" || "$answer" == "__TIMEOUT__" ]]; then
+      stopped=1
+      break
+    fi
+    break
+  done
+  [[ "$stopped" -eq 1 ]] && break
 
   answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   [[ -n "$answer" ]] || continue
@@ -110,12 +160,17 @@ while IFS=$'\t' read -r key display detail quip guess; do
 done <<< "$pending"
 
 # One write for the whole sequence, so the watcher reindexes once rather than
-# once per voice.
+# once per voice. If only one listed name remains, `ma speakers --set` assumes
+# that last pairing and reports it.
 if [[ ${#updates[@]} -gt 0 ]]; then
-  "$MA" speakers "$meeting_id" "${updates[@]}" >/dev/null 2>&1 || {
+  saved="$("$MA" speakers "$meeting_id" "${updates[@]}" 2>/dev/null)" || {
     echo "speaker-popup: could not save speaker names for $meeting_id" >&2
     exit 1
   }
+  assumed="$(printf '%s\n' "$saved" | awk -F'\t' '/^ASSUMED\t/{print $3}')"
+  if [[ -n "$assumed" ]]; then
+    notice "Last remaining voice" "The last unnamed voice was saved as $assumed, because that was the only listed name left."
+  fi
 fi
 
 exit 0

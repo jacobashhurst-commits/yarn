@@ -210,3 +210,35 @@ def extract_mono(
         raise AudioError(f"ffmpeg channel extraction failed: {proc.stderr.strip()}")
     tmp.replace(dst)
     return dst
+
+
+def extract_clip(
+    src: Path,
+    dst: Path,
+    start_s: float,
+    duration_s: float = 6.0,
+) -> Path:
+    """Cut a short wav snippet. Offline ffmpeg only — not live capture."""
+    require_tool("ffmpeg")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".partial")
+    start_s = max(0.0, float(start_s))
+    duration_s = max(1.0, float(duration_s))
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{start_s:.3f}",
+            "-t", f"{duration_s:.3f}",
+            "-i", str(src),
+            "-c:a", "pcm_s16le",
+            "-f", "wav",
+            str(tmp),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise AudioError(f"ffmpeg clip failed: {proc.stderr.strip()}")
+    tmp.replace(dst)
+    return dst

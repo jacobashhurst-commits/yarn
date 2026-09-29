@@ -42,7 +42,18 @@ persistent job queue, stage resume, and capture-always-wins scheduling.
 
 Jobs live at `{archive}/jobs/{meeting_id}.json` and survive restart.
 
-A meeting is **Recorded** as soon as finalize succeeds. Processing is later.
+A meeting is **Recorded** as soon as finalize succeeds. The menu bar counts
+work waiting as inbox (not yet transcribed) plus transcripts that still need
+a summary. That is the number in `⏺ 4` and in "Process waiting now".
+
+Process-when is per machine:
+
+- **After each meeting** — watcher transcribes as soon as stop publishes.
+- **Evening** — today's recordings sit in the inbox; leftover meetings from
+  yesterday still catch up in the morning. Notes still pop the moment you stop.
+- **Manual** — nothing heavy runs until you press Process waiting now.
+
+`ma process` always runs the waiting work, ignoring the schedule.
 
 Stages, in order:
 
@@ -108,8 +119,20 @@ Diarisation (Sherpa, stable) distinguishes voices in one meeting.
 
 Known-speaker memory is a separate, off-by-default pass. It may suggest
 "Speaker 2 sounds like Adam (84%)". Confirmation still writes the name.
-Pyannote Community-1 is an experimental engine behind a setting, not a
-migration.
+
+The identification dialog shows the meeting date, title and your notes first,
+then asks about each voice. Each dialog shows **what they said** (a verbatim
+excerpt) and **Play clip**. The clip is a short isolated stretch of that
+voice, not a long overlapping slice. If you listed three people and name
+two, the last remaining listed name is assumed for the last unnamed voice
+and you are told.
+
+Confirming a name writes a durable identification snippet to
+`speakers/clips/{name}.wav` plus an averaged embedding in `library.json`.
+Meeting audio can later be pruned; those files are not. `ma voices --html`
+plays the kept snippets. Automatic suggestions compare the current meeting
+against those embeddings and still wait for confirmation.
+
 
 ## Library
 

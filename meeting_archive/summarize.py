@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from .config import SummaryConfig
@@ -17,6 +19,62 @@ log = logging.getLogger(__name__)
 # Stored on the transcript when capture-time summarisation is skipped because
 # Ollama is not running. `ma summarize --today` looks for this.
 DEFERRED_SUMMARY = "deferred: Ollama was not running"
+DEFERRED_TIMEOUT = (
+    "deferred: local summary timed out; use Summarise pending once Ollama is free"
+)
+DEFERRED_EVENING = "deferred: waiting until evening"
+DEFERRED_MANUAL = "deferred: summaries are manual"
+
+WHEN_AFTER = "after_meeting"
+WHEN_EVENING = "evening"
+WHEN_MANUAL = "manual"
+
+
+def is_pending_summary(message: str) -> bool:
+    """True when the meeting is fine and the summary can be retried later."""
+    text = (message or "").strip().lower()
+    return text.startswith("deferred:") or "timed out" in text
+
+
+def deferred_summary_reason(cfg) -> str:
+    when = str(getattr(cfg.summary, "when", "") or WHEN_AFTER)
+    if when == WHEN_MANUAL:
+        return DEFERRED_MANUAL
+    if when == WHEN_EVENING:
+        return DEFERRED_EVENING
+    return DEFERRED_SUMMARY
+
+
+def should_attempt_summary(cfg, meeting_id: str = "", now: datetime | None = None) -> bool:
+    """Whether the watcher may spend Whisper or Ollama time right now.
+
+    Manual never auto-runs. Evening waits until evening_hour, but a leftover
+    from yesterday is fair game the moment the laptop is awake — that is how
+    a closed lid overnight still gets processed.
+    """
+    when = str(getattr(cfg.summary, "when", "") or WHEN_AFTER)
+    if when == WHEN_MANUAL:
+        return False
+    if when != WHEN_EVENING:
+        return True
+    now = now or datetime.now()
+    try:
+        hour = int(getattr(cfg.summary, "evening_hour", 18) or 18)
+    except (TypeError, ValueError):
+        hour = 18
+    hour = min(23, max(0, hour))
+    if now.hour >= hour:
+        return True
+    if meeting_id:
+        try:
+            from .records import parse_meeting_id
+
+            started = parse_meeting_id(meeting_id)
+            if started.date() < now.date():
+                return True
+        except ValueError:
+            return True
+    return False
 
 
 class SummaryUnavailable(RuntimeError):
@@ -93,34 +151,52 @@ class Summarizer:
         return self._run(_combine_prompt(summaries))
 
     def _run(self, prompt: str) -> str:
-        command = str(Path(self.config.command).expanduser())
+        # HTTP generate, not `ollama run`. The CLI wraps the same model in an
+        # extra process and on an 8 GB machine an 18-minute transcript
+        # routinely burned the whole timeout with nothing written. The daemon
+        # is already up — is_running() probed it.
+        url = self.config.host.rstrip("/") + "/api/generate"
+        payload = {
+            "model": self.config.model,
+            "prompt": prompt,
+            "stream": False,
+            "think": False,
+            "keep_alive": "10m",
+            "options": {"temperature": 0.1},
+        }
         try:
-            proc = subprocess.run(
-                [
-                    command,
-                    "run",
-                    "--think=false",
-                    "--hidethinking",
-                    "--nowordwrap",
-                    "--keepalive",
-                    "10m",
-                    self.config.model,
-                ],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_s,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SummaryUnavailable(f"local summary failed: {exc}") from exc
-        if proc.returncode != 0:
-            raise SummaryUnavailable(
-                f"local summary failed: {proc.stderr.strip() or proc.stdout.strip()}"
-            )
-        text = re.sub(r"<think>.*?</think>", "", proc.stdout, flags=re.DOTALL).strip()
+            text = self._generate(url, payload)
+        except urllib.error.HTTPError as exc:
+            if exc.code in {400, 422}:
+                payload.pop("think", None)
+                text = self._generate(url, payload)
+            else:
+                raise SummaryUnavailable(
+                    f"local summary failed: Ollama HTTP {exc.code}"
+                ) from exc
+        except TimeoutError as exc:
+            raise SummaryUnavailable(DEFERRED_TIMEOUT) from exc
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason if getattr(exc, "reason", None) else exc)
+            if "timed out" in reason.lower():
+                raise SummaryUnavailable(DEFERRED_TIMEOUT) from exc
+            raise SummaryUnavailable(f"local summary failed: {reason}") from exc
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
         if not text:
             raise SummaryUnavailable("local summary model returned no text")
         return text
+
+    def _generate(self, url: str, payload: dict) -> str:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=self.config.timeout_s) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return str(data.get("response") or "")
 
 
 def _chunks(lines: list[str], limit: int) -> list[str]:

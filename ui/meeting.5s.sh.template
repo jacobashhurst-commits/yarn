@@ -17,9 +17,9 @@ TRANSCRIPTS="$MA_ROOT/transcripts"
 INBOX="$MA_ROOT/recordings/inbox"
 FAILED="$MA_ROOT/recordings/failed"
 IN_PROGRESS="$MA_ROOT/recordings/in-progress"
-JOBS="$MA_ROOT/jobs"
 PROCESS_STATUS="$MA_ROOT/.processing-status.json"
 PROCESS_CONTROL="$MA_ROOT/.processing-control.json"
+QUEUE_STATUS="$MA_ROOT/.queue-status.json"
 SETTINGS="$MA_ROOT/.yarn-settings.json"
 
 recording=false
@@ -35,7 +35,7 @@ if [[ -f "$STATE_FILE" ]]; then
     started_at="$(sed -n 4p "$STATE_FILE")"
     mode="$(sed -n 5p "$STATE_FILE")"
     started_epoch="$(sed -n 6p "$STATE_FILE")"
-    [[ -n "$mode" ]] || mode="call"
+    [[ -n "$mode" ]] || mode="room"
   fi
 fi
 
@@ -62,12 +62,20 @@ phase=""
 percent=0
 detail=""
 indeterminate=false
+proc_title=""
+proc_remaining=""
+proc_current=""
+proc_total=""
 if [[ -f "$PROCESS_STATUS" ]]; then
   phase="$(json_raw "$PROCESS_STATUS" phase)"
   percent="$(json_raw "$PROCESS_STATUS" percent)"
   detail="$(json_raw "$PROCESS_STATUS" detail)"
   updated="$(json_raw "$PROCESS_STATUS" updated_epoch)"
   indeterminate="$(json_raw "$PROCESS_STATUS" indeterminate)"
+  proc_title="$(json_raw "$PROCESS_STATUS" title)"
+  proc_remaining="$(json_raw "$PROCESS_STATUS" remaining)"
+  proc_current="$(json_raw "$PROCESS_STATUS" current)"
+  proc_total="$(json_raw "$PROCESS_STATUS" total)"
   if [[ -n "$phase" && "$updated" =~ ^[0-9]+$ ]] \
       && (( $(date +%s) - updated < 7200 )); then
     processing=true
@@ -83,8 +91,10 @@ fi
 recognise="$(json_raw "$SETTINGS" recognise_known)"
 engine="$(json_raw "$SETTINGS" speaker_engine)"
 retention="$(json_raw "$SETTINGS" audio_retention)"
+summarize_when="$(json_raw "$SETTINGS" summarize_when)"
 [[ -n "$engine" ]] || engine="sherpa"
 [[ -n "$retention" ]] || retention="1_week"
+[[ -n "$summarize_when" ]] || summarize_when="after_meeting"
 
 progress_bar() {
   local value="$1" width=18 bar="" i filled
@@ -104,8 +114,37 @@ stage_line() {
   fi
 }
 
+short_phase() {
+  case "$phase" in
+    "Preparing audio") printf 'Preparing' ;;
+    "Transcribing") printf 'Transcribing' ;;
+    "Identifying speakers") printf 'Speakers' ;;
+    "Recognising known speakers") printf 'Recognising' ;;
+    "Cleaning transcript") printf 'Cleaning' ;;
+    "Saving transcript") printf 'Saving' ;;
+    "Indexing"|"Indexing for search") printf 'Indexing' ;;
+    "Writing summary") printf 'Summary' ;;
+    *) printf '%s' "${phase:-Processing}" ;;
+  esac
+}
+
+fraction() {
+  if [[ "$proc_current" =~ ^[1-9][0-9]*$ && "$proc_total" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s/%s' "$proc_current" "$proc_total"
+  fi
+}
+
 pending="$(count_files "$INBOX" '\.json$')"
-queue_jobs="$(count_files "$JOBS" '\.json$')"
+queue_remaining="$(json_raw "$QUEUE_STATUS" remaining)"
+queue_inbox="$(json_raw "$QUEUE_STATUS" inbox)"
+queue_summaries="$(json_raw "$QUEUE_STATUS" summaries_pending)"
+[[ "$queue_remaining" =~ ^[0-9]+$ ]] || queue_remaining="$pending"
+[[ "$queue_inbox" =~ ^[0-9]+$ ]] || queue_inbox="$pending"
+[[ "$queue_summaries" =~ ^[0-9]+$ ]] || queue_summaries=0
+waiting="$queue_remaining"
+if $processing && [[ "$proc_remaining" =~ ^[0-9]+$ ]]; then
+  waiting="$proc_remaining"
+fi
 
 # ---- menu bar title ----
 # Recording and processing are independent: a live capture always wins the
@@ -118,13 +157,19 @@ if $recording; then
     echo "🔴 ${el}"
   fi
 elif $processing; then
-  if [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
-    echo "⏳ ${phase:-Processing}"
+  frac="$(fraction)"
+  stage="$(short_phase)"
+  if [[ -n "$frac" ]]; then
+    echo "⏳ ${frac} ${stage}"
+  elif [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
+    echo "⏳ ${stage}"
   else
-    echo "⏳ ${percent}%"
+    echo "⏳ ${percent}% ${stage}"
   fi
 elif $paused; then
   echo "⏸"
+elif [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
+  echo "⏺ ${queue_remaining}"
 else
   echo "⏺"
 fi
@@ -136,14 +181,20 @@ if $recording; then
   echo "Mode: ${mode} | size=11 color=#888888"
   echo "Stop recording | bash=\"$REC\" param1=stop terminal=false refresh=true"
 else
-  echo "Start Room — laptop mic (recommended) | bash=\"$REC\" param1=start param2=room terminal=false refresh=true"
-  echo "Start Call — mic + computer audio | bash=\"$REC\" param1=start param2=call terminal=false refresh=true"
+  echo "Start recording — laptop mic | bash=\"$REC\" param1=start param2=room terminal=false refresh=true"
 fi
 
 echo "---"
 echo "Processing | size=12 color=#888888"
 if $processing; then
+  frac="$(fraction)"
+  if [[ -n "$frac" ]]; then
+    echo "Meeting ${proc_current} of ${proc_total} | size=11 color=#cc8800"
+  fi
   echo "$(stage_line) | size=11 color=#cc8800"
+  if [[ -n "$proc_title" ]]; then
+    echo "About: $proc_title | size=11 color=#cc8800"
+  fi
   if [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
     echo "$(progress_bar "$percent")  ${percent}% | font=Menlo size=11 color=#cc8800"
   fi
@@ -152,23 +203,39 @@ elif $paused; then
 else
   echo "Idle | size=11 color=#888888"
 fi
-if [[ "$pending" -gt 0 ]]; then
-  echo "Queue: $pending meeting(s) in inbox | size=11 color=#cc8800"
-elif [[ "$queue_jobs" -gt 0 ]]; then
-  echo "Jobs on disk: $queue_jobs | size=11 color=#888888"
+when_hint=""
+case "$summarize_when" in
+  evening) when_hint=" until evening" ;;
+  manual) when_hint=" until you press Process" ;;
+esac
+if [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
+  if $processing; then
+    :
+  else
+    echo "${queue_remaining} meeting(s) waiting${when_hint} | size=11 color=#cc8800"
+  fi
+  if (( queue_inbox > 0 )); then
+    echo "-- ${queue_inbox} to transcribe | size=11 color=#888888"
+  fi
+  if (( queue_summaries > 0 )); then
+    echo "-- ${queue_summaries} to summarise | size=11 color=#888888"
+  fi
+  if ! $processing; then
+    echo "Process waiting now | bash=\"$MA\" param1=process terminal=false refresh=true"
+  fi
 fi
 if $paused; then
   echo "Resume processing | bash=\"$MA\" param1=resume terminal=false refresh=true"
 else
   echo "Pause processing | bash=\"$MA\" param1=pause terminal=false refresh=true"
 fi
-echo "Summarise pending | bash=\"$MA\" param1=summarize param2=--today terminal=false refresh=true"
 
 echo "---"
 echo "Quick actions | size=12 color=#888888"
 echo "Import recording | bash=\"$(dirname "$REC")/yarn-import\" param1=audio param2=\"$MA\" terminal=false refresh=true"
 echo "Import transcript | bash=\"$(dirname "$REC")/yarn-import\" param1=transcript param2=\"$MA\" terminal=false refresh=true"
 echo "Open library | bash=/bin/bash param1=-lc param2='$MA library --html >/dev/null; open \"$MA_ROOT/library.html\"' terminal=false refresh=true"
+echo "Known speakers | bash=/bin/bash param1=-lc param2='$MA voices --html >/dev/null; open \"$MA_ROOT/speakers/library.html\"' terminal=false refresh=true"
 echo "Open transcripts folder | bash=/usr/bin/open param1=\"$TRANSCRIPTS\" terminal=false"
 echo "Open Ollama | bash=/usr/bin/open param1=-a param2=Ollama terminal=false"
 
@@ -182,12 +249,14 @@ if [[ "$failed" -gt 0 ]]; then
   echo "⚠️ $failed failed — audio kept | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 fi
 # A raw capture sitting here while nothing is recording was never published.
-# Silence about that is how two meetings once disappeared without a trace.
+# Short leftovers are failed Start clicks (the capture outlived the error
+# dialog). Offer discard, not a terminal command.
 if ! $recording; then
   stranded="$(count_files "$IN_PROGRESS" '__raw\.wav$')"
   if [[ "$stranded" -gt 0 ]]; then
-    echo "⚠️ $stranded recording(s) not saved | size=11 color=#cc0000"
-    echo "-- Run: ma recover | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$IN_PROGRESS\" terminal=false"
+    echo "⚠️ $stranded unpublished capture(s) | size=11 color=#cc0000"
+    echo "-- Discard aborted starts | bash=\"$MA\" param1=recover param2=--discard-aborted terminal=false refresh=true"
+    echo "-- Show files | bash=/usr/bin/open param1=\"$IN_PROGRESS\" terminal=false"
   fi
 fi
 
@@ -206,6 +275,15 @@ echo "Audio retention: ${retention} | size=11 color=#888888"
 echo "-- 1 week | bash=\"$MA\" param1=setting param2=audio_retention param3=1_week terminal=false refresh=true"
 echo "-- 1 month | bash=\"$MA\" param1=setting param2=audio_retention param3=1_month terminal=false refresh=true"
 echo "-- Never | bash=\"$MA\" param1=setting param2=audio_retention param3=never terminal=false refresh=true"
+case "$summarize_when" in
+  evening) summarize_label="Evening" ;;
+  manual) summarize_label="Manual" ;;
+  *) summarize_label="After each meeting" ;;
+esac
+echo "Process when: ${summarize_label} | size=11 color=#888888"
+echo "-- After each meeting | bash=\"$MA\" param1=setting param2=summarize_when param3=after_meeting terminal=false refresh=true"
+echo "-- Evening (when the laptop is free) | bash=\"$MA\" param1=setting param2=summarize_when param3=evening terminal=false refresh=true"
+echo "-- Manual only | bash=\"$MA\" param1=setting param2=summarize_when param3=manual terminal=false refresh=true"
 echo "Diagnostics | bash=\"$MA\" param1=doctor terminal=true"
 echo "Logs | bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 echo "Refresh | refresh=true"

@@ -8,6 +8,7 @@ from pathlib import Path
 from . import jobs, records
 from .config import Config
 from .records import Transcript, markdown_filename, parse_meeting_id
+from .summarize import is_pending_summary
 
 
 @dataclass
@@ -62,9 +63,13 @@ def list_meetings(cfg: Config) -> list[MeetingRow]:
     for job in jobs.list_jobs(cfg):
         if job.meeting_id in rows:
             row = rows[job.meeting_id]
-            if job.state != jobs.COMPLETE:
+            # A leftover queued job must not make a finished transcript look
+            # unprocessed. Only live or failed jobs override the row.
+            if job.state == jobs.RUNNING:
                 row.state = job.state
-            if job.error:
+            elif job.state == jobs.FAILED and not row.has_transcript:
+                row.state = job.state
+            if job.state == jobs.FAILED and job.error and not row.error:
                 row.error = job.error
             if job.title and row.title == "Meeting":
                 row.title = job.title
@@ -106,7 +111,7 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
         "<!doctype html><meta charset=utf-8><title>Yarn library</title>",
         "<style>body{font:14px/1.4 -apple-system,sans-serif;margin:24px;max-width:960px}",
         "table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left}",
-        ".err{color:#b00}</style>",
+        ".err{color:#b00}.note{color:#8a5a00}</style>",
         "<h1>Yarn library</h1>",
         f"<p>{len(rows)} meeting(s). Transcripts are the archive; audio may expire.</p>",
         "<table><thead><tr>",
@@ -124,6 +129,11 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
         else:
             title = _esc(title)
         audio = "kept" if row.keep_audio else ("yes" if row.audio_present else "expired")
+        summary = (
+            "yes"
+            if row.has_summary
+            else ("pending" if is_pending_summary(row.error) else "no")
+        )
         lines.append(
             "<tr>"
             f"<td>{_esc(row.date)}</td>"
@@ -131,18 +141,41 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
             f"<td>{_esc(row.state)}</td>"
             f"<td>{mins}m {secs:02d}s</td>"
             f"<td>{row.confirmed}/{row.speakers or '—'}</td>"
-            f"<td>{'yes' if row.has_summary else 'no'}</td>"
+            f"<td>{summary}</td>"
             f"<td>{audio}</td>"
             "</tr>"
         )
         if row.error:
+            css = "note" if is_pending_summary(row.error) else "err"
             lines.append(
-                f'<tr><td colspan=7 class=err>{_esc(row.error)}</td></tr>'
+                f'<tr><td colspan=7 class={css}>{_esc(_meeting_notice(row.error))}</td></tr>'
             )
     lines.append("</tbody></table>")
     path = cfg.root / "library.html"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _meeting_notice(error: str) -> str:
+    if is_pending_summary(error):
+        if "timed out" in error.lower():
+            return (
+                "Summary pending — the local model ran out of time. "
+                "Open Ollama, then use Summarise pending."
+            )
+        if error.lower().startswith("deferred:"):
+            if "evening" in error.lower():
+                return (
+                    "Summary pending — Yarn writes these in the evening, "
+                    "or when you next open the laptop after that."
+                )
+            if "manual" in error.lower():
+                return "Summary pending — summaries are manual. Use Summarise pending."
+            return (
+                "Summary pending — Ollama was not running. "
+                "Open Ollama, then use Summarise pending."
+            )
+    return error
 
 
 def _esc(value: str) -> str:

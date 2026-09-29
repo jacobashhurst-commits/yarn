@@ -23,6 +23,7 @@
     ma search <query>         sanity-check search without going through MCP
     ma names <id>             show detected names and the evidence for each
     ma speakers <id>          show diarized voices; --set key=name to name one
+    ma voices                 known-speaker library; --html / --play NAME
     ma benchmark              run local benchmark_audio/ files if present
     ma status                 counts and recent meetings
 """
@@ -328,10 +329,21 @@ def cmd_finalize(cfg: Config, args) -> int:
 
 def cmd_recover(cfg: Config, args) -> int:
     """Deal with a capture that finalize refused and left in in-progress."""
+    if getattr(args, "discard_aborted", False):
+        removed = pipeline.discard_aborted_starts(cfg)
+        if not removed:
+            print("no aborted starts to discard")
+            return 0
+        for name in removed:
+            print(f"discarded aborted start {name}")
+        return 0
+
     stranded = pipeline.stranded_captures(cfg)
     if not stranded:
         print("nothing stranded; every capture has been published or discarded")
         return 0
+
+    aborted = {p.name for p in pipeline.aborted_start_captures(cfg)}
 
     if args.meeting_id:
         wanted = [p for p in stranded if p.name.startswith(args.meeting_id)]
@@ -344,8 +356,14 @@ def cmd_recover(cfg: Config, args) -> int:
     if not (args.publish or args.discard):
         for path in wanted:
             info = audio.probe(path)
-            print(f"{path.name}  {info['duration']:.0f}s  "
-                  f"{path.stat().st_size / (1024 * 1024):.0f} MB")
+            kind = "aborted start" if path.name in aborted else "unpublished"
+            print(
+                f"{path.name}  {info['duration']:.0f}s  "
+                f"{path.stat().st_size / (1024 * 1024):.0f} MB  ({kind})"
+            )
+        if aborted and not args.meeting_id:
+            print("\nshort leftovers are failed Start clicks, not lost meetings.")
+            print("discard them with: ma recover --discard-aborted")
         print("\nchoose one: --publish (transcribe it anyway) or --discard")
         return 0
 
@@ -389,11 +407,30 @@ def cmd_process(cfg: Config, args) -> int:
         if not manifest_path.exists():
             print(f"no manifest in the inbox for {args.meeting_id}", file=sys.stderr)
             return 1
-        pipeline.process(cfg, manifest_path, transcriber, store, diarizer, summarizer)
+        pipeline.process(
+            cfg,
+            manifest_path,
+            transcriber,
+            store,
+            diarizer,
+            summarizer,
+            force=True,
+        )
         return 0
-    count = watcher.sweep_inbox(cfg, transcriber, store, diarizer, summarizer)
-    print(f"processed {count} meeting(s)")
+    count = watcher.sweep_inbox(
+        cfg, transcriber, store, diarizer, summarizer, force=True
+    )
+    count += watcher.sweep_summaries(cfg, summarizer, store, force=True)
+    from . import queue as queue_mod
+
+    waiting = queue_mod.refresh(cfg)["remaining"]
+    print(f"processed {count} meeting(s); {waiting} still waiting")
     return 0
+
+
+def _tsv_field(value: str) -> str:
+    """Collapse whitespace so a quote cannot break the speaker-popup TSV."""
+    return " ".join(str(value or "").split())
 
 
 def cmd_speakers(cfg: Config, args) -> int:
@@ -403,6 +440,23 @@ def cmd_speakers(cfg: Config, args) -> int:
     from the terminal and naming it from the popup are the same operation, and
     both cost one reindex rather than a re-transcription.
     """
+    from . import speakers as speaker_memory
+
+    if getattr(args, "meeting_banner", False):
+        print(speaker_memory.meeting_banner(cfg, args.meeting_id))
+        return 0
+
+    if getattr(args, "play", None):
+        try:
+            path = speaker_memory.play_meeting_voice(
+                cfg, args.meeting_id, args.play
+            )
+        except FileNotFoundError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(f"played {path.name}")
+        return 0
+
     transcript_path = cfg.transcript_json(args.meeting_id)
     if not transcript_path.exists():
         print(f"no transcript for {args.meeting_id}", file=sys.stderr)
@@ -451,6 +505,17 @@ def cmd_speakers(cfg: Config, args) -> int:
             updates[key] = name
         if not updates:
             return 1
+        leftover = speaker_memory.leftover_assignment(
+            transcript.speaker_profiles,
+            {**roster, **updates},
+            records.listed_speakers(notes),
+            cfg.names.own_names,
+        )
+        if leftover and leftover[0] not in updates:
+            updates[leftover[0]] = leftover[1]
+            assumed = leftover
+        else:
+            assumed = None
         cfg.ensure_dirs()
         records.write_notes(
             notes_path,
@@ -459,18 +524,33 @@ def cmd_speakers(cfg: Config, args) -> int:
             applied=False,
         )
         try:
-            from . import speakers as speaker_memory
-
-            for name in updates.values():
+            for key, name in updates.items():
+                clip = ""
+                embedding: list[float] = []
+                profile = next(
+                    (p for p in transcript.speaker_profiles if p.speaker == key),
+                    None,
+                )
+                if profile is not None:
+                    clip, embedding = speaker_memory.capture_identity(
+                        cfg, transcript, profile, name
+                    )
                 speaker_memory.remember_confirmation(
-                    cfg, name=name, meeting_id=args.meeting_id
+                    cfg,
+                    name=name,
+                    meeting_id=args.meeting_id,
+                    embedding=embedding,
+                    clip=clip,
                 )
         except Exception:
             logging.getLogger("meeting_archive").exception(
                 "could not update speaker library for %s", args.meeting_id
             )
         for key, name in sorted(updates.items()):
-            print(f"{key} -> {name}")
+            tag = " (assumed last remaining name)" if assumed and key == assumed[0] else ""
+            print(f"{key} -> {name}{tag}")
+        if assumed:
+            print(f"ASSUMED\t{assumed[0]}\t{assumed[1]}")
         print("run `ma ingest` or let the watcher pick it up to relabel the transcript")
         return 0
 
@@ -498,13 +578,17 @@ def cmd_speakers(cfg: Config, args) -> int:
                         profile.speaker,
                         f"Speaker {index}",
                         detail,
-                        profile.quip,
-                        profile.guess,
+                        _tsv_field(profile.quip),
+                        _tsv_field(profile.guess),
+                        _tsv_field(speaker_memory.speaker_excerpt(transcript, profile)),
                     ]
                 )
             )
         return 0
 
+    known = ", ".join(s.name for s in speaker_memory.load_library(cfg))
+    if known:
+        print(f"known speakers: {known}")
     print(f"{len(profiles)} voice(s) in {args.meeting_id}:")
     for profile in profiles:
         index = models.speaker_index(profile.speaker) or 0
@@ -527,9 +611,48 @@ def cmd_speakers(cfg: Config, args) -> int:
     return 0
 
 
-def cmd_summarize(cfg: Config, args) -> int:
-    """Fill summaries for meetings that were processed while Ollama was off.
+def cmd_voices(cfg: Config, args) -> int:
+    from . import speakers as speaker_memory
 
+    if args.forget:
+        if not speaker_memory.forget_speaker(cfg, args.forget):
+            print(f"no known speaker named {args.forget!r}", file=sys.stderr)
+            return 1
+        print(f"forgot {args.forget}")
+        return 0
+    if args.play:
+        try:
+            path = speaker_memory.play_known_voice(cfg, args.play)
+        except FileNotFoundError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(f"played {path.name}")
+        return 0
+    people = speaker_memory.load_library(cfg)
+    if args.names:
+        print(", ".join(p.name for p in people))
+        return 0
+    if args.html:
+        path = speaker_memory.render_voices_html(cfg, people)
+        print(path)
+        return 0
+    if not people:
+        print("no known speakers yet")
+        return 0
+    for person in people:
+        clip = "clip" if person.clip else "no-clip"
+        print(
+            f"{person.name}  x{person.confirmation_count}  "
+            f"{person.last_seen or '—'}  {clip}"
+        )
+    return 0
+
+
+def cmd_summarize(cfg: Config, args) -> int:
+    """Fill summaries for meetings that were processed while Ollama was off,
+    the lid closed, or evening-batch was waiting.
+
+    Ignores the summarise-when schedule: this is the explicit button.
     Does not start Ollama. Open the app from the menu first, then run this.
     """
     from datetime import date
@@ -728,6 +851,14 @@ def cmd_setting(cfg: Config, args) -> int:
             print("value must be on or off", file=sys.stderr)
             return 1
         value: bool | str = lowered in {"on", "true", "1"}
+    elif args.key == "summarize_when":
+        if lowered not in {"after_meeting", "evening", "manual"}:
+            print(
+                "value must be after_meeting, evening, or manual",
+                file=sys.stderr,
+            )
+            return 1
+        value = lowered
     else:
         value = raw
     write_setting(cfg, args.key, value)
@@ -791,10 +922,14 @@ def cmd_status(cfg: Config, args) -> int:
     # never published: finalize refused it, or the recorder died. It would
     # otherwise sit there unmentioned, which is how two meetings were lost.
     stranded = pipeline.stranded_captures(cfg)
+    aborted = {p.name for p in pipeline.aborted_start_captures(cfg)}
     if stranded:
-        print(f"stranded:    {len(stranded)} capture(s) never saved")
+        print(f"stranded:    {len(stranded)} unpublished capture(s)")
         for path in stranded:
-            print(f"  {path.name}  (ma recover {path.name.split('__')[0]})")
+            kind = "aborted start" if path.name in aborted else "unpublished"
+            print(f"  {path.name}  ({kind}; ma recover {path.name.split('__')[0]})")
+        if aborted:
+            print("  discard short leftovers: ma recover --discard-aborted")
     audio_files = [p for p in cfg.audio_archive_dir.glob("*") if p.is_file()]
     size_mb = sum(p.stat().st_size for p in audio_files) / (1024 * 1024)
     print(f"audio kept:  {len(audio_files)} file(s), {size_mb:.1f} MB "
@@ -842,9 +977,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--mode",
         choices=["call", "room"],
-        default="call",
+        default="room",
         help="call: mic is Jacob, system audio is everyone else. "
-             "room: one mic, several unidentified people.",
+             "room: one mic, several unidentified people. Default is room.",
     )
     p.set_defaults(func=cmd_finalize)
 
@@ -853,7 +988,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--publish", action="store_true",
                    help="transcribe it, skipping the length check")
     p.add_argument("--discard", action="store_true", help="delete the raw audio")
-    p.add_argument("--mode", choices=("call", "room"), default="call")
+    p.add_argument(
+        "--discard-aborted",
+        action="store_true",
+        help="delete short leftovers from a failed Start click",
+    )
+    p.add_argument("--mode", choices=("call", "room"), default="room")
     p.set_defaults(func=cmd_recover)
 
     p = sub.add_parser("notes", help="save notes for a meeting")
@@ -866,7 +1006,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", type=float, default=5.0)
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("process", help="process the inbox once")
+    p = sub.add_parser(
+        "process",
+        help="process waiting meetings now, ignoring the schedule",
+    )
     p.add_argument("meeting_id", nargs="?")
     p.set_defaults(func=cmd_process)
 
@@ -923,7 +1066,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="describe an attendee/voice count mismatch for the speaker dialog",
     )
+    p.add_argument(
+        "--meeting-banner",
+        action="store_true",
+        help="print date, title and notes for the identification dialog",
+    )
+    p.add_argument(
+        "--play",
+        metavar="KEY",
+        help="play a short clip of one diarized voice, e.g. room-2",
+    )
     p.set_defaults(func=cmd_speakers)
+
+    p = sub.add_parser("voices", help="show or review the known-speaker library")
+    p.add_argument("--html", action="store_true")
+    p.add_argument("--names", action="store_true")
+    p.add_argument("--play", metavar="NAME")
+    p.add_argument("--forget", metavar="NAME")
+    p.set_defaults(func=cmd_voices)
 
     p = sub.add_parser("names", help="show detected names for a meeting")
     p.add_argument("meeting_id")
@@ -976,6 +1136,7 @@ def build_parser() -> argparse.ArgumentParser:
             "audio_retention",
             "cleanup_enabled",
             "pause_on_pressure",
+            "summarize_when",
         ),
     )
     p.add_argument("value")

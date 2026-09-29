@@ -2,16 +2,17 @@
 #
 # Manual recording control. Nothing here ever starts on its own.
 #
-#   rec start [call|room]   begin recording (default: call)
+#   rec start [room|call]   begin recording (default: room)
 #   rec stop                end recording, hand off, offer the popup
-#   rec toggle [call|room]  one command for a single hotkey
+#   rec toggle [room|call]  one command for a single hotkey
 #   rec status              is it recording, in which mode, for how long
 #
 # Modes:
-#   call  a video call. Your mic is you, system audio is everyone else, and
-#         the transcript says who said what.
-#   room  everyone in a physical room on your microphone. One channel, and
-#         every turn is labelled "Unknown" -- because it genuinely is.
+#   room  everyone in a physical room on your microphone. This is the default.
+#         One channel, and every turn is labelled "Unknown" until you name
+#         voices after transcription.
+#   call  a video call (hidden from the menu bar). Your mic is you, system
+#         audio is everyone else. Needs a multi-channel aggregate device.
 #
 # Bind `rec toggle` to a hotkey (Raycast, Alfred, Shortcuts, skhd) or run it
 # from a terminal. Recording only ever starts because you asked it to.
@@ -69,7 +70,7 @@ is_recording() {
 }
 
 do_start() {
-  local mode="${1:-call}"
+  local mode="${1:-room}"
   if [[ "$mode" != "call" && "$mode" != "room" ]]; then
     die "unknown mode '$mode'; expected call or room"
   fi
@@ -141,6 +142,11 @@ write_request() {
 # The recorder creates the wav only after the device has proven it is really
 # delivering audio, so the file appearing is the signal that recording has
 # begun. A failure arrives instead as a message in the error file.
+#
+# If this function decides the start failed, it must also stop the capture
+# process. Otherwise the wav keeps growing, the next Start is a new meeting
+# id, and the menu reports "recording(s) not saved" for a stub that is not
+# a lost meeting.
 await_capture() {
   local raw="$1" pid="$2" waited=0
   while (( waited < 150 )); do
@@ -148,6 +154,7 @@ await_capture() {
       local message
       message="$(cat "$ERROR_FILE")"
       rm -f "$ERROR_FILE"
+      abort_failed_start "$raw" "$pid"
       die "$message"
     fi
     [[ -s "$raw" ]] && return 0
@@ -159,14 +166,33 @@ await_capture() {
         local late
         late="$(cat "$ERROR_FILE")"
         rm -f "$ERROR_FILE"
+        abort_failed_start "$raw" "$pid"
         die "$late"
       fi
+      abort_failed_start "$raw" "$pid"
       die "the recorder exited before it started recording; see $MA_LOGS/recorder.log"
     fi
     sleep 0.1
     waited=$((waited + 1))
   done
+  abort_failed_start "$raw" "$pid"
   die "the recorder did not start within 15s; see $MA_LOGS/recorder.log"
+}
+
+
+abort_failed_start() {
+  local raw="$1" pid="${2:-}"
+  if recorder_agent_installed; then
+    launchctl kill SIGINT "gui/$(id -u)/$RECORDER_LABEL" 2>/dev/null || true
+  elif [[ -n "$pid" ]]; then
+    kill -INT "$pid" 2>/dev/null || true
+  fi
+  sleep 0.3
+  # Never published — there is no state file yet. A refused finalize is
+  # different: that file is kept for `ma recover`.
+  if [[ -n "$raw" && -f "$raw" && ! -f "$STATE_FILE" ]]; then
+    rm -f "$raw"
+  fi
 }
 
 
@@ -179,17 +205,23 @@ start_via_launchd() {
 
   # The job takes a moment to appear, and its pid is the one `rec stop` has to
   # signal, so it has to be read back from launchd rather than assumed.
-  local waited=0 pid=""
+  local waited=0 pid="" last=""
   while (( waited < 100 )); do
     if [[ -s "$ERROR_FILE" ]]; then
       local message
       message="$(cat "$ERROR_FILE")"
       rm -f "$ERROR_FILE"
+      abort_failed_start "$raw" "$pid"
       die "$message"
     fi
     pid="$(launchctl print "gui/$(id -u)/$RECORDER_LABEL" 2>/dev/null \
       | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)"
-    [[ -n "$pid" ]] && break
+    # kickstart -k can briefly report the dying pid. Wait until it is stable
+    # or await_capture will think the recorder exited.
+    if [[ -n "$pid" && "$pid" == "$last" ]]; then
+      break
+    fi
+    last="$pid"
     sleep 0.1
     waited=$((waited + 1))
   done
@@ -225,7 +257,7 @@ do_stop() {
   started_at="$(sed -n 4p "$STATE_FILE")"
   # Older state files have no mode line; default rather than fail a stop.
   mode="$(sed -n 5p "$STATE_FILE")"
-  [[ -n "$mode" ]] || mode="call"
+  [[ -n "$mode" ]] || mode="room"
   started_epoch="$(sed -n 6p "$STATE_FILE")"
   if [[ "$started_epoch" =~ ^[0-9]+$ ]]; then
     expected_duration=$(( $(date +%s) - started_epoch ))
@@ -290,7 +322,7 @@ $message"
 do_status() {
   if is_recording; then
     echo "recording $(sed -n 2p "$STATE_FILE") since $(sed -n 4p "$STATE_FILE")" \
-         "(mode: $(sed -n 5p "$STATE_FILE" || echo call))"
+         "(mode: $(sed -n 5p "$STATE_FILE" || echo room))"
   else
     echo "not recording"
     [[ -f "$STATE_FILE" ]] && echo "(stale state file present; 'rec start' will clear it)"
@@ -298,9 +330,9 @@ do_status() {
 }
 
 case "${1:-}" in
-  start)  do_start "${2:-call}" ;;
+  start)  do_start "${2:-room}" ;;
   stop)   do_stop ;;
-  toggle) if is_recording; then do_stop; else do_start "${2:-call}"; fi ;;
+  toggle) if is_recording; then do_stop; else do_start "${2:-room}"; fi ;;
   status) do_status ;;
-  *) echo "usage: rec {start|stop|toggle|status} [call|room]" >&2; exit 2 ;;
+  *) echo "usage: rec {start|stop|toggle|status} [room|call]" >&2; exit 2 ;;
 esac

@@ -126,6 +126,11 @@ command = "/usr/local/bin/ollama"
 # Probe only. Do not use `ollama list` to detect this — that starts the daemon.
 host = "http://127.0.0.1:11434"
 model = "qwen3.5:9b"
-timeout_s = 600
+timeout_s = 900
 # Longer transcripts are summarized in chunks and combined locally.
-chunk_chars = 40000
+chunk_chars = 12000
+# after_meeting = try once the transcript exists (and retry after sleep).
+# evening = hold until 18:00 local, then catch up (including leftovers
+# from a closed lid). manual = only the menu button.
+when = "after_meeting"
+evening_hour = 18

@@ -144,11 +144,18 @@ class SummaryConfig:
     # would start the daemon; a short HTTP probe will not.
     host: str = "http://127.0.0.1:11434"
     model: str = "qwen3.5:9b"
-    timeout_s: int = 600
+    timeout_s: int = 900
     # Longer transcripts are summarized in local chunks, then combined.
-    chunk_chars: int = 40000
+    # 12k keeps a 9B model inside 8 GB unified memory; 40k was one prompt
+    # that timed out on an 18-minute meeting.
+    chunk_chars: int = 12000
     # default | sales | technical | short | actions | detailed
     profile: str = "default"
+    # after_meeting: try once the transcript exists (and retry after sleep).
+    # evening: hold summaries until evening_hour, or the next day leftover.
+    # manual: only the menu button / `ma summarize`.
+    when: str = "after_meeting"
+    evening_hour: int = 18
 
 
 @dataclass
@@ -409,7 +416,17 @@ def load_config(path: Path | None = None) -> Config:
             setattr(cfg.names, key, n[key])
 
     s = data.get("summary", {})
-    for key in ("enabled", "command", "host", "model", "timeout_s", "chunk_chars", "profile"):
+    for key in (
+        "enabled",
+        "command",
+        "host",
+        "model",
+        "timeout_s",
+        "chunk_chars",
+        "profile",
+        "when",
+        "evening_hour",
+    ):
         if key in s:
             setattr(cfg.summary, key, s[key])
 
@@ -475,6 +492,15 @@ def _apply_settings_overlay(cfg: Config) -> None:
         cfg.cleanup.enabled = bool(overlay["cleanup_enabled"])
     if "pause_on_pressure" in overlay:
         cfg.processing.pause_on_pressure = bool(overlay["pause_on_pressure"])
+    if "summarize_when" in overlay:
+        cfg.summary.when = str(overlay["summarize_when"])
+    if "evening_hour" in overlay:
+        try:
+            hour = int(overlay["evening_hour"])
+            if 0 <= hour <= 23:
+                cfg.summary.evening_hour = hour
+        except (TypeError, ValueError):
+            pass
 
 
 def write_setting(cfg: Config, key: str, value) -> dict:

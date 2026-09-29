@@ -38,6 +38,17 @@ def test_summarizer_refuses_missing_model_without_downloading(monkeypatch):
     assert calls == [["/usr/local/bin/ollama", "list"]]
 
 
+def test_timeout_and_deferred_messages_are_retryable():
+    from meeting_archive.summarize import DEFERRED_TIMEOUT, is_pending_summary
+
+    assert is_pending_summary("deferred: Ollama was not running")
+    assert is_pending_summary(DEFERRED_TIMEOUT)
+    assert is_pending_summary(
+        "local summary failed: Command '['ollama', 'run']' timed out after 600 seconds"
+    )
+    assert not is_pending_summary("missing local diarization model")
+
+
 def test_summarizer_skips_without_starting_ollama_when_it_is_off(monkeypatch):
     from meeting_archive.summarize import DEFERRED_SUMMARY
 
@@ -51,7 +62,39 @@ def test_summarizer_skips_without_starting_ollama_when_it_is_off(monkeypatch):
     assert DEFERRED_SUMMARY.startswith("deferred")
 
 
-def test_summarizer_uses_local_ollama_and_hides_thinking(monkeypatch):
+def test_evening_schedule_waits_until_hour_then_catches_up_overnight():
+    from datetime import datetime
+
+    from meeting_archive.summarize import (
+        DEFERRED_EVENING,
+        DEFERRED_MANUAL,
+        deferred_summary_reason,
+        should_attempt_summary,
+    )
+
+    class Cfg:
+        summary = SummaryConfig(when="evening", evening_hour=18)
+
+    evening = Cfg()
+    morning = datetime(2026, 9, 26, 10, 0, 0)
+    night = datetime(2026, 9, 26, 19, 0, 0)
+    assert should_attempt_summary(evening, "2026-09-26T09-00-00", now=morning) is False
+    assert should_attempt_summary(evening, "2026-09-26T09-00-00", now=night) is True
+    assert should_attempt_summary(evening, "2026-09-25T09-00-00", now=morning) is True
+    assert deferred_summary_reason(evening) == DEFERRED_EVENING
+
+    evening.summary.when = "manual"
+    assert should_attempt_summary(evening, "2026-09-26T09-00-00", now=night) is False
+    assert deferred_summary_reason(evening) == DEFERRED_MANUAL
+
+    evening.summary.when = "after_meeting"
+    assert should_attempt_summary(evening, "2026-09-26T09-00-00", now=morning) is True
+
+
+def test_summarizer_uses_local_ollama_http_and_hides_thinking(monkeypatch):
+    import json
+    from urllib.request import Request
+
     config = SummaryConfig(command="/usr/local/bin/ollama", model="qwen3.5:9b")
     calls = []
 
@@ -63,15 +106,32 @@ def test_summarizer_uses_local_ollama_and_hides_thinking(monkeypatch):
             self.stdout = stdout
 
     def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        if args[-1] == "list":
-            return Result("NAME ID SIZE MODIFIED\nqwen3.5:9b x 1 GB now\n")
-        assert "--think=false" in args
-        assert "A real transcript." in kwargs["input"]
-        return Result("<think>private reasoning</think>\nUseful summary.")
+        calls.append(args)
+        return Result("NAME ID SIZE MODIFIED\nqwen3.5:9b x 1 GB now\n")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"response": "<think>private reasoning</think>\nUseful summary."}
+            ).encode()
+
+    def fake_urlopen(request, timeout=0):
+        assert isinstance(request, Request)
+        payload = json.loads(request.data.decode())
+        assert payload["model"] == "qwen3.5:9b"
+        assert payload["think"] is False
+        assert "A real transcript." in payload["prompt"]
+        return FakeResponse()
 
     monkeypatch.setattr(Path, "is_file", lambda self: True)
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     summarizer = Summarizer(config)
     monkeypatch.setattr(summarizer, "is_running", lambda: True)
     summary = summarizer.summarize(
@@ -79,4 +139,4 @@ def test_summarizer_uses_local_ollama_and_hides_thinking(monkeypatch):
         lambda turn: "Speaker 1",
     )
     assert summary == "Useful summary."
-    assert len(calls) == 2
+    assert calls == [["/usr/local/bin/ollama", "list"]]

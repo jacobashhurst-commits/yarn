@@ -28,11 +28,14 @@ Ideas already in the brief, plus the ones Jacob wants remembered:
 
 Add more of Jacob’s ideas here as they come.
 
-## V2 / V3 — home server
+## V2 / V3 — home server (opt-in)
 
-Optional split: this laptop still records and can transcribe, but storage,
-search, and the local LLM can run on a higher-power machine on the home
-network.
+The laptop always records and, by default, processes locally. A home server
+is later, for people who have one: storage, search, and heavier Whisper can
+move there. It is not the first option and not required.
+
+Optional split when it exists: this laptop still records, but storage, search,
+and the local LLM can run on a higher-power machine on the home network.
 
 - Archive root (transcripts, Chroma, audio retention) on the server
 - Query from Claude Desktop / a small client against that remote index
@@ -48,7 +51,7 @@ rewriting the pipeline.
 A one-time-fee product for people who want this workflow and do not want a
 subscription to a large hosted model.
 
-- Installer for laptop, or laptop + home server
+- Installer for laptop (required); home server is an optional extra
 - Local capture, local transcription, local search
 - Buyer chooses: this computer, or their own server
 - Not a Claude/ChatGPT wrapper; those stay optional query clients

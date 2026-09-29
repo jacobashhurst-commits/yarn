@@ -52,10 +52,10 @@ APPLESCRIPT
 }
 
 if [[ -n "$attendees_prefill" ]]; then
-  notes_prompt="Anything worth remembering about this meeting? (optional)"
+  notes_prompt="What's this meeting about? A short name is enough — you'll see it later when labelling speakers. (optional)"
   people_prompt="These names came up in the conversation. Correct them if needed, or dismiss."
 else
-  notes_prompt="Anything worth remembering about this meeting? (optional)"
+  notes_prompt="What's this meeting about? A short name is enough — you'll see it later when labelling speakers. (optional)"
   people_prompt="Who spoke in this recording? Include yourself and anyone heard over a phone or video call. Separate names with commas. (optional)"
 fi
 

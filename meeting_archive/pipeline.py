@@ -46,10 +46,29 @@ from .names import (
 from .quips import profile_speakers
 from .records import Manifest, Transcript
 from .store import MeetingStore
-from .summarize import DEFERRED_SUMMARY, Summarizer, SummaryUnavailable
+from .summarize import (
+    DEFERRED_SUMMARY,
+    Summarizer,
+    SummaryUnavailable,
+    deferred_summary_reason,
+    should_attempt_summary,
+)
 from .transcribe import Transcriber
 
 log = logging.getLogger(__name__)
+
+
+def _about(cfg: Config, meeting_id: str) -> str:
+    """Whatever Jacob typed when the recording stopped, if anything yet."""
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    text = str(notes.get("notes") or "").strip()
+    if text:
+        return " ".join(text.splitlines()[0].split())[:56]
+    job = jobs.load(cfg, meeting_id)
+    title = str(getattr(job, "title", "") or "").strip()
+    if title and title.lower() != "meeting":
+        return title[:56]
+    return ""
 
 
 def _processing_status(
@@ -68,6 +87,9 @@ def _processing_status(
     `percent` is stage-local and only meaningful when we have a real signal.
     Indeterminate stages still send 0 rather than inventing 65 or 82.
     """
+    from . import queue as queue_mod
+
+    batch = queue_mod.begin_work(cfg, meeting_id)
     payload = {
         "meeting_id": meeting_id,
         "phase": phase,
@@ -75,6 +97,10 @@ def _processing_status(
         "detail": detail,
         "updated_epoch": int(datetime.now().timestamp()),
         "indeterminate": bool(indeterminate),
+        "title": _about(cfg, meeting_id),
+        "remaining": int(batch.get("remaining") or 0),
+        "current": int(batch.get("current") or 0),
+        "total": int(batch.get("total") or 0),
     }
     if audio_position_s is not None:
         payload["audio_position_s"] = round(float(audio_position_s), 1)
@@ -84,10 +110,13 @@ def _processing_status(
 
 
 def _clear_processing_status(cfg: Config, meeting_id: str) -> None:
+    from . import queue as queue_mod
+
     try:
         current = records.read_notes(cfg.processing_status)
         if current.get("meeting_id") == meeting_id:
             cfg.processing_status.unlink(missing_ok=True)
+            queue_mod.end_work(cfg, meeting_id)
     except OSError:
         pass
 
@@ -117,6 +146,35 @@ def stranded_captures(cfg: Config) -> list[Path]:
     if not cfg.in_progress_dir.exists():
         return []
     return sorted(p for p in cfg.in_progress_dir.glob("*__raw.wav") if p != active)
+
+
+# A failed `rec start` can leave a few seconds of audio behind: the capture
+# process outlived the menu's "exited before started" error. Those stubs are
+# not unpublished meetings. Real refused captures (silence, clock slip) are
+# usually much longer.
+ABORTED_START_MAX_S = 15.0
+
+
+def aborted_start_captures(cfg: Config) -> list[Path]:
+    """Short leftover wavs from a Start that the menu already treated as failed."""
+    aborted: list[Path] = []
+    for path in stranded_captures(cfg):
+        try:
+            info = audio.probe(path)
+        except (OSError, audio.AudioError, ValueError, KeyError):
+            continue
+        if float(info.get("duration") or 0.0) <= ABORTED_START_MAX_S:
+            aborted.append(path)
+    return aborted
+
+
+def discard_aborted_starts(cfg: Config) -> list[str]:
+    removed: list[str] = []
+    for path in aborted_start_captures(cfg):
+        path.unlink(missing_ok=True)
+        removed.append(path.name)
+        log.info("discarded aborted start %s", path.name)
+    return removed
 
 
 def finalize(
@@ -211,6 +269,9 @@ def finalize(
     # picked up before both channels are fully on disk.
     manifest.write(cfg.inbox_dir / f"{meeting_id}.json")
     jobs.enqueue(cfg, meeting_id, source="native", duration_s=info["duration"])
+    from . import queue as queue_mod
+
+    queue_mod.refresh(cfg)
     log.info(
         "finalized meeting=%s mode=%s duration=%.1fs", meeting_id, mode, info["duration"]
     )
@@ -338,7 +399,12 @@ def apply_summary(
         return False
     notes = records.read_notes(cfg.notes_json(meeting_id))
     roster = records.speaker_roster(notes)
-    _processing_status(cfg, meeting_id, "Writing summary", 85)
+    from . import queue as queue_mod
+
+    queue_mod.refresh(cfg, exclude=meeting_id)
+    _processing_status(
+        cfg, meeting_id, "Writing summary", 0, indeterminate=True
+    )
     try:
         transcript.summary = summarizer.summarize(
             transcript.turns, cfg.turn_labeller(roster)
@@ -348,8 +414,16 @@ def apply_summary(
         transcript.write(path)
         ingest(cfg, meeting_id, store)
         return True
+    except SummaryUnavailable as exc:
+        # Interrupted or deferred: keep the transcript, drop any partial
+        # summary, retry later. An empty summary is the signal to try again.
+        transcript.summary = ""
+        transcript.summary_error = str(exc)
+        transcript.write(path)
+        raise
     finally:
         _clear_processing_status(cfg, meeting_id)
+        queue_mod.refresh(cfg)
 
 
 def needs_summary(transcript: Transcript) -> bool:
@@ -455,7 +529,9 @@ def rediarize(
         transcript.summary = ""
         transcript.summary_model = ""
         if summarizer is not None and summarizer.enabled and summarizer.is_running():
-            _processing_status(cfg, meeting_id, "Writing summary", 82)
+            _processing_status(
+                cfg, meeting_id, "Writing summary", 0, indeterminate=True
+            )
             roster = records.speaker_roster(notes)
             transcript.summary = summarizer.summarize(
                 transcript.turns, cfg.turn_labeller(roster)
@@ -466,7 +542,9 @@ def rediarize(
             transcript.summary_error = DEFERRED_SUMMARY
 
         transcript.write(transcript_path)
-        _processing_status(cfg, meeting_id, "Indexing for search", 96)
+        _processing_status(
+            cfg, meeting_id, "Indexing for search", 0, indeterminate=True
+        )
         ingest(cfg, meeting_id, store)
         return Transcript.read(transcript_path)
     finally:
@@ -506,6 +584,8 @@ def process(
     store: MeetingStore,
     diarizer: "Diarizer | None" = None,
     summarizer: "Summarizer | None" = None,
+    *,
+    force: bool = False,
 ) -> str:
     """Process one inbox manifest end to end. Returns the meeting id."""
     cfg.ensure_dirs()
@@ -523,6 +603,9 @@ def process(
         duration_s=manifest.duration_s,
         title=manifest.title,
     )
+    from . import queue as queue_mod
+
+    queue_mod.refresh(cfg, exclude=meeting_id)
     _processing_status(cfg, meeting_id, "Preparing audio", 0, indeterminate=True)
 
     try:
@@ -663,7 +746,11 @@ def process(
                 from . import speakers as speaker_memory
 
                 extra = speaker_memory.suggest_matches(
-                    profiles, speaker_memory.load_library(cfg)
+                    profiles,
+                    speaker_memory.load_library(cfg),
+                    embeddings=speaker_memory.embeddings_for_profiles(
+                        cfg, meeting_id, turns, profiles
+                    ),
                 )
                 named = {guess.speaker for guess in guesses}
                 guesses.extend(g for g in extra if g.speaker not in named)
@@ -711,57 +798,31 @@ def process(
             jobs.finish_stage(cfg, job, "cleanup", status=jobs.SKIPPED)
 
         summary, summary_error = "", ""
+        attempt_summary = False
         if summarizer is not None and summarizer.enabled:
-            jobs.begin_stage(cfg, job, "summarize")
-            if not summarizer.is_running():
-                # Do not start Ollama from the watcher. The transcript is
-                # complete without a summary; SwiftBar "Summarize today's
-                # meetings" fills this in later.
+            if not force and not should_attempt_summary(cfg, meeting_id):
+                summary_error = deferred_summary_reason(cfg)
+                log.info(
+                    "summary deferred for meeting=%s (%s)",
+                    meeting_id,
+                    summary_error,
+                )
+                jobs.finish_stage(
+                    cfg, job, "summarize", status=jobs.SKIPPED, error=summary_error
+                )
+            elif not summarizer.is_running():
                 summary_error = DEFERRED_SUMMARY
                 log.info("ollama not running; summary deferred for meeting=%s", meeting_id)
                 jobs.finish_stage(
                     cfg, job, "summarize", status=jobs.SKIPPED, error=summary_error
                 )
             else:
-                _processing_status(
-                    cfg,
-                    meeting_id,
-                    "Writing summary",
-                    0,
-                    f"Generating with {cfg.summary.model}",
-                    indeterminate=True,
+                # Write the transcript first. If the lid closes during Ollama,
+                # the meeting is already archived and the watcher retries.
+                attempt_summary = True
+                jobs.finish_stage(
+                    cfg, job, "summarize", status=jobs.SKIPPED, error=DEFERRED_SUMMARY
                 )
-                summary_started = time.perf_counter()
-                try:
-                    notes = records.read_notes(cfg.notes_json(meeting_id))
-                    roster = records.speaker_roster(notes)
-                    summary = summarizer.summarize(turns, cfg.turn_labeller(roster))
-                    jobs.finish_stage(cfg, job, "summarize")
-                    metrics.record(
-                        cfg,
-                        meeting_id=meeting_id,
-                        stage="summarize",
-                        engine="ollama",
-                        model=cfg.summary.model,
-                        meeting_duration_s=manifest.duration_s,
-                        wall_s=time.perf_counter() - summary_started,
-                    )
-                except SummaryUnavailable as exc:
-                    summary_error = str(exc)
-                    log.error("summary unavailable for meeting=%s: %s", meeting_id, exc)
-                    jobs.finish_stage(
-                        cfg, job, "summarize", status=jobs.SKIPPED, error=summary_error
-                    )
-                except Exception as exc:
-                    summary_error = f"local summary failed: {exc}"
-                    log.exception("summary failed for meeting=%s", meeting_id)
-                    jobs.finish_stage(
-                        cfg,
-                        job,
-                        "summarize",
-                        status=jobs.STAGE_FAILED,
-                        error=summary_error,
-                    )
         else:
             jobs.finish_stage(cfg, job, "summarize", status=jobs.SKIPPED)
 
@@ -809,12 +870,30 @@ def process(
             len(profiles),
             attendee_suggestion(candidates) or "-",
         )
+        if attempt_summary:
+            try:
+                apply_summary(cfg, meeting_id, summarizer, store)
+                jobs.finish_stage(cfg, job, "summarize")
+            except SummaryUnavailable as exc:
+                log.error("summary unavailable for meeting=%s: %s", meeting_id, exc)
+                jobs.finish_stage(
+                    cfg, job, "summarize", status=jobs.SKIPPED, error=str(exc)
+                )
+            except Exception as exc:
+                log.exception("summary failed for meeting=%s", meeting_id)
+                jobs.finish_stage(
+                    cfg, job, "summarize", status=jobs.STAGE_FAILED, error=str(exc)
+                )
         _clear_processing_status(cfg, meeting_id)
+        queue_mod.refresh(cfg)
         return meeting_id
 
     except Exception as exc:
         jobs.fail(cfg, job, str(exc), stage=job.current_stage)
         _clear_processing_status(cfg, meeting_id)
+        from . import queue as queue_mod
+
+        queue_mod.refresh(cfg)
         log.exception("processing failed for meeting=%s, moving to failed/", meeting_id)
         _move_all(claimed, cfg.failed_dir)
         raise
