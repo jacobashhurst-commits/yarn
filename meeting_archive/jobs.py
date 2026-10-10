@@ -270,6 +270,39 @@ def queued(cfg: Config) -> list[Job]:
     return [job for job in list_jobs(cfg) if job.state in (QUEUED, RUNNING, PAUSED)]
 
 
+def reconcile(cfg: Config) -> list[str]:
+    """Mark queued jobs complete when their meeting is already transcribed.
+
+    Job records predate stage tracking, and a job written before that existed
+    sits at state="queued" with every stage "pending" forever -- even though
+    the transcript was written and indexed days ago. The queue then reports
+    work that does not exist, which is worse than useless: it trains you to
+    ignore the one display that is supposed to tell you something is stuck.
+
+    Only QUEUED jobs are touched. A RUNNING job may be genuinely in flight
+    with its transcript already on disk and its index still to come, and
+    `recover_stale` is what owns that case. The transcript on disk is the
+    source of truth here, exactly as it is everywhere else.
+
+    Returns the meeting ids repaired.
+    """
+    repaired: list[str] = []
+    for job in list_jobs(cfg):
+        if job.state != QUEUED:
+            continue
+        if not cfg.transcript_json(job.meeting_id).exists():
+            continue  # genuinely outstanding -- leave it alone
+        for name in STAGE_ORDER:
+            stage = job.stages.get(name)
+            if stage is not None and stage.status == PENDING:
+                # The work happened; which stages ran is no longer knowable,
+                # so say "done" rather than invent durations.
+                stage.status = DONE
+        complete(cfg, job)
+        repaired.append(job.meeting_id)
+    return repaired
+
+
 CONTROL_PAUSED = "paused"
 CONTROL_REASON = "reason"
 

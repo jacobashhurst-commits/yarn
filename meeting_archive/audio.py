@@ -223,7 +223,9 @@ def extract_clip(
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".partial")
     start_s = max(0.0, float(start_s))
-    duration_s = max(1.0, float(duration_s))
+    # Identity clips can be short on purpose. Forcing a 1s floor here used to
+    # extend a clean solo stretch into the next speaker.
+    duration_s = max(0.4, float(duration_s))
     proc = subprocess.run(
         [
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",

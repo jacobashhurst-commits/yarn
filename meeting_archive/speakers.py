@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -103,12 +104,14 @@ def remember_confirmation(
     if found is None:
         found = KnownSpeaker(name=name)
         speakers.append(found)
-    found.confirmation_count += 1
-    found.last_seen = datetime.now().isoformat(timespec="seconds")
-    if meeting_id not in found.meeting_ids:
+    repeat = meeting_id in found.meeting_ids
+    prior = found.confirmation_count
+    if not repeat:
+        found.confirmation_count += 1
         found.meeting_ids.append(meeting_id)
+    found.last_seen = datetime.now().isoformat(timespec="seconds")
     if embedding:
-        found.embedding = _mean_embedding(found.embedding, embedding)
+        found.embedding = _mean_embedding(found.embedding, embedding, prior_count=prior)
     if clip:
         found.clip = clip
     save_library(cfg, speakers)
@@ -119,39 +122,109 @@ def suggest_matches(
     profiles: list[SpeakerProfile],
     library: list[KnownSpeaker],
     embeddings: dict[str, list[float]] | None = None,
-    min_confidence: float = 0.75,
+    min_confidence: float = 0.35,
+    min_margin: float = 0.08,
 ) -> list[SpeakerGuess]:
-    """Return voice-match guesses. Never applied silently."""
+    """Return voice-match guesses. Never applied silently.
+
+    Two things here are load-bearing, and both exist because the old 0.75
+    floor made this function unable to return anything at all:
+
+    `min_confidence` has to be reachable. Real same-speaker cosines with this
+    extractor sit around 0.4-0.53, not the 0.9 the number implied, so the gate
+    silently turned every known-speaker match into no suggestion -- which is
+    why the identify dialog offered a paragraph of transcript where a name
+    should have been.
+
+    `min_margin` then stops the low floor becoming a liability. At 0.35 a
+    second candidate is often close behind, and a near-tie is not an
+    identification: if the runner-up is within the margin, no name is offered.
+    Assignment is also global best-first rather than in profile order --
+    profiles arrive sorted by who spoke first, so the greedy version let the
+    earliest voice claim a name that fitted a later voice far better. That was
+    harmless while the floor was unreachable and a real mislabel risk now.
+    """
     embeddings = embeddings or {}
-    guesses: list[SpeakerGuess] = []
-    used_names: set[str] = set()
+
+    scored: list[tuple[float, float, SpeakerProfile, KnownSpeaker]] = []
     for profile in profiles:
         vector = embeddings.get(profile.speaker)
-        best: tuple[float, KnownSpeaker] | None = None
-        if vector:
-            for person in library:
-                if not person.embedding or person.name in used_names:
-                    continue
-                score = _cosine(vector, person.embedding)
-                if best is None or score > best[0]:
-                    best = (score, person)
-        if best and best[0] >= min_confidence:
-            person = best[1]
-            used_names.add(person.name)
-            guesses.append(
-                SpeakerGuess(
-                    speaker=profile.speaker,
-                    name=person.name,
-                    basis="voice",
-                    confidence=best[0],
-                    evidence=(
-                        f"Matched {person.name} based on "
-                        f"{person.confirmation_count} previously confirmed "
-                        f"meeting(s)."
-                    ),
-                )
+        if not vector:
+            continue
+        ranked = sorted(
+            (
+                (_cosine(vector, person.embedding), person)
+                for person in library
+                if person.embedding and is_real_name(person.name)
+            ),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        if not ranked:
+            continue
+        best_score, person = ranked[0]
+        runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
+        margin = best_score - runner_up
+        if best_score < min_confidence or margin < min_margin:
+            continue
+        scored.append((best_score, margin, profile, person))
+
+    # Strongest match first, so a confident pairing takes its name before a
+    # weaker one can. Ties break on speaker key for a deterministic result.
+    scored.sort(key=lambda row: (-row[0], -row[1], row[2].speaker))
+
+    guesses: list[SpeakerGuess] = []
+    used_names: set[str] = set()
+    used_speakers: set[str] = set()
+    for best_score, _margin, profile, person in scored:
+        if person.name in used_names or profile.speaker in used_speakers:
+            continue
+        used_names.add(person.name)
+        used_speakers.add(profile.speaker)
+        guesses.append(
+            SpeakerGuess(
+                speaker=profile.speaker,
+                name=person.name,
+                basis="voice",
+                confidence=best_score,
+                evidence=(
+                    f"Matched {person.name} based on "
+                    f"{person.confirmation_count} previously confirmed "
+                    f"meeting(s)."
+                ),
             )
+        )
     return guesses
+
+
+_DIALOG_NAME = re.compile(
+    r"^[A-Za-z][A-Za-z'\-]{0,24}(?:\s+[A-Za-z][A-Za-z'\-]{0,24}){0,2}$"
+)
+
+
+def usable_dialog_guess(
+    name: str,
+    attendees: list[str] | None = None,
+    known: list[str] | None = None,
+) -> str:
+    """What may pre-fill the identify dialog's name field.
+
+    Transcript quotes, locations ("Sydney" from "I'm Sydney-based"), and any
+    other sentence fragment stay out of the box. If Jacob listed attendees or
+    has a known-speaker library, the guess also has to be one of those people
+    -- a conversation word that happens to look like a name is not a guess.
+    """
+    raw = " ".join((name or "").split())
+    if not raw or len(raw) > 32 or not _DIALOG_NAME.match(raw):
+        return ""
+    allowed = {
+        item.casefold()
+        for item in (*(attendees or []), *(known or []))
+        if str(item).strip()
+    }
+    if allowed and raw.casefold() not in allowed:
+        return ""
+    return raw
 
 
 def leftover_assignment(
@@ -236,33 +309,157 @@ def find_channel_audio(cfg: Config, meeting_id: str, channel: str) -> Path | Non
     return None
 
 
-def snippet_window(transcript, profile: SpeakerProfile) -> tuple[float, float]:
-    """A short stretch of this voice that is mostly them, not a neighbour.
+_CLIP_TARGET_S = 4.0
+_CLIP_MIN_S = 1.2
+_CLIP_MAX_S = 12.0
+_CLIP_PAD_S = 0.45
+_CLIP_INSET_S = 0.30
 
-    Prefer the quip turn when it does not overlap someone else. Otherwise take
-    the longest isolated turn. Inset a little from the edges so a 6s turn
-    does not spill into the next speaker.
+
+@dataclass
+class IdentityClip:
+    """One stretch of a single voice, with exactly the words spoken in it."""
+
+    start: float
+    duration: float
+    text: str
+    # False when no whole transcript segment fitted inside a solo stretch, so
+    # the text is the nearest transcript rather than a word-for-word match.
+    exact: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start": round(self.start, 3),
+            "duration": round(self.duration, 3),
+            "text": self.text,
+            "exact": self.exact,
+        }
+
+
+def identity_clips(transcript, profile: SpeakerProfile, limit: int = 10) -> list[IdentityClip]:
+    """Best clips of one voice, strongest first.
+
+    Each clip is cut on transcript segment boundaries inside a stretch where
+    no other diarized voice is active, so the dialog can show the exact words
+    the clip plays. Later entries are what "Next clip" steps through.
     """
-    turns = list(getattr(transcript, "turns", []) or [])
-    mine = [turn for turn in turns if turn.speaker == profile.speaker]
-    others = [turn for turn in turns if turn.speaker and turn.speaker != profile.speaker]
-    isolated = [turn for turn in mine if not _overlaps_other(turn, others)]
+    segments = sorted(
+        (
+            s
+            for s in getattr(transcript, "segments", []) or []
+            if s.speaker == profile.speaker and (s.text or "").strip()
+        ),
+        key=lambda s: float(s.start),
+    )
     quip = (profile.quip or "").strip()
+    clips: list[IdentityClip] = []
+    for pad in (_CLIP_PAD_S, 0.2):
+        solo = [
+            iv
+            for iv in _solo_intervals(transcript, profile, pad=pad)
+            if iv[1] - iv[0] >= _CLIP_MIN_S
+        ]
+        clips = _segment_clips(solo, segments, quip)
+        if clips:
+            break
+    if not clips:
+        start, duration = _solo_window(transcript, profile)
+        clips = [
+            IdentityClip(
+                start=start,
+                duration=duration,
+                text=_text_near(segments, start, start + duration),
+                exact=False,
+            )
+        ]
+    return clips[: max(1, limit)]
 
-    chosen = None
-    if quip:
-        for turn in isolated or mine:
-            if quip in (turn.text or ""):
-                chosen = turn
-                break
-    if chosen is None and isolated:
-        chosen = max(isolated, key=lambda turn: (turn.end - turn.start, -turn.start))
-    if chosen is None and mine:
-        chosen = mine[0]
-    if chosen is None:
-        start = max(0.0, float(profile.first_at or 0.0))
-        return start, 3.5
-    return _inset_window(chosen)
+
+def _segment_clips(
+    solo: list[tuple[float, float]], segments, quip: str
+) -> list[IdentityClip]:
+    out: list[IdentityClip] = []
+    for iv_start, iv_end in solo:
+        inside = [
+            s
+            for s in segments
+            if float(s.start) >= iv_start - 0.15 and float(s.end) <= iv_end + 0.15
+        ]
+        run: list = []
+        for segment in inside:
+            if run and (
+                float(segment.start) - float(run[-1].end) > 0.6
+                or float(segment.end) - float(run[0].start) > _CLIP_MAX_S
+            ):
+                _add_clip(out, run, iv_start, iv_end)
+                run = []
+            run.append(segment)
+        _add_clip(out, run, iv_start, iv_end)
+    out.sort(key=lambda clip: _clip_score(clip, quip), reverse=True)
+    return out
+
+
+def _add_clip(out: list[IdentityClip], run: list, iv_start: float, iv_end: float) -> None:
+    if not run:
+        return
+    start = max(iv_start, float(run[0].start) - 0.1)
+    end = min(iv_end, float(run[-1].end) + 0.15)
+    if end - start < _CLIP_MIN_S:
+        return
+    text = " ".join(" ".join(s.text.split()) for s in run)
+    out.append(IdentityClip(start=start, duration=end - start, text=text))
+
+
+def _clip_score(clip: IdentityClip, quip: str) -> float:
+    from .quips import _is_all_filler, score_sentence
+
+    if _is_all_filler(clip.text):
+        return 0.0
+    d = clip.duration
+    if d < 3.0:
+        length = d / 3.0
+    elif d <= 9.0:
+        length = 1.0
+    else:
+        length = 9.0 / d
+    score = length * 3.0 + min(score_sentence(clip.text, position=1), 6.0) * 0.5
+    if quip and quip in clip.text:
+        score += 0.5
+    return score
+
+
+def _text_near(segments, start: float, end: float) -> str:
+    words = [
+        " ".join(s.text.split())
+        for s in segments
+        if min(end, float(s.end)) - max(start, float(s.start)) > 0
+    ]
+    return " ".join(words)
+
+
+def snippet_window(transcript, profile: SpeakerProfile) -> tuple[float, float]:
+    """The best single-voice clip of this speaker, as (start, duration)."""
+    clip = identity_clips(transcript, profile, limit=1)[0]
+    return clip.start, clip.duration
+
+
+def _solo_window(transcript, profile: SpeakerProfile) -> tuple[float, float]:
+    """A short stretch where only this voice is speaking.
+
+    Diarization spans are the source of truth. ASR turns can look isolated
+    while another span is still active, which is how Play clip used to play
+    two people at once. If nothing is cleanly solo, return the longest
+    exclusive leftover rather than a neighbour-contaminated fallback.
+    """
+    quip_turn = _quip_turn(transcript, profile)
+    for pad in (_CLIP_PAD_S, 0.2, 0.0):
+        solo = _solo_intervals(transcript, profile, pad=pad)
+        usable = [iv for iv in solo if iv[1] - iv[0] >= _CLIP_MIN_S]
+        chosen = _pick_solo_interval(usable or solo, quip_turn)
+        if chosen is not None:
+            return _window_from_interval(chosen)
+    start = max(0.0, float(profile.first_at or 0.0))
+    return start, _CLIP_MIN_S
 
 
 def speaker_excerpt(transcript, profile: SpeakerProfile, max_chars: int = 240) -> str:
@@ -288,24 +485,120 @@ def speaker_excerpt(transcript, profile: SpeakerProfile, max_chars: int = 240) -
     return trim(quip, max_chars) if quip else ""
 
 
-def _overlaps_other(turn, others, min_overlap: float = 0.2) -> bool:
-    for other in others:
-        overlap = min(float(turn.end), float(other.end)) - max(
-            float(turn.start), float(other.start)
-        )
-        if overlap >= min_overlap:
-            return True
-    return False
+def _quip_turn(transcript, profile: SpeakerProfile):
+    quip = (profile.quip or "").strip()
+    if not quip:
+        return None
+    for turn in getattr(transcript, "turns", []) or []:
+        if turn.speaker == profile.speaker and quip in (turn.text or ""):
+            return turn
+    return None
 
 
-def _inset_window(turn, max_s: float = 3.5, min_s: float = 1.5) -> tuple[float, float]:
-    length = max(0.0, float(turn.end) - float(turn.start))
-    duration = max(min_s, min(max_s, length)) if length else min_s
-    if length and duration > length:
-        duration = length
-    slack = max(0.0, length - duration)
-    start = max(0.0, float(turn.start) + min(0.25, slack / 2.0))
-    return start, duration
+def _solo_intervals(
+    transcript, profile: SpeakerProfile, pad: float
+) -> list[tuple[float, float]]:
+    speaker = profile.speaker
+    spans = [s for s in (getattr(transcript, "speaker_spans", None) or []) if s.speaker]
+    if spans:
+        mine = [(float(s.start), float(s.end)) for s in spans if s.speaker == speaker]
+        others = [
+            (float(s.start), float(s.end)) for s in spans if s.speaker != speaker
+        ]
+    else:
+        turns = list(getattr(transcript, "turns", []) or [])
+        mine = [
+            (float(t.start), float(t.end))
+            for t in turns
+            if t.speaker == speaker
+        ]
+        others = [
+            (float(t.start), float(t.end))
+            for t in turns
+            if t.speaker and t.speaker != speaker
+        ]
+    blocked = _merge_intervals([(s - pad, e + pad) for s, e in others])
+    return _subtract_intervals(_merge_intervals(mine), blocked)
+
+
+def _pick_solo_interval(
+    intervals: list[tuple[float, float]], quip_turn
+) -> tuple[float, float] | None:
+    if not intervals:
+        return None
+
+    def score(interval: tuple[float, float]) -> tuple[float, float]:
+        length = interval[1] - interval[0]
+        bonus = 0.0
+        if quip_turn is not None:
+            overlap = min(interval[1], float(quip_turn.end)) - max(
+                interval[0], float(quip_turn.start)
+            )
+            # Quip is a tie-break only. A chopped leftover of an overlapping
+            # quote must not beat a longer stretch that is only this voice.
+            if overlap >= 0.8 and length >= _CLIP_MIN_S:
+                bonus = 0.4
+        return (length + bonus, length)
+
+    return max(intervals, key=score)
+
+
+def _window_from_interval(
+    interval: tuple[float, float],
+    target: float = _CLIP_TARGET_S,
+    inset: float = _CLIP_INSET_S,
+    min_s: float = _CLIP_MIN_S,
+) -> tuple[float, float]:
+    start, end = interval
+    length = max(0.0, end - start)
+    if length <= min_s + 0.05:
+        used_inset = min(0.12, length * 0.08)
+    else:
+        used_inset = min(inset, max(0.0, (length - min_s) / 2.0))
+    inner_start = start + used_inset
+    inner_end = end - used_inset
+    inner = max(0.4, inner_end - inner_start)
+    duration = min(target, inner)
+    slack = max(0.0, inner - duration)
+    return max(0.0, inner_start + slack / 2.0), duration
+
+
+def _merge_intervals(
+    intervals: list[tuple[float, float]], join_gap: float = 0.12
+) -> list[tuple[float, float]]:
+    ordered = sorted((float(s), float(e)) for s, e in intervals if e > s)
+    if not ordered:
+        return []
+    out = [ordered[0]]
+    for start, end in ordered[1:]:
+        prev_s, prev_e = out[-1]
+        if start <= prev_e + join_gap:
+            out[-1] = (prev_s, max(prev_e, end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def _subtract_intervals(
+    base: list[tuple[float, float]],
+    blocked: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    result: list[tuple[float, float]] = []
+    for start, end in base:
+        pieces = [(start, end)]
+        for block_start, block_end in blocked:
+            next_pieces: list[tuple[float, float]] = []
+            for piece_start, piece_end in pieces:
+                if block_end <= piece_start or block_start >= piece_end:
+                    next_pieces.append((piece_start, piece_end))
+                    continue
+                if piece_start < block_start:
+                    next_pieces.append((piece_start, block_start))
+                if block_end < piece_end:
+                    next_pieces.append((block_end, piece_end))
+            pieces = next_pieces
+        result.extend((s, e) for s, e in pieces if e - s > 0.05)
+    return result
 
 
 def clips_dir(cfg: Config) -> Path:
@@ -352,6 +645,56 @@ def write_voice_clip(
     return dest.name
 
 
+_EMBED_CLIPS = 4
+
+
+def voice_embedding(
+    cfg: Config,
+    transcript,
+    profile: SpeakerProfile,
+    max_clips: int = _EMBED_CLIPS,
+) -> list[float]:
+    """Average fingerprint over several single-voice clips of one speaker.
+
+    One 4s clip gave cosines that could not separate people (0.2-0.5 for
+    everyone). Averaging a few clean clips is what makes the match usable.
+    """
+    from .audio import AudioError, extract_clip
+    from .diarize import embed_file
+
+    src = find_channel_audio(cfg, transcript.meeting_id, profile.channel)
+    if src is None:
+        return []
+    folder = clips_dir(cfg)
+    folder.mkdir(parents=True, exist_ok=True)
+    vectors: list[list[float]] = []
+    clips = [c for c in identity_clips(transcript, profile, limit=max_clips) if c.duration >= 1.5]
+    for index, clip in enumerate(clips):
+        tmp = folder / f".embed-{transcript.meeting_id}-{clip_slug(profile.speaker)}-{index}.wav"
+        try:
+            extract_clip(src, tmp, clip.start, clip.duration)
+            vector = list(embed_file(cfg.diarize, tmp))
+            if vector:
+                vectors.append(_normalise(vector))
+        except (AudioError, OSError):
+            log.warning(
+                "could not extract identity clip for %s in %s",
+                profile.speaker,
+                transcript.meeting_id,
+            )
+        except Exception:
+            log.exception(
+                "could not embed %s in meeting=%s", profile.speaker, transcript.meeting_id
+            )
+        finally:
+            tmp.unlink(missing_ok=True)
+    if not vectors:
+        return []
+    size = len(vectors[0])
+    vectors = [v for v in vectors if len(v) == size]
+    return _normalise([sum(v[i] for v in vectors) / len(vectors) for i in range(size)])
+
+
 def capture_identity(
     cfg: Config,
     transcript,
@@ -365,37 +708,18 @@ def capture_identity(
     is kept; later confirmations only update the embedding.
     """
     from .audio import AudioError, extract_clip
-    from .diarize import embed_file
 
     folder = clips_dir(cfg)
     folder.mkdir(parents=True, exist_ok=True)
     durable = folder / f"{clip_slug(name)}.wav"
     src = find_channel_audio(cfg, transcript.meeting_id, profile.channel)
-    start, duration = snippet_window(transcript, profile)
-    sample = durable if durable.exists() and durable.stat().st_size > 44 else None
-    tmp: Path | None = None
-    if src is not None:
-        if sample is not None:
-            tmp = folder / f".embed-{transcript.meeting_id}-{clip_slug(profile.speaker)}.wav"
-            try:
-                extract_clip(src, tmp, start, duration)
-                sample = tmp
-            except (AudioError, OSError):
-                tmp = None
-        else:
-            try:
-                extract_clip(src, durable, start, duration)
-                sample = durable if durable.exists() else None
-            except (AudioError, OSError):
-                sample = None
-    embedding: list[float] = []
-    if sample is not None:
+    if src is not None and not (durable.exists() and durable.stat().st_size > 44):
+        start, duration = snippet_window(transcript, profile)
         try:
-            embedding = list(embed_file(cfg.diarize, sample))
-        except Exception:
-            log.exception("could not embed identity clip for %s", name)
-    if tmp is not None:
-        tmp.unlink(missing_ok=True)
+            extract_clip(src, durable, start, duration)
+        except (AudioError, OSError):
+            pass
+    embedding = voice_embedding(cfg, transcript, profile)
     clip = durable.name if durable.exists() and durable.stat().st_size > 44 else ""
     return clip, embedding
 
@@ -405,42 +729,84 @@ def embeddings_for_profiles(
     meeting_id: str,
     turns,
     profiles: list[SpeakerProfile],
+    *,
+    spans=None,
+    segments=None,
 ) -> dict[str, list[float]]:
     """Fingerprint each voice in the current meeting for suggest_matches.
 
     Temporary clips are deleted afterwards. Durable library snippets are only
     written on confirmation, never during this suggestion pass.
     """
-    from .audio import AudioError, extract_clip
-    from .diarize import embed_file
-
-    holder = SimpleNamespace(turns=turns)
-    folder = clips_dir(cfg)
+    holder = SimpleNamespace(
+        meeting_id=meeting_id,
+        turns=turns,
+        speaker_spans=list(spans or []),
+        segments=list(segments or []),
+    )
     out: dict[str, list[float]] = {}
     for profile in profiles:
-        src = find_channel_audio(cfg, meeting_id, profile.channel)
-        if src is None:
-            continue
-        start, duration = snippet_window(holder, profile)
-        tmp = folder / f".embed-{meeting_id}-{clip_slug(profile.speaker)}.wav"
-        try:
-            extract_clip(src, tmp, start, duration)
-            vector = embed_file(cfg.diarize, tmp)
-            if vector:
-                out[profile.speaker] = vector
-        except (AudioError, OSError):
-            log.warning(
-                "could not extract identity snippet for %s in %s",
-                profile.speaker,
-                meeting_id,
-            )
-        except Exception:
-            log.exception(
-                "could not embed %s in meeting=%s", profile.speaker, meeting_id
-            )
-        finally:
-            tmp.unlink(missing_ok=True)
+        vector = voice_embedding(cfg, holder, profile)
+        if vector:
+            out[profile.speaker] = vector
     return out
+
+
+_JUNK_NAMES = {
+    "unsure", "not sure", "unknown", "dont know", "don't know", "no idea",
+    "idk", "n/a", "na", "none", "skip", "?", "??", "-", "nobody",
+}
+
+
+def is_real_name(name: str) -> bool:
+    """False for answers like "unsure" that must never become a known speaker."""
+    folded = " ".join(str(name or "").split()).casefold()
+    return bool(folded) and folded not in _JUNK_NAMES
+
+
+def voice_matches(
+    vector: list[float], library: list[KnownSpeaker], limit: int = 3
+) -> list[tuple[str, float]]:
+    """Known speakers ranked by how close they sound, best first."""
+    if not vector:
+        return []
+    ranked = sorted(
+        (
+            (person.name, _cosine(vector, person.embedding))
+            for person in library
+            if person.embedding and is_real_name(person.name)
+        ),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+    return ranked[:limit]
+
+
+# Prefill thresholds for the identify dialog. Cosines with this extractor sit
+# around 0.45-0.7 for the same person and 0.2-0.4 for others.
+_PREFILL_STRONG = 0.50
+_PREFILL_LIKELY = 0.38
+_PREFILL_MARGIN = 0.04
+
+
+def dialog_prediction(
+    ranked: list[tuple[str, float]],
+    conversation_guess: str = "",
+) -> tuple[str, str]:
+    """(name to pre-fill, why) for one voice. Name is "" when nothing is credible."""
+    if ranked:
+        best_name, best = ranked[0]
+        runner = ranked[1][1] if len(ranked) > 1 else 0.0
+        if best >= _PREFILL_STRONG and best - runner >= _PREFILL_MARGIN:
+            return best_name, f"sounds like {best_name} (strong voice match {best:.2f})"
+    if conversation_guess:
+        return conversation_guess, f"named in the conversation as {conversation_guess}"
+    if ranked:
+        best_name, best = ranked[0]
+        runner = ranked[1][1] if len(ranked) > 1 else 0.0
+        if best >= _PREFILL_LIKELY and best - runner >= _PREFILL_MARGIN:
+            return best_name, f"probably {best_name} (voice match {best:.2f})"
+    return "", "no confident voice match"
 
 
 def play_wav(path: Path) -> None:
@@ -498,14 +864,104 @@ def play_meeting_voice(cfg: Config, meeting_id: str, speaker_key: str) -> Path:
             "name this voice while meeting audio is still kept so a "
             "reference clip can be saved"
         )
-    start, duration = snippet_window(transcript, profile)
-    dest = clips_dir(cfg) / f"{meeting_id}__{speaker_key}.wav"
-    try:
-        extract_clip(src, dest, start, duration)
-    except AudioError as exc:
-        raise FileNotFoundError(str(exc)) from exc
+    dest = meeting_clip_path(cfg, meeting_id, speaker_key, 0, transcript=transcript)
     play_wav(dest)
     return dest
+
+
+def meeting_clip_path(
+    cfg: Config,
+    meeting_id: str,
+    speaker_key: str,
+    index: int = 0,
+    *,
+    transcript=None,
+) -> Path:
+    """Extract clip `index` of one voice (see identity_clips) and return the wav."""
+    from .audio import AudioError, extract_clip
+    from .records import Transcript
+
+    if transcript is None:
+        path = cfg.transcript_json(meeting_id)
+        if not path.exists():
+            raise FileNotFoundError(f"no transcript for {meeting_id}")
+        transcript = Transcript.read(path)
+    profile = next(
+        (p for p in transcript.speaker_profiles if p.speaker == speaker_key),
+        None,
+    )
+    if profile is None:
+        raise FileNotFoundError(f"{speaker_key!r} is not a voice in {meeting_id}")
+    src = find_channel_audio(cfg, meeting_id, profile.channel)
+    if src is None:
+        raise FileNotFoundError(f"no retained audio for {meeting_id}")
+    clips = identity_clips(transcript, profile)
+    clip = clips[max(0, min(int(index), len(clips) - 1))]
+    dest = clips_dir(cfg) / f"{meeting_id}__{speaker_key}__{int(index)}.wav"
+    try:
+        extract_clip(src, dest, clip.start, clip.duration)
+    except AudioError as exc:
+        raise FileNotFoundError(str(exc)) from exc
+    return dest
+
+
+def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
+    """Everything the identify window needs for one meeting, as JSON-able data."""
+    from . import models
+    from .records import Transcript, listed_speakers, read_notes, speaker_roster
+
+    transcript = Transcript.read(cfg.transcript_json(meeting_id))
+    notes = read_notes(cfg.notes_json(meeting_id))
+    roster = speaker_roster(notes)
+    attendees = listed_speakers(notes)
+    library = load_library(cfg)
+    known = [p.name for p in library if is_real_name(p.name)]
+    has_audio = bool(transcript.speaker_profiles) and any(
+        find_channel_audio(cfg, meeting_id, p.channel) is not None
+        for p in transcript.speaker_profiles
+    )
+    voices = []
+    for profile in transcript.speaker_profiles:
+        clips = identity_clips(transcript, profile)
+        ranked: list[tuple[str, float]] = []
+        if has_audio:
+            try:
+                ranked = voice_matches(voice_embedding(cfg, transcript, profile), library)
+            except Exception:
+                log.exception("voice match failed for %s in %s", profile.speaker, meeting_id)
+        conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
+        guess, reason = dialog_prediction(ranked, conversation)
+        index = models.speaker_index(profile.speaker) or 0
+        voices.append(
+            {
+                "key": profile.speaker,
+                "label": f"Speaker {index}",
+                "detail": (
+                    f"Spoke {models.format_duration(profile.speaking_s)} "
+                    f"across {profile.turns} "
+                    f"{'turn' if profile.turns == 1 else 'turns'}, from "
+                    f"{models.format_timestamp(profile.first_at)}"
+                ),
+                "named": roster.get(profile.speaker, ""),
+                "guess": guess,
+                "reason": reason,
+                "matches": [{"name": n, "score": round(s, 3)} for n, s in ranked],
+                "clips": [
+                    {**c.to_dict(), "at": models.format_timestamp(c.start)} for c in clips
+                ],
+            }
+        )
+    names: list[str] = []
+    for name in (*attendees, *known):
+        if name.casefold() not in {n.casefold() for n in names}:
+            names.append(name)
+    return {
+        "meeting_id": meeting_id,
+        "banner": meeting_banner(cfg, meeting_id),
+        "has_audio": has_audio,
+        "names": names,
+        "voices": voices,
+    }
 
 
 def play_known_voice(cfg: Config, name: str) -> Path:
@@ -631,13 +1087,24 @@ def _esc(value: str) -> str:
     )
 
 
-def _mean_embedding(existing: list[float], incoming: list[float]) -> list[float]:
-    if not existing:
-        return list(incoming)
-    if len(existing) != len(incoming):
-        return list(incoming)
-    n = 1.0  # running mean with equal weight on the new sample
-    return [(old + new) / 2.0 for old, new in zip(existing, incoming)]
+def _normalise(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector))
+    if norm == 0:
+        return list(vector)
+    return [x / norm for x in vector]
+
+
+def _mean_embedding(
+    existing: list[float], incoming: list[float], prior_count: int = 1
+) -> list[float]:
+    """Running mean over confirmations, so one odd meeting cannot drag a voice
+    halfway to someone else."""
+    if not existing or len(existing) != len(incoming):
+        return _normalise(list(incoming))
+    weight = max(1, int(prior_count))
+    a = _normalise(existing)
+    b = _normalise(incoming)
+    return _normalise([(old * weight + new) / (weight + 1) for old, new in zip(a, b)])
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

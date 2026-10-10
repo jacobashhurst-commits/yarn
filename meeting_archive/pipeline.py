@@ -43,7 +43,7 @@ from .names import (
     infer_speaker_names,
     speaker_guess_map,
 )
-from .quips import profile_speakers
+from .quips import apply_guesses, profile_speakers
 from .records import Manifest, Transcript
 from .store import MeetingStore
 from .summarize import (
@@ -90,23 +90,133 @@ def _processing_status(
     from . import queue as queue_mod
 
     batch = queue_mod.begin_work(cfg, meeting_id)
+    now = int(datetime.now().timestamp())
+    previous = records.read_notes(cfg.processing_status)
+    phase_started = now
+    if previous.get("meeting_id") == meeting_id and previous.get("phase") == phase:
+        phase_started = int(previous.get("phase_started_epoch") or now)
+    job = jobs.load(cfg, meeting_id)
+    meeting_s = float(audio_duration_s or (job.duration_s if job else 0.0) or 0.0)
+    percent = min(max(int(percent), 0), 100)
+    elapsed = max(0, now - phase_started)
+    eta, estimated = _phase_estimate(cfg, phase, meeting_s, elapsed, percent, indeterminate)
+    expected_s = _expected_phase_s(cfg, phase, meeting_s)
     payload = {
         "meeting_id": meeting_id,
         "phase": phase,
-        "percent": min(max(int(percent), 0), 100),
+        "percent": percent,
         "detail": detail,
-        "updated_epoch": int(datetime.now().timestamp()),
+        "updated_epoch": now,
         "indeterminate": bool(indeterminate),
         "title": _about(cfg, meeting_id),
         "remaining": int(batch.get("remaining") or 0),
         "current": int(batch.get("current") or 0),
         "total": int(batch.get("total") or 0),
+        "phase_started_epoch": phase_started,
+        "elapsed": _fmt_span(elapsed),
+        "eta": eta,
+        "estimated_percent": estimated,
+        # Long silent stages (voice separation) never rewrite this file, so
+        # the menu works out elapsed / remaining itself from these two.
+        "expected_s": int(expected_s),
+        "stale_after_epoch": now + int(max(7200, expected_s * 2.5)),
+        "recording_length": _fmt_span(meeting_s) if meeting_s else "",
+        **_step_summary(job, phase),
     }
     if audio_position_s is not None:
         payload["audio_position_s"] = round(float(audio_position_s), 1)
     if audio_duration_s is not None:
         payload["audio_duration_s"] = round(float(audio_duration_s), 1)
     records.write_json_atomic(cfg.processing_status, payload)
+
+
+_PHASE_STAGE = {
+    "Transcribing": "transcribe",
+    "Identifying speakers": "diarize",
+    "Recognising known speakers": "recognise",
+    "Cleaning transcript": "cleanup",
+    "Indexing": "index",
+    "Indexing for search": "index",
+    "Writing summary": "summarize",
+}
+
+# Display order follows what actually runs: the summary is attempted after
+# the meeting is already indexed.
+_STEP_LABELS = (
+    ("transcribe", "Transcribe"),
+    ("diarize", "Separate voices"),
+    ("recognise", "Match known voices"),
+    ("cleanup", "Clean up"),
+    ("index", "Search index"),
+    ("summarize", "Summary"),
+)
+
+
+def _fmt_span(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def _step_summary(job, phase: str) -> dict:
+    """"Step 2 of 5" plus a one-line checklist, for the menu bar."""
+    if job is None:
+        return {"step": "", "steps": ""}
+    active = _PHASE_STAGE.get(phase, job.current_stage)
+    shown = [
+        (name, label)
+        for name, label in _STEP_LABELS
+        if job.stages[name].status != jobs.SKIPPED or name == active
+    ]
+    parts: list[str] = []
+    step = ""
+    for position, (name, label) in enumerate(shown, start=1):
+        stage = job.stages[name]
+        if name == active and stage.status in (jobs.RUNNING, jobs.PENDING):
+            parts.append(f"▶ {label}")
+            step = f"Step {position} of {len(shown)}: {label}"
+        elif stage.status == jobs.DONE:
+            took = f" {_fmt_span(stage.duration_s)}" if stage.duration_s >= 1 else ""
+            parts.append(f"✓ {label}{took}")
+        elif stage.status == jobs.STAGE_FAILED:
+            parts.append(f"✗ {label}")
+        else:
+            parts.append(f"○ {label}")
+    return {"step": step, "steps": "  ".join(parts)}
+
+
+def _phase_estimate(
+    cfg: Config,
+    phase: str,
+    meeting_s: float,
+    elapsed: int,
+    percent: int,
+    indeterminate: bool,
+) -> tuple[str, int]:
+    """("about 40m left", estimated percent) from real progress or past speed."""
+    if not indeterminate and 3 <= percent < 100 and elapsed >= 20:
+        left = elapsed * (100 - percent) / percent
+        return f"about {_fmt_span(left)} left", percent
+    expected = _expected_phase_s(cfg, phase, meeting_s)
+    if expected < 30:
+        return "", 0
+    estimated = min(95, int(elapsed * 100 / expected))
+    left = expected - elapsed
+    if left <= 0:
+        return "taking longer than usual", 95
+    return f"about {_fmt_span(left)} left (typical for a {_fmt_span(meeting_s)} recording)", estimated
+
+
+def _expected_phase_s(cfg: Config, phase: str, meeting_s: float) -> float:
+    stage = _PHASE_STAGE.get(phase)
+    if not stage or meeting_s <= 0:
+        return 0.0
+    return metrics.typical_realtime_factor(cfg, stage) * meeting_s
 
 
 def _clear_processing_status(cfg: Config, meeting_id: str) -> None:
@@ -520,6 +630,37 @@ def rediarize(
             transcript.turns,
             guesses=speaker_guess_map(transcript.speaker_guesses),
         )
+        # Rediarizing renumbers the voices, so any known-speaker match has to
+        # be recomputed against the new keys rather than carried over. Kept
+        # non-fatal: losing a suggestion must not cost the rediarize.
+        if cfg.speakers_memory.recognise_known and spans:
+            try:
+                from . import speakers as speaker_memory
+
+                extra = speaker_memory.suggest_matches(
+                    transcript.speaker_profiles,
+                    speaker_memory.load_library(cfg),
+                    embeddings=speaker_memory.embeddings_for_profiles(
+                        cfg,
+                        meeting_id,
+                        transcript.turns,
+                        transcript.speaker_profiles,
+                        spans=spans,
+                        segments=transcript.segments,
+                    ),
+                    min_confidence=cfg.speakers_memory.min_confidence,
+                    min_margin=cfg.speakers_memory.min_margin,
+                )
+                named = {guess.speaker for guess in transcript.speaker_guesses}
+                transcript.speaker_guesses.extend(
+                    g for g in extra if g.speaker not in named
+                )
+            except Exception:
+                log.exception("speaker memory failed on rediarize for %s", meeting_id)
+        apply_guesses(
+            transcript.speaker_profiles,
+            speaker_guess_map(transcript.speaker_guesses),
+        )
         transcript.diarize_model = cfg.diarize.model if spans else ""
         transcript.diarize_error = ""
 
@@ -749,8 +890,10 @@ def process(
                     profiles,
                     speaker_memory.load_library(cfg),
                     embeddings=speaker_memory.embeddings_for_profiles(
-                        cfg, meeting_id, turns, profiles
+                        cfg, meeting_id, turns, profiles, spans=spans, segments=segments
                     ),
+                    min_confidence=cfg.speakers_memory.min_confidence,
+                    min_margin=cfg.speakers_memory.min_margin,
                 )
                 named = {guess.speaker for guess in guesses}
                 guesses.extend(g for g in extra if g.speaker not in named)
@@ -764,6 +907,13 @@ def process(
                 )
         else:
             jobs.finish_stage(cfg, job, "recognise", status=jobs.SKIPPED)
+
+        # Voice matches only exist after the recognise stage, which needs the
+        # profiles in order to embed them. Re-stamp so the identify dialog
+        # offers the same name the transcript records. Outside the try above,
+        # so a failed or skipped recognise degrades to a no-op rather than
+        # leaving the conversation-derived guesses unapplied.
+        apply_guesses(profiles, speaker_guess_map(guesses))
 
         raw_turns: list = []
         if cfg.cleanup.enabled and summarizer is not None:

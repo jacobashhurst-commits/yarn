@@ -405,6 +405,15 @@ def test_self_introduction_names_that_voice():
     assert guesses[0].basis == "self"
 
 
+def test_self_introduction_ignores_location_adjectives():
+    turns = [
+        Turn(ROOM, 0.0, 3.0, "Yeah, yeah, I'm Sydney-based.", speaker="room-1"),
+        Turn(ROOM, 4.0, 6.0, "I'm Marina.", speaker="room-2"),
+    ]
+    guesses = infer_speaker_names(turns, own_names=["Jacob"], own_label="Jacob")
+    assert speaker_guess_map(guesses) == {"room-2": "Marina"}
+
+
 def test_handoff_names_the_next_voice():
     """Jacob's own example: he says the name, John's voice gets it.
 

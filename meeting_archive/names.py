@@ -67,7 +67,14 @@ _PATTERNS: list[tuple[str, str, re.Pattern]] = [
     (
         "self_intro",
         SELF,
-        re.compile(_ci("i'm", "i am", "my name is", "my name's") + r"\s+" + _NAME),
+        # "I'm Marina," is a name. "I'm Sydney-based" is a location adjective
+        # and must not pre-fill the identify dialog.
+        re.compile(
+            _ci("i'm", "i am", "my name is", "my name's")
+            + r"\s+"
+            + _NAME
+            + r"(?!-|\s+(?:based|born|side)\b)"
+        ),
     ),
     ("name_here", SELF, re.compile(r"^\s*" + _NAME + r"\s+here\b")),
     # --- ADDRESSED ---

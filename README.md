@@ -219,19 +219,25 @@ path filled in):
 {
   "mcpServers": {
     "chroma": {
-      "command": "uvx",
-      "args": ["chroma-mcp", "--client-type", "persistent",
-               "--data-dir", "/Users/you/meeting-archive/chroma"]
+      "command": "/ABS/PATH/TO/meeting-archive-src/bin/chroma-mcp",
+      "args": ["--client-type", "persistent",
+               "--data-dir", "/Users/you/meeting-archive/chroma"],
+      "env": {"ANONYMIZED_TELEMETRY": "false"}
     }
   }
 }
 ```
 
+Use the repo launcher (`bin/chroma-mcp`), not bare `uvx chroma-mcp`. The
+launcher pins `pydantic<2.14` so Claude/Cursor updates don't pull a pydantic
+release that breaks `mcp`/`chroma-mcp`. `ma doctor` prints this with your real
+paths filled in.
+
 Then ask things like *"what did we decide about the pricing tiers?"* or *"find
 the meeting where Marina raised the billing issue"*.
 
-Needs a local MCP host — Claude Desktop or Claude Code, not claude.ai in a
-browser. Your workplace may need to approve it.
+Needs a local MCP host — Claude Desktop, Claude Code, or Cursor — not
+claude.ai in a browser. Your workplace may need to approve it.
 
 ## Commands
 

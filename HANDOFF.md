@@ -140,10 +140,12 @@ suggestions, and confirmed names re-render and reindex the transcript.
 
 ### 5. Wire up chroma-mcp
 
-`ma doctor` prints the exact JSON. Add it to
-`~/Library/Application Support/Claude/claude_desktop_config.json`, restart
-Claude Desktop, and confirm a real query against the archive returns the
-meeting. Needs `uv` installed (`brew install uv`) for `uvx` to work.
+`ma doctor` prints the exact JSON. Use the repo launcher
+`meeting-archive-src/bin/chroma-mcp` (not bare `uvx chroma-mcp`) — it pins
+`pydantic<2.14` so Claude/Cursor updates don't break on the
+`eval_type_backport` import. Add the snippet to Claude Desktop and/or
+`~/.cursor/mcp.json`, restart the host, and confirm a real query against the
+archive returns the meeting. Needs `uv` installed (`brew install uv`).
 
 ### 6. Verify the menu bar
 

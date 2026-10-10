@@ -32,6 +32,7 @@ from .models import (
     Turn,
     format_duration,
     format_timestamp,
+    speaker_index,
 )
 
 MEETING_ID_FORMAT = "%Y-%m-%dT%H-%M-%S"
@@ -298,6 +299,33 @@ class Transcript:
         return write_json_atomic(path, self.to_dict())
 
 
+_SPEAKER_MENTION = re.compile(r"\bSpeaker (\d+)\b")
+
+
+def name_speakers_in_text(text: str, transcript: "Transcript", roster: dict) -> str:
+    """Swap "Speaker N" for the confirmed name of that voice.
+
+    The summary is written once, with whatever labels existed then, and is
+    stored with the numbers. Substituting at render time means naming (or
+    renaming) a voice later fixes the summary without asking Ollama again.
+    Numbers shared by voices on different channels are left alone.
+    """
+    if not text or not roster:
+        return text
+    by_index: dict[int, str | None] = {}
+    for profile in transcript.speaker_profiles:
+        index = speaker_index(profile.speaker)
+        if index is None:
+            continue
+        name = str(roster.get(profile.speaker) or "").strip()
+        by_index[index] = None if index in by_index else (name or None)
+
+    def swap(match: re.Match) -> str:
+        return by_index.get(int(match.group(1))) or match.group(0)
+
+    return _SPEAKER_MENTION.sub(swap, text)
+
+
 def render_markdown(
     transcript: Transcript,
     label_fn,
@@ -340,7 +368,7 @@ def render_markdown(
     lines.append("## Summary")
     lines.append("")
     if transcript.summary:
-        lines.append(transcript.summary.strip())
+        lines.append(name_speakers_in_text(transcript.summary.strip(), transcript, roster))
     elif transcript.summary_error:
         lines.append(f"_Summary unavailable: {transcript.summary_error}_")
     elif transcript.turns:
@@ -513,6 +541,20 @@ def write_notes(
     }
     write_json_atomic(path, payload)
     return payload
+
+
+def clear_speaker_names(path: Path, keys: list[str]) -> None:
+    """Un-name voices. The one deliberate exception to write_notes never erasing."""
+    data = read_notes(path)
+    if not data:
+        return
+    speakers = dict(data.get("speakers") or {})
+    for key in keys:
+        speakers.pop(str(key), None)
+    data["speakers"] = speakers
+    data["applied"] = False
+    data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    write_json_atomic(path, data)
 
 
 def mark_notes_applied(path: Path) -> None:

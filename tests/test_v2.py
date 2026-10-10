@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -17,8 +18,8 @@ from meeting_archive.capture import WavWriter
 from meeting_archive.cleanup import _parse_cleaned
 from meeting_archive.config import Config, retention_days, write_setting
 from meeting_archive.imports import ImportFailed, import_transcript
-from meeting_archive.models import MIC, ROOM, SYS, Segment, SpeakerProfile, Turn
-from meeting_archive.quips import profile_speakers
+from meeting_archive.models import MIC, ROOM, SYS, Segment, SpeakerProfile, SpeakerSpan, Turn
+from meeting_archive.quips import apply_guesses, profile_speakers
 from meeting_archive.records import Manifest, Transcript
 from meeting_archive.speakers import (
     KnownSpeaker,
@@ -33,6 +34,7 @@ from meeting_archive.speakers import (
     render_voices_html,
     snippet_window,
     suggest_matches,
+    usable_dialog_guess,
 )
 from tests.test_pipeline import FakeStore, FakeTranscriber, make_wav, write_transcript
 
@@ -455,6 +457,144 @@ def test_known_speaker_suggestions_are_never_silent_assignments():
     assert "previously confirmed" in guesses[0].evidence
 
 
+def test_voice_match_fires_at_realistic_cosine():
+    """Regression: the old 0.75 floor was unreachable, so this was dead code.
+
+    Measured genuine same-speaker cosines with this extractor are ~0.41-0.53,
+    nowhere near 0.75, so every known-speaker match was computed, written to
+    speaker_guesses and then never offered. These vectors score ~0.50, which
+    is what a real match actually looks like. If this test starts failing, the
+    threshold has drifted back out of reach.
+    """
+    profiles = [
+        SpeakerProfile(
+            speaker="room-1", channel=ROOM, speaking_s=20.0, turns=4, first_at=0.0
+        )
+    ]
+    people = [KnownSpeaker(name="Adam", confirmation_count=5, embedding=[1.0, 0.0])]
+    # cos = 0.5 exactly.
+    vector = [1.0, math.sqrt(3.0)]
+
+    assert suggest_matches(profiles, people, embeddings={"room-1": vector}) != []
+    # And the old default would have rejected it, which is the bug.
+    assert suggest_matches(
+        profiles, people, embeddings={"room-1": vector}, min_confidence=0.75
+    ) == []
+
+
+def test_near_tie_offers_no_name():
+    """A low floor makes the runner-up dangerous, so a near-tie must abstain.
+
+    Two library voices almost equidistant from this speaker is not an
+    identification. Offering the marginally closer one would be a coin flip
+    presented as a suggestion.
+    """
+    profiles = [
+        SpeakerProfile(
+            speaker="room-1", channel=ROOM, speaking_s=20.0, turns=4, first_at=0.0
+        )
+    ]
+    people = [
+        KnownSpeaker(name="Adam", confirmation_count=5, embedding=[1.0, 0.02]),
+        KnownSpeaker(name="Alex", confirmation_count=3, embedding=[1.0, 0.0]),
+    ]
+    assert suggest_matches(profiles, people, embeddings={"room-1": [1.0, 0.0]}) == []
+
+
+def test_a_name_goes_to_its_best_match_not_the_earliest_speaker():
+    """Assignment is global best-first, not in profile order.
+
+    Profiles arrive sorted by who spoke first, so the greedy version let an
+    early weak match claim a name that fitted a later voice far better.
+    """
+    profiles = [
+        SpeakerProfile(
+            speaker="room-1", channel=ROOM, speaking_s=10.0, turns=2, first_at=0.0
+        ),
+        SpeakerProfile(
+            speaker="room-2", channel=ROOM, speaking_s=10.0, turns=2, first_at=9.0
+        ),
+    ]
+    people = [KnownSpeaker(name="Adam", confirmation_count=5, embedding=[1.0, 0.0])]
+    guesses = suggest_matches(
+        profiles,
+        people,
+        embeddings={
+            # room-2 is a much better match for Adam than room-1.
+            "room-1": [1.0, math.sqrt(3.0)],  # cos 0.50
+            "room-2": [1.0, 0.1],             # cos ~0.995
+        },
+    )
+    assert [(g.speaker, g.name) for g in guesses] == [("room-2", "Adam")]
+
+
+def test_apply_guesses_restamps_without_blanking():
+    """The ordering fix: a voice match has to reach the dialog's prefill.
+
+    Profiles are built before recognition can run, so the guess they are
+    constructed with is always pre-recognition.
+    """
+    profiles = profile_speakers(
+        [
+            Turn(ROOM, 0.0, 5.0, "I look after the billing integrations.", speaker="room-1"),
+            Turn(ROOM, 6.0, 9.0, "I drove up from Brighton this morning.", speaker="room-2"),
+        ],
+        guesses={"room-1": "Ev"},
+    )
+    assert [p.guess for p in profiles] == ["Ev", ""]
+
+    apply_guesses(profiles, {"room-2": "Adam"})
+    # room-2 gains the voice match; room-1 keeps what it had rather than
+    # being blanked by a map that simply doesn't mention it.
+    assert [p.guess for p in profiles] == ["Ev", "Adam"]
+
+
+def test_idle_queue_still_names_the_last_meeting(cfg):
+    """Draining the queue resets the counter but must not erase `last_id`.
+
+    It used to clear both, so the menu bar could only ever say "Idle" -- which
+    looks identical whether the queue is empty or the watcher died hours ago.
+    """
+    from meeting_archive import queue
+
+    queue.begin_work(cfg, "2026-09-29T10-31-30")
+    queue.end_work(cfg, "2026-09-29T10-31-30")
+
+    drained = queue.read(cfg)
+    assert drained["working_id"] == ""
+    assert drained["current"] == 0 and drained["total"] == 0
+    assert drained["last_id"] == "2026-09-29T10-31-30"
+    assert drained["last_finished_epoch"] > 0
+
+    # The 5-second refresh tick is what used to wipe it.
+    queue.refresh(cfg)
+    assert queue.read(cfg)["last_id"] == "2026-09-29T10-31-30"
+
+
+def test_reconcile_only_clears_jobs_whose_transcript_exists(cfg):
+    """Stale bookkeeping gets repaired; genuinely outstanding work does not.
+
+    A queued job with no transcript is real work waiting. Marking that
+    complete would hide a meeting that never got processed, which is the
+    failure this whole queue exists to make visible.
+    """
+    done = jobs.enqueue(cfg, "2026-09-17T09-21-10")
+    Transcript(meeting_id=done.meeting_id, turns=[Turn(ROOM, 0.0, 1.0, "Hi.")]).write(
+        cfg.transcript_json(done.meeting_id)
+    )
+    outstanding = jobs.enqueue(cfg, "2026-09-30T09-00-00")
+
+    repaired = jobs.reconcile(cfg)
+    assert repaired == [done.meeting_id]
+
+    states = {j.meeting_id: j.state for j in jobs.list_jobs(cfg)}
+    assert states[done.meeting_id] == jobs.COMPLETE
+    assert states[outstanding.meeting_id] == jobs.QUEUED
+
+    # Idempotent: a second run has nothing left to do.
+    assert jobs.reconcile(cfg) == []
+
+
 def test_cleanup_maps_lines_without_inventing_turns():
     original = [
         Turn(ROOM, 0.0, 1.0, "hello hello hello there", speaker="room-1"),
@@ -573,6 +713,14 @@ def test_naming_two_of_three_assumes_the_last(cfg, capsys):
     assert names == {"Adam", "Ben", "Marina"}
 
 
+def _assert_solo_clip(start, duration, blocked):
+    end = start + duration
+    assert duration >= 1.0
+    for other_start, other_end in blocked:
+        overlap = min(end, other_end) - max(start, other_start)
+        assert overlap <= 0.0, (start, end, other_start, other_end, overlap)
+
+
 def test_snippet_window_prefers_the_quip_turn():
     profile = SpeakerProfile(
         speaker="room-2",
@@ -588,8 +736,9 @@ def test_snippet_window_prefers_the_quip_turn():
         ],
     )
     start, duration = snippet_window(transcript, profile)
-    assert start == pytest.approx(10.25)
-    assert duration == pytest.approx(3.5)
+    assert 10.0 <= start < start + duration <= 16.0
+    assert duration == pytest.approx(4.0)
+    _assert_solo_clip(start, duration, [])
 
 
 def test_snippet_window_skips_overlapping_speech():
@@ -610,11 +759,39 @@ def test_snippet_window_skips_overlapping_speech():
         ],
     )
     start, duration = snippet_window(transcript, profile)
-    assert start == pytest.approx(20.25)
-    assert duration == pytest.approx(3.5)
+    _assert_solo_clip(start, duration, [(12.0, 14.0)])
+    assert 20.0 <= start < start + duration <= 24.0
     excerpt = speaker_excerpt(transcript, profile)
     assert "I came up from Brighton." in excerpt
     assert "I handle billing." in excerpt
+
+
+def test_snippet_window_uses_spans_when_turns_look_isolated():
+    """ASR turns can hide a second voice that diarization already split out."""
+    profile = SpeakerProfile(speaker="room-2", channel=ROOM, first_at=10.0)
+    transcript = Transcript(
+        meeting_id="m",
+        turns=[
+            Turn(ROOM, 10.0, 16.0, "I handle billing.", speaker="room-2"),
+            Turn(ROOM, 20.0, 24.0, "And the invoice lands on Friday.", speaker="room-2"),
+        ],
+        speaker_spans=[
+            SpeakerSpan(ROOM, 10.0, 16.0, "room-2"),
+            SpeakerSpan(ROOM, 12.5, 14.0, "room-1"),
+            SpeakerSpan(ROOM, 20.0, 24.0, "room-2"),
+        ],
+    )
+    start, duration = snippet_window(transcript, profile)
+    _assert_solo_clip(start, duration, [(12.5, 14.0)])
+    assert 20.0 <= start < start + duration <= 24.0
+
+
+def test_usable_dialog_guess_rejects_transcript_and_locations():
+    assert usable_dialog_guess("Sydney", attendees=["Lauren", "Ket", "Jacob"]) == ""
+    assert usable_dialog_guess("A lot of flexibility in sandboxes") == ""
+    assert usable_dialog_guess("Ket", attendees=["Lauren", "Ket", "Jacob"]) == "Ket"
+    assert usable_dialog_guess("Jacob", known=["Jacob", "Adam"]) == "Jacob"
+    assert usable_dialog_guess("Marina") == "Marina"
 
 
 def test_known_speakers_html_lists_confirmed_voices(cfg):
@@ -661,7 +838,8 @@ def test_validated_identity_clip_survives_audio_prune(cfg, monkeypatch):
 
     clip, embedding = capture_identity(cfg, transcript, profiles[1], "Marina")
     assert clip == "marina.wav"
-    assert embedding == [0.2, 0.8]
+    # Stored unit-length so clips from different meetings average fairly.
+    assert embedding == pytest.approx([0.2 / 0.8246211, 0.8 / 0.8246211], rel=1e-5)
     remember_confirmation(
         cfg, name="Marina", meeting_id=meeting_id, embedding=embedding, clip=clip
     )
@@ -676,7 +854,7 @@ def test_validated_identity_clip_survives_audio_prune(cfg, monkeypatch):
     assert not src.exists()
     assert identity.exists()
     people = load_library(cfg)
-    assert people[0].embedding == [0.2, 0.8]
+    assert people[0].embedding == pytest.approx(embedding, rel=1e-5)
     assert people[0].clip == "marina.wav"
 
 
@@ -813,3 +991,18 @@ def test_begin_work_counts_one_of_five_then_advances(cfg):
     assert second["total"] == 5
     assert second["remaining"] == 3
 
+
+
+def test_summary_uses_confirmed_names_for_numbered_speakers():
+    from meeting_archive.models import SpeakerProfile
+    from meeting_archive.records import name_speakers_in_text
+
+    transcript = Transcript(meeting_id="2026-10-07T15-51-58")
+    transcript.speaker_profiles = [
+        SpeakerProfile(speaker="room-1", channel="room"),
+        SpeakerProfile(speaker="room-2", channel="room"),
+        SpeakerProfile(speaker="room-12", channel="room"),
+    ]
+    text = "Owner: Speaker 1. Owner: Speaker 2, for Speaker 1's use case. Speaker 12 and Speaker 3."
+    named = name_speakers_in_text(text, transcript, {"room-1": "Jamie", "room-2": "Jacob"})
+    assert named == "Owner: Jamie. Owner: Jacob, for Jamie's use case. Speaker 12 and Speaker 3."

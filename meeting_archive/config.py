@@ -112,6 +112,18 @@ class CleanupConfig:
 @dataclass
 class SpeakersMemoryConfig:
     recognise_known: bool = False
+    # Cosine floor for suggesting a known speaker by voice. The original 0.75
+    # was aspirational and unreachable, which made the whole feature dead
+    # code: measured against real cross-meeting audio with this 512-d sherpa
+    # extractor on a 3.5s snippet, genuine same-speaker scores came in at
+    # 0.407 / 0.503 / 0.528, and the highest score ever seen against
+    # known-wrong audio was 0.546. Anything at or above 0.6 never fires.
+    min_confidence: float = 0.35
+    # A near-tie is not an identification. The winner must beat the runner-up
+    # by this much, or no name is offered at all. Genuine margins measured:
+    # 0.114 / 0.238 / 0.356. This matters far more once the floor is low
+    # enough to be reachable.
+    min_margin: float = 0.08
 
 
 @dataclass
@@ -437,6 +449,9 @@ def load_config(path: Path | None = None) -> Config:
     sm = data.get("speakers_memory", {}) or data.get("speakers", {})
     if "recognise_known" in sm:
         cfg.speakers_memory.recognise_known = bool(sm["recognise_known"])
+    for key in ("min_confidence", "min_margin"):
+        if key in sm:
+            setattr(cfg.speakers_memory, key, float(sm[key]))
 
     p = data.get("processing", {})
     if "pause_on_pressure" in p:

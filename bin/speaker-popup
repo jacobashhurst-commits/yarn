@@ -31,8 +31,55 @@ command -v "$MA" >/dev/null 2>&1 || {
   exit 1
 }
 
+# Preferred path: the native identify window (ui/identify/YarnSpeakers.swift).
+# AppleScript dialogs close on every button, so Play clip could never keep the
+# dialog on screen. The app is launched through LaunchServices so it is owned
+# by the login session, not by the watcher or a terminal that may exit.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SWIFT_SRC="$REPO_DIR/ui/identify/YarnSpeakers.swift"
+APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Speakers.app"
+APP_BIN="$APP_DIR/Contents/MacOS/YarnSpeakers"
+
+build_app() {
+  command -v swiftc >/dev/null 2>&1 || return 1
+  mkdir -p "$APP_DIR/Contents/MacOS" || return 1
+  cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.speakers</string>
+  <key>CFBundleName</key><string>Yarn Speakers</string>
+  <key>CFBundleExecutable</key><string>YarnSpeakers</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+  swiftc -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
+    -framework AppKit -framework AVFoundation >/dev/null 2>&1 || return 1
+  mv -f "$APP_BIN.partial" "$APP_BIN"
+}
+
+if [[ -f "$SWIFT_SRC" ]]; then
+  if [[ ! -x "$APP_BIN" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+    build_app || echo "speaker-popup: could not build identify window, using dialogs" >&2
+  fi
+  if [[ -x "$APP_BIN" ]]; then
+    ma_path="$(command -v "$MA")"
+    exec open -n "$APP_DIR" --args --ma "$ma_path" "$meeting_id"
+  fi
+fi
+
 # Arguments go through argv, never interpolated into the script text, so an
 # apostrophe in a quip cannot break the AppleScript or inject into it.
+# The result is a one-letter verb on the first line and the text field on
+# every line after it. `display dialog` dismisses on ANY button, so "Play clip"
+# has to hand the half-typed name back or replaying the audio would erase what
+# was already typed. Keeping the verb on its own line is also what lets someone
+# be called "P" without being mistaken for a command.
 ask() {
   osascript - "$1" "$2" "$3" <<'APPLESCRIPT' 2>/dev/null
 on run argv
@@ -48,18 +95,46 @@ on run argv
       cancel button "Not now" ¬
       giving up after 600
     if gave up of theResult then
-      return "__TIMEOUT__"
+      return "T"
     end if
     if button returned of theResult is "Play clip" then
-      return "__PLAY__"
+      return "P" & linefeed & (text returned of theResult)
     end if
-    return text returned of theResult
+    return "S" & linefeed & (text returned of theResult)
   on error
-    return "__CANCELLED__"
+    return "C"
   end try
 end run
 APPLESCRIPT
 }
+
+# `ma speakers --play` blocks for the whole clip: afplay runs under
+# subprocess.run, which measured 4.47s of the 4.74s the dialog spent off
+# screen. Playing it in the background puts the dialog back in ~60ms, before
+# the first audible sample, so the quote stays readable while the voice plays.
+play_pid=""
+
+# afplay is a grandchild here (rec -> ma -> afplay), so signalling `ma` alone
+# would leave the clip playing to the end as an orphan. Kill the player first.
+stop_clip() {
+  [[ -n "$play_pid" ]] || return 0
+  if kill -0 "$play_pid" 2>/dev/null; then
+    pkill -P "$play_pid" >/dev/null 2>&1
+    kill "$play_pid" >/dev/null 2>&1
+  fi
+  wait "$play_pid" 2>/dev/null
+  play_pid=""
+}
+
+# Pressing Play twice must replace the clip, not layer a second copy over it.
+play_clip() {
+  stop_clip
+  "$MA" speakers "$meeting_id" --play "$1" >/dev/null 2>&1 &
+  play_pid=$!
+}
+
+# Dismissing the dialog should not leave audio playing to an empty screen.
+trap stop_clip EXIT
 
 notice() {
   osascript - "$1" "$2" <<'APPLESCRIPT' 2>/dev/null
@@ -124,38 +199,73 @@ while IFS=$'\t' read -r key display detail quip guess excerpt; do
 
   prompt="$banner"$'\n\n'"$display of $total"
   [[ -n "$detail" ]] && prompt="$prompt — $detail"
+  # The suggested name goes FIRST and on its own line. It used to be a single
+  # trailing sentence under a 240-character excerpt, so when there was no
+  # suggestion at all the dialog led with a paragraph of transcript and that
+  # paragraph read as the recommendation.
+  # The text field is a name, or empty. Quotes stay in the prompt, never here.
+  case "$guess" in
+    "" ) ;;
+    *[!A-Za-z\ \'\-]* | *' '*' '*' '* ) guess="" ;;
+  esac
+  if [[ ${#guess} -gt 32 ]]; then
+    guess=""
+  fi
+
+  if [[ -n "$guess" ]]; then
+    prompt="$prompt"$'\n\n'"Suggested name:  $guess"
+    prompt="$prompt"$'\n'"It's already filled in below — correct it if it's wrong."
+  fi
+
   said="${excerpt:-$quip}"
   if [[ -n "$said" ]]; then
-    prompt="$prompt"$'\n\n'"What they said:"$'\n'"\"$said\""
+    prompt="$prompt"$'\n\n'"They said:"$'\n'"\"$said\""
   else
     prompt="$prompt"$'\n\n'"No distinctive quote for this voice — play the clip."
   fi
   prompt="$prompt"$'\n\n'"Who was this? (leave blank to skip)"
-  prompt="$prompt"$'\n'"Play clip to hear them. The text above stays on screen."
-  if [[ -n "$guess" ]]; then
-    prompt="$prompt"$'\n'"Suggested from the conversation — correct it if it's wrong."
-  fi
+  prompt="$prompt"$'\n'"Play clip to hear them — this text stays on screen."
   if [[ -n "$known" ]]; then
     prompt="$prompt"$'\n'"People you've named before: $known"
   fi
 
+  # Carries the typed name across a replay, so playing the clip never costs
+  # what was already entered.
+  typed="$guess"
   while true; do
-    answer="$(ask "Identify this speaker" "$prompt" "$guess")"
-    if [[ "$answer" == "__PLAY__" ]]; then
-      "$MA" speakers "$meeting_id" --play "$key" >/dev/null 2>&1 || true
+    reply="$(ask "Identify this speaker" "$prompt" "$typed")"
+    verb="${reply%%$'\n'*}"
+    if [[ "$reply" == *$'\n'* ]]; then
+      typed="${reply#*$'\n'}"
+    else
+      typed=""
+    fi
+
+    if [[ ${#typed} -gt 32 || "$typed" == *[!A-Za-z\ \'\-]* ]]; then
+      typed="$guess"
+    fi
+
+    if [[ "$verb" == "P" ]]; then
+      play_clip "$key"
       continue
     fi
     # Cancel or Escape means "stop asking", not "skip this one".
-    if [[ "$answer" == "__CANCELLED__" || "$answer" == "__TIMEOUT__" ]]; then
+    if [[ "$verb" == "C" || "$verb" == "T" ]]; then
       stopped=1
       break
     fi
+    answer="$typed"
     break
   done
+  stop_clip
   [[ "$stopped" -eq 1 ]] && break
 
   answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   [[ -n "$answer" ]] || continue
+  folded="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
+  case "$folded" in
+    "don't know"|"dont know"|"unknown"|"n/a") continue ;;
+  esac
   updates+=("--set" "$key=$answer")
 done <<< "$pending"
 

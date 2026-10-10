@@ -65,6 +65,46 @@ def record(
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+_FACTOR_CACHE: dict[str, tuple[float, float]] = {}
+
+
+def typical_realtime_factor(cfg: Config, stage: str) -> float:
+    """Median wall/recording ratio for a stage on this machine, 0 if unknown.
+
+    Only recordings over 10 minutes count: short tests are dominated by model
+    load time and would make long meetings look faster than they are.
+    """
+    path = cfg.logs_dir / "performance.jsonl"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return 0.0
+    cached = _FACTOR_CACHE.get(stage)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    factors: list[float] = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    row.get("stage") == stage
+                    and row.get("success")
+                    and float(row.get("meeting_duration_s") or 0) > 600
+                    and float(row.get("realtime_factor") or 0) > 0
+                ):
+                    factors.append(float(row["realtime_factor"]))
+    except OSError:
+        return 0.0
+    factors = sorted(factors[-15:])
+    value = factors[len(factors) // 2] if factors else 0.0
+    _FACTOR_CACHE[stage] = (mtime, value)
+    return value
+
+
 def _rss_mb() -> float:
     try:
         import resource

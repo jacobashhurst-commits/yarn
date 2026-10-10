@@ -20,6 +20,7 @@ IN_PROGRESS="$MA_ROOT/recordings/in-progress"
 PROCESS_STATUS="$MA_ROOT/.processing-status.json"
 PROCESS_CONTROL="$MA_ROOT/.processing-control.json"
 QUEUE_STATUS="$MA_ROOT/.queue-status.json"
+QUEUE_LINES="$MA_ROOT/.queue-lines.txt"
 SETTINGS="$MA_ROOT/.yarn-settings.json"
 
 recording=false
@@ -66,6 +67,14 @@ proc_title=""
 proc_remaining=""
 proc_current=""
 proc_total=""
+proc_id=""
+proc_step=""
+proc_steps=""
+proc_eta=""
+proc_length=""
+expected_s=0
+phase_started=0
+now_epoch="$(date +%s)"
 if [[ -f "$PROCESS_STATUS" ]]; then
   phase="$(json_raw "$PROCESS_STATUS" phase)"
   percent="$(json_raw "$PROCESS_STATUS" percent)"
@@ -76,10 +85,57 @@ if [[ -f "$PROCESS_STATUS" ]]; then
   proc_remaining="$(json_raw "$PROCESS_STATUS" remaining)"
   proc_current="$(json_raw "$PROCESS_STATUS" current)"
   proc_total="$(json_raw "$PROCESS_STATUS" total)"
-  if [[ -n "$phase" && "$updated" =~ ^[0-9]+$ ]] \
-      && (( $(date +%s) - updated < 7200 )); then
-    processing=true
+  proc_id="$(json_raw "$PROCESS_STATUS" meeting_id)"
+  proc_step="$(json_raw "$PROCESS_STATUS" step)"
+  proc_steps="$(json_raw "$PROCESS_STATUS" steps)"
+  proc_eta="$(json_raw "$PROCESS_STATUS" eta)"
+  proc_length="$(json_raw "$PROCESS_STATUS" recording_length)"
+  expected_s="$(json_raw "$PROCESS_STATUS" expected_s)"
+  phase_started="$(json_raw "$PROCESS_STATUS" phase_started_epoch)"
+  stale_after="$(json_raw "$PROCESS_STATUS" stale_after_epoch)"
+  [[ "$expected_s" =~ ^[0-9]+$ ]] || expected_s=0
+  [[ "$phase_started" =~ ^[0-9]+$ ]] || phase_started=0
+  # Voice separation can run for hours without rewriting the status, so a
+  # fixed 2h freshness window made a busy watcher look idle.
+  if [[ -n "$phase" && "$updated" =~ ^[0-9]+$ ]]; then
+    if (( now_epoch - updated < 7200 )) \
+        || { [[ "$stale_after" =~ ^[0-9]+$ ]] && (( now_epoch < stale_after )); }; then
+      processing=true
+    fi
   fi
+fi
+
+# 4000 -> "1h 06m". Matches pipeline._fmt_span.
+span() {
+  local s="$1"
+  [[ "$s" =~ ^[0-9]+$ ]] || s=0
+  if (( s >= 3600 )); then
+    printf '%dh %02dm' $(( s / 3600 )) $(( s % 3600 / 60 ))
+  elif (( s >= 60 )); then
+    printf '%dm' $(( s / 60 ))
+  else
+    printf '%ds' "$s"
+  fi
+}
+
+# Live figures, recomputed every refresh rather than frozen at the moment the
+# stage started.
+phase_elapsed=0
+(( phase_started > 0 )) && phase_elapsed=$(( now_epoch - phase_started ))
+(( phase_elapsed < 0 )) && phase_elapsed=0
+live_percent=""
+live_eta=""
+if [[ "$indeterminate" == "true" ]] && (( expected_s >= 30 )); then
+  live_percent=$(( phase_elapsed * 100 / expected_s ))
+  (( live_percent > 95 )) && live_percent=95
+  left=$(( expected_s - phase_elapsed ))
+  if (( left > 0 )); then
+    live_eta="about $(span "$left") left (estimate from past meetings)"
+  else
+    live_eta="taking longer than usual — still working"
+  fi
+elif [[ -n "$proc_eta" ]]; then
+  live_eta="$proc_eta"
 fi
 
 paused=false
@@ -118,7 +174,7 @@ short_phase() {
   case "$phase" in
     "Preparing audio") printf 'Preparing' ;;
     "Transcribing") printf 'Transcribing' ;;
-    "Identifying speakers") printf 'Speakers' ;;
+    "Identifying speakers") printf 'Voices' ;;
     "Recognising known speakers") printf 'Recognising' ;;
     "Cleaning transcript") printf 'Cleaning' ;;
     "Saving transcript") printf 'Saving' ;;
@@ -134,10 +190,26 @@ fraction() {
   fi
 }
 
+# A meeting id is 2026-09-29T10-31-30; the date and time are all that is
+# readable at menu-bar size.
+short_id() {
+  local id="$1"
+  printf '%s %s' "${id:5:5}" "$(printf '%s' "${id:11:5}" | tr '-' ':')"
+}
+
+# Epoch seconds to HH:MM. `date -r` is the BSD spelling and this only ever
+# runs on macOS, but keep the fallback so a bad value prints nothing rather
+# than the word "Invalid".
+clock_of() {
+  date -r "$1" '+%H:%M' 2>/dev/null || true
+}
+
 pending="$(count_files "$INBOX" '\.json$')"
 queue_remaining="$(json_raw "$QUEUE_STATUS" remaining)"
 queue_inbox="$(json_raw "$QUEUE_STATUS" inbox)"
 queue_summaries="$(json_raw "$QUEUE_STATUS" summaries_pending)"
+queue_last_id="$(json_raw "$QUEUE_STATUS" last_id)"
+queue_updated="$(json_raw "$QUEUE_STATUS" last_finished_epoch)"
 [[ "$queue_remaining" =~ ^[0-9]+$ ]] || queue_remaining="$pending"
 [[ "$queue_inbox" =~ ^[0-9]+$ ]] || queue_inbox="$pending"
 [[ "$queue_summaries" =~ ^[0-9]+$ ]] || queue_summaries=0
@@ -159,13 +231,13 @@ if $recording; then
 elif $processing; then
   frac="$(fraction)"
   stage="$(short_phase)"
-  if [[ -n "$frac" ]]; then
-    echo "⏳ ${frac} ${stage}"
-  elif [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
-    echo "⏳ ${stage}"
-  else
-    echo "⏳ ${percent}% ${stage}"
+  pct=""
+  if [[ -n "$live_percent" ]]; then
+    pct=" ~${live_percent}%"
+  elif [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
+    pct=" ${percent}%"
   fi
+  echo "⏳ ${frac:+$frac }${stage}${pct}"
 elif $paused; then
   echo "⏸"
 elif [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
@@ -188,20 +260,36 @@ echo "---"
 echo "Processing | size=12 color=#888888"
 if $processing; then
   frac="$(fraction)"
+  heading="Now: ${proc_title:-$(short_id "$proc_id")}"
+  [[ -n "$proc_length" ]] && heading="$heading (${proc_length} recording)"
   if [[ -n "$frac" ]]; then
-    echo "Meeting ${proc_current} of ${proc_total} | size=11 color=#cc8800"
+    heading="Meeting ${proc_current} of ${proc_total} — ${heading#Now: }"
   fi
-  echo "$(stage_line) | size=11 color=#cc8800"
-  if [[ -n "$proc_title" ]]; then
-    echo "About: $proc_title | size=11 color=#cc8800"
-  fi
-  if [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
+  echo "$heading | size=12 color=#cc8800"
+  step_text="${proc_step:-$phase}"
+  echo "${step_text} — running $(span "$phase_elapsed") | size=11 color=#cc8800"
+  [[ -n "$detail" ]] && echo "$detail | size=11 color=#888888"
+  if [[ -n "$live_percent" ]]; then
+    echo "$(progress_bar "$live_percent")  ~${live_percent}% | font=Menlo size=11 color=#cc8800"
+  elif [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
     echo "$(progress_bar "$percent")  ${percent}% | font=Menlo size=11 color=#cc8800"
   fi
+  [[ -n "$live_eta" ]] && echo "$live_eta | size=11 color=#cc8800"
+  [[ -n "$proc_steps" ]] && echo "$proc_steps | size=11 color=#888888"
 elif $paused; then
   echo "Paused | size=11 color=#888888"
 else
-  echo "Idle | size=11 color=#888888"
+  # "Idle" on its own is unfalsifiable: it looks identical whether the queue
+  # is empty or the watcher died hours ago. Naming the last meeting it
+  # finished, and when, is what makes an idle state checkable at a glance.
+  idle_line="Nothing to process"
+  if [[ -n "$queue_last_id" ]]; then
+    idle_line="Nothing to process — last finished $(short_id "$queue_last_id")"
+    if [[ "$queue_updated" =~ ^[1-9][0-9]*$ ]]; then
+      idle_line="$idle_line at $(clock_of "$queue_updated")"
+    fi
+  fi
+  echo "$idle_line | size=11 color=#888888"
 fi
 when_hint=""
 case "$summarize_when" in
@@ -210,15 +298,19 @@ case "$summarize_when" in
 esac
 if [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
   if $processing; then
-    :
+    echo "Up next: ${queue_remaining} more | size=11 color=#888888"
   else
     echo "${queue_remaining} meeting(s) waiting${when_hint} | size=11 color=#cc8800"
   fi
-  if (( queue_inbox > 0 )); then
-    echo "-- ${queue_inbox} to transcribe | size=11 color=#888888"
+  # One line per waiting meeting, written by the watcher (queue.py).
+  if [[ -f "$QUEUE_LINES" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      echo "• ${line} | size=11 color=#888888"
+    done < "$QUEUE_LINES"
   fi
-  if (( queue_summaries > 0 )); then
-    echo "-- ${queue_summaries} to summarise | size=11 color=#888888"
+  if (( queue_summaries > 0 )) && ! pgrep -xq ollama && ! pgrep -xq Ollama; then
+    echo "Summaries need Ollama, which isn't running | size=11 color=#cc0000 bash=/usr/bin/open param1=-a param2=Ollama terminal=false"
   fi
   if ! $processing; then
     echo "Process waiting now | bash=\"$MA\" param1=process terminal=false refresh=true"
@@ -226,8 +318,14 @@ if [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
 fi
 if $paused; then
   echo "Resume processing | bash=\"$MA\" param1=resume terminal=false refresh=true"
-else
+elif $processing || [[ "$waiting" =~ ^[1-9][0-9]*$ ]]; then
   echo "Pause processing | bash=\"$MA\" param1=pause terminal=false refresh=true"
+else
+  # Nothing is running and nothing is queued, so a bare "Pause processing"
+  # implied there was something to pause -- which is what made an idle menu
+  # look like a stuck one. The action still has a purpose here (it stops the
+  # next meeting being picked up), so it is relabelled rather than hidden.
+  echo "Pause automatic processing | bash=\"$MA\" param1=pause terminal=false refresh=true"
 fi
 
 echo "---"

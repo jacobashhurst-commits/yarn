@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Durable launcher for Yarn's Chroma MCP.
+#
+# uvx re-resolves deps on Claude/Cursor restarts. pydantic 2.14+ removed
+# eval_type_backport, which current mcp/chroma-mcp still import — that crash
+# is what "Server disconnected" looks like after an otherwise innocent update.
+# Pin pydantic below 2.14 until upstream declares a compatible range.
+set -euo pipefail
+
+UVX="${UVX:-/opt/homebrew/bin/uvx}"
+if [[ ! -x "$UVX" ]]; then
+  UVX="$(command -v uvx || true)"
+fi
+if [[ -z "${UVX}" ]]; then
+  echo "uvx not found; install with: brew install uv" >&2
+  exit 1
+fi
+
+exec "$UVX" \
+  --python 3.12 \
+  --with 'pydantic>=2.10,<2.14' \
+  chroma-mcp \
+  "$@"

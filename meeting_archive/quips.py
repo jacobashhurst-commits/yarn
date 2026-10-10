@@ -180,3 +180,22 @@ def profile_speakers(
 
     profiles.sort(key=lambda p: (p.first_at, p.speaker))
     return profiles
+
+
+def apply_guesses(
+    profiles: list[SpeakerProfile], guesses: dict[str, str]
+) -> list[SpeakerProfile]:
+    """Re-stamp each profile's suggested name from the final guess map.
+
+    A voice match cannot exist while the profiles are being built: matching a
+    known speaker needs a profile first, to pick the snippet it embeds. So the
+    guess a profile is constructed with is always the pre-recognition one, and
+    without this second pass every known-speaker match was written into the
+    transcript's `speaker_guesses` and then silently dropped from the dialog.
+
+    A missing key keeps whatever the profile already had, so re-applying can
+    never blank a name that was already there.
+    """
+    for profile in profiles:
+        profile.guess = guesses.get(profile.speaker, profile.guess)
+    return profiles

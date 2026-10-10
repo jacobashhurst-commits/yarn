@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -270,9 +271,15 @@ def cmd_doctor(cfg: Config, args) -> int:
     print("Archive root:", cfg.root)
     print("Chroma dir:  ", cfg.chroma_dir)
     print()
-    print("Point Claude at the archive with this in claude_desktop_config.json:")
-    print('  "chroma": { "command": "uvx", "args": ["chroma-mcp",')
-    print(f'    "--client-type", "persistent", "--data-dir", "{cfg.chroma_dir}"] }}')
+    # Prefer the repo launcher — bare `uvx chroma-mcp` re-resolves deps and
+    # breaks when pydantic>=2.14 drops eval_type_backport (mcp still imports it).
+    launcher = Path(__file__).resolve().parents[1] / "bin" / "chroma-mcp"
+    print("Point Claude/Cursor at the archive with this MCP config:")
+    print(f'  "chroma": {{ "command": "{launcher}", "args": [')
+    print(
+        f'    "--client-type", "persistent", "--data-dir", "{cfg.chroma_dir}"],'
+    )
+    print('    "env": {"ANONYMIZED_TELEMETRY": "false"} }')
     return 0 if ok else 1
 
 
@@ -457,6 +464,24 @@ def cmd_speakers(cfg: Config, args) -> int:
         print(f"played {path.name}")
         return 0
 
+    if getattr(args, "clip_path", None):
+        try:
+            path = speaker_memory.meeting_clip_path(
+                cfg, args.meeting_id, args.clip_path, args.clip_index or 0
+            )
+        except FileNotFoundError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        print(path)
+        return 0
+
+    if getattr(args, "identify_json", False):
+        if not cfg.transcript_json(args.meeting_id).exists():
+            print(f"no transcript for {args.meeting_id}", file=sys.stderr)
+            return 1
+        print(json.dumps(speaker_memory.identify_payload(cfg, args.meeting_id)))
+        return 0
+
     transcript_path = cfg.transcript_json(args.meeting_id)
     if not transcript_path.exists():
         print(f"no transcript for {args.meeting_id}", file=sys.stderr)
@@ -488,6 +513,7 @@ def cmd_speakers(cfg: Config, args) -> int:
 
     if args.set:
         updates: dict[str, str] = {}
+        cleared: list[str] = []
         valid = {p.speaker for p in transcript.speaker_profiles}
         for item in args.set:
             key, _, name = item.partition("=")
@@ -502,9 +528,18 @@ def cmd_speakers(cfg: Config, args) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            if not speaker_memory.is_real_name(name):
+                # "unsure" means "leave this voice unnamed", not a person.
+                cleared.append(key)
+                continue
             updates[key] = name
+        if cleared:
+            records.clear_speaker_names(notes_path, cleared)
+            roster = {k: v for k, v in roster.items() if k not in cleared}
+            for key in cleared:
+                print(f"{key} left unnamed")
         if not updates:
-            return 1
+            return 0 if cleared else 1
         leftover = speaker_memory.leftover_assignment(
             transcript.speaker_profiles,
             {**roster, **updates},
@@ -572,6 +607,11 @@ def cmd_speakers(cfg: Config, args) -> int:
                 f"across {profile.turns} turn(s), from "
                 f"{models.format_timestamp(profile.first_at)}"
             )
+            guess = speaker_memory.usable_dialog_guess(
+                profile.guess,
+                attendees=records.listed_speakers(notes),
+                known=[person.name for person in speaker_memory.load_library(cfg)],
+            )
             print(
                 "\t".join(
                     [
@@ -579,8 +619,8 @@ def cmd_speakers(cfg: Config, args) -> int:
                         f"Speaker {index}",
                         detail,
                         _tsv_field(profile.quip),
-                        _tsv_field(profile.guess),
-                        _tsv_field(speaker_memory.speaker_excerpt(transcript, profile)),
+                        _tsv_field(guess),
+                        _tsv_field(speaker_memory.identity_clips(transcript, profile, limit=1)[0].text),
                     ]
                 )
             )
@@ -756,6 +796,16 @@ def cmd_prune(cfg: Config, args) -> int:
 
 
 def cmd_queue(cfg: Config, args) -> int:
+    if getattr(args, "reconcile", False):
+        repaired = jobs.reconcile(cfg)
+        if repaired:
+            for meeting_id in repaired:
+                print(f"{meeting_id}  queued -> complete (transcript already on disk)")
+            print(f"repaired {len(repaired)} stale job record(s)")
+        else:
+            print("nothing to reconcile; every queued job is genuinely outstanding")
+        return 0
+
     items = jobs.list_jobs(cfg)
     if not items:
         print("queue is empty")
@@ -1076,6 +1126,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY",
         help="play a short clip of one diarized voice, e.g. room-2",
     )
+    p.add_argument(
+        "--clip-path",
+        metavar="KEY",
+        help="extract one single-voice clip and print its path (for the identify window)",
+    )
+    p.add_argument("--clip-index", type=int, default=0, help="which clip, 0 = best")
+    p.add_argument(
+        "--identify-json",
+        action="store_true",
+        help="voices, clips and predicted names as JSON, for the identify window",
+    )
     p.set_defaults(func=cmd_speakers)
 
     p = sub.add_parser("voices", help="show or review the known-speaker library")
@@ -1091,9 +1152,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="archive summary").set_defaults(func=cmd_status)
 
-    sub.add_parser("queue", help="show the processing queue").set_defaults(
-        func=cmd_queue
+    p = sub.add_parser("queue", help="show the processing queue")
+    p.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="mark queued jobs complete when the transcript is already on disk",
     )
+    p.set_defaults(func=cmd_queue)
     sub.add_parser("pause", help="pause background processing").set_defaults(
         func=cmd_pause
     )
