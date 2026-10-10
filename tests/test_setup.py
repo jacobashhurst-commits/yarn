@@ -64,6 +64,28 @@ def test_setup_stops_on_the_first_failed_step(tmp_path, monkeypatch, capsys):
     assert [e["id"] for e in events if e["type"] == "start"] == ["prereqs"]
 
 
+def test_install_app_skips_download_when_already_present(tmp_path, monkeypatch):
+    app = tmp_path / "SwiftBar.app"
+    app.mkdir()
+    monkeypatch.setattr(yarn_setup, "existing_app", lambda name: app)
+
+    def boom(*_a, **_k):
+        raise AssertionError("should not download an app that is already installed")
+
+    monkeypatch.setattr(yarn_setup, "download", boom)
+    assert (
+        yarn_setup.install_app_from_zip("http://example.invalid", "SwiftBar.app", "menubar")
+        == app
+    )
+
+
+def test_ollama_binary_uses_path(monkeypatch, tmp_path):
+    fake = tmp_path / "ollama"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(yarn_setup, "which", lambda name: str(fake) if name == "ollama" else None)
+    assert yarn_setup.ollama_binary() == str(fake)
+
+
 def test_prereqs_reject_intel_macs(tmp_path, monkeypatch):
     monkeypatch.setattr(yarn_setup.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(yarn_setup.platform, "machine", lambda: "x86_64")

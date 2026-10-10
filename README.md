@@ -63,17 +63,9 @@ header all reversible later.
 
 ### Mac (Apple Silicon)
 
-From this folder, run:
-
-```bash
-bin/yarn-setup
-```
-
-A window walks through Python, speech models, Ollama, and the menu bar — the
-same shape as a Hermes-style installer. You should not have to install Python
-or Ollama by hand. Re-running skips work that is already done.
-
-`bin/yarn-setup --cli` prints the same steps in a terminal.
+Open the Yarn folder and double-click **Yarn Setup**. Read **Start here.txt**
+if the Mac refuses to open it (unsigned download). Developers can still run
+`bin/yarn-setup --cli`.
 
 ### 1. Install (developers)
 

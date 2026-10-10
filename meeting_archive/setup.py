@@ -35,6 +35,10 @@ FFMPEG_STATIC = (
     "b6.1.1/ffmpeg-darwin-arm64"
 )
 OLLAMA_ZIP = "https://ollama.com/download/Ollama-darwin.zip"
+SWIFTBAR_ZIP = (
+    "https://github.com/swiftbar/SwiftBar/releases/download/"
+    "v2.1.1/SwiftBar.v2.1.1.b597.zip"
+)
 SUMMARY_MODEL = "qwen3.5:9b"
 MIN_FREE_BYTES = 10 * 1024 ** 3
 
@@ -63,6 +67,70 @@ def support_bin() -> Path:
     path = Path.home() / "Library" / "Application Support" / "Yarn" / "bin"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def cache_dir() -> Path:
+    path = Path.home() / "Library" / "Caches" / "Yarn"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def existing_app(name: str) -> Path | None:
+    for folder in (Path("/Applications"), Path.home() / "Applications"):
+        path = folder / name
+        if path.exists():
+            return path
+    return None
+
+
+def install_app_from_zip(url: str, app_name: str, step_id: str) -> Path:
+    """Put a .app from a zip into Applications. No Homebrew required."""
+    found = existing_app(app_name)
+    if found:
+        return found
+    archive = cache_dir() / app_name.replace(" ", "") / "download.zip"
+    extract = cache_dir() / app_name.replace(" ", "") / "extract"
+    if extract.exists():
+        shutil.rmtree(extract)
+    extract.mkdir(parents=True)
+    download(url, archive, step_id)
+    unzip = run(["unzip", "-q", str(archive), "-d", str(extract)], timeout=120)
+    if unzip.returncode != 0:
+        raise RuntimeError(f"Could not unpack {app_name}: {(unzip.stderr or '')[-400:]}")
+    apps = [p for p in extract.rglob("*.app") if p.name == app_name]
+    if not apps:
+        apps = list(extract.rglob("*.app"))
+    if not apps:
+        raise RuntimeError(f"The {app_name} download did not contain an app.")
+    src = apps[0]
+    last_error = ""
+    for folder in (Path("/Applications"), Path.home() / "Applications"):
+        dest = folder / app_name
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                return dest
+            shutil.copytree(src, dest)
+            run(["xattr", "-cr", str(dest)], timeout=30)
+            emit({"type": "log", "id": step_id, "text": f"Installed {app_name} to {dest}"})
+            return dest
+        except OSError as exc:
+            last_error = str(exc)
+            continue
+    raise RuntimeError(f"Could not install {app_name}: {last_error}")
+
+
+def ollama_binary() -> str | None:
+    for path in (
+        which("ollama"),
+        "/usr/local/bin/ollama",
+        "/opt/homebrew/bin/ollama",
+        "/Applications/Ollama.app/Contents/Resources/ollama",
+        str(Path.home() / "Applications/Ollama.app/Contents/Resources/ollama"),
+    ):
+        if path and Path(path).is_file():
+            return path
+    return None
 
 
 def emit(payload: dict) -> None:
@@ -191,7 +259,7 @@ def step_deps(repo: Path) -> None:
     emit({"type": "log", "id": "deps", "text": f"ma is at {ma}"})
 
 
-def _brew_install(formula: str, cask: bool = False) -> bool:
+def _brew_install(formula: str, cask: bool = False, step_id: str = "tools") -> bool:
     brew = which("brew")
     if not brew:
         return False
@@ -199,7 +267,7 @@ def _brew_install(formula: str, cask: bool = False) -> bool:
     if cask:
         argv.append("--cask")
     argv.append(formula)
-    emit({"type": "log", "id": "tools", "text": " ".join(argv)})
+    emit({"type": "log", "id": step_id, "text": " ".join(argv)})
     proc = run(argv, timeout=900)
     return proc.returncode == 0
 
@@ -381,29 +449,37 @@ def step_speakers(repo: Path) -> None:
 
 
 def step_ollama(repo: Path) -> None:
-    ollama = which("ollama")
+    ollama = ollama_binary()
     if not ollama:
-        app = Path("/Applications/Ollama.app")
-        if not app.exists():
+        if _brew_install("ollama", cask=True, step_id="ollama"):
+            ollama = ollama_binary()
+    if not ollama:
+        emit({"type": "log", "id": "ollama", "text": "Downloading Ollama (free, stays on this Mac)"})
+        try:
+            app = install_app_from_zip(OLLAMA_ZIP, "Ollama.app", "ollama")
+        except Exception as exc:
             emit(
                 {
                     "type": "log",
                     "id": "ollama",
-                    "text": "Ollama is optional. Transcripts still save without it.",
-                }
-            )
-            emit(
-                {
-                    "type": "log",
-                    "id": "ollama",
-                    "text": "Install it later from the Yarn menu: Open Ollama.",
+                    "text": f"Could not install Ollama ({exc}). Recording still works; summaries can wait.",
                 }
             )
             return
-        subprocess.Popen(["open", "-a", "Ollama"])
-        time.sleep(2)
-        ollama = which("ollama")
+        subprocess.Popen(["open", "-a", str(app)])
+        for _ in range(20):
+            time.sleep(2)
+            ollama = ollama_binary()
+            if ollama:
+                break
     if not ollama:
+        emit(
+            {
+                "type": "log",
+                "id": "ollama",
+                "text": "Ollama is installed but not ready yet. Open it once from the Yarn menu.",
+            }
+        )
         return
     emit({"type": "log", "id": "ollama", "text": f"Using {ollama}"})
     listed = run([ollama, "list"], timeout=60)
@@ -427,6 +503,18 @@ def step_ollama(repo: Path) -> None:
 def step_menubar(repo: Path) -> None:
     py = venv_python(repo)
     ma = repo / ".venv" / "bin" / "ma"
+    if not existing_app("SwiftBar.app"):
+        if not _brew_install("swiftbar", cask=True, step_id="menubar"):
+            emit({"type": "log", "id": "menubar", "text": "Downloading SwiftBar for the menu bar icon"})
+            app = install_app_from_zip(SWIFTBAR_ZIP, "SwiftBar.app", "menubar")
+            subprocess.Popen(["open", "-a", str(app)])
+    plugin_dir = Path.home() / ".swiftbar-plugins"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    for bundle in ("com.ameba.SwiftBar", "com.swiftbar.SwiftBar"):
+        run(
+            ["defaults", "write", bundle, "PluginDirectory", str(plugin_dir)],
+            timeout=10,
+        )
     env = {
         "PATH": f"{repo / '.venv' / 'bin'}:{os.environ.get('PATH', '')}",
         "YARN_SETUP_NONINTERACTIVE": "1",
@@ -459,6 +547,7 @@ def step_menubar(repo: Path) -> None:
             }
         )
     emit({"type": "log", "id": "menubar", "text": f"Command is {ma}"})
+    subprocess.Popen(["open", "-a", "SwiftBar"])
 
 
 HANDLERS = {

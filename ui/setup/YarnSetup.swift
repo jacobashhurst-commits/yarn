@@ -29,12 +29,14 @@ final class Controller: NSObject, NSWindowDelegate {
     var finished = false
 
     let window: NSWindow
-    let heading = NSTextField(labelWithString: "Install Yarn")
-    let subtitle = NSTextField(labelWithString: "Preparing…")
+    let heading = NSTextField(labelWithString: "Welcome to Yarn")
+    let subtitle = NSTextField(labelWithString: "")
+    let welcome = NSTextField(wrappingLabelWithString: "")
+    let startButton = NSButton(title: "Get started", target: nil, action: nil)
     let bar = NSProgressIndicator()
     let list = NSStackView()
     let detail = NSTextField(wrappingLabelWithString: "")
-    let cancel = NSButton(title: "Cancel", target: nil, action: nil)
+    let cancel = NSButton(title: "Not now", target: nil, action: nil)
     var rowLabels: [NSTextField] = []
     var rowTimes: [NSTextField] = []
     var rowMarks: [NSTextField] = []
@@ -43,7 +45,7 @@ final class Controller: NSObject, NSWindowDelegate {
         self.repo = repo
         self.python = python
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 580),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -59,13 +61,32 @@ final class Controller: NSObject, NSWindowDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        launchWorker()
     }
 
     private func build() {
-        heading.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+        heading.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
         subtitle.font = NSFont.systemFont(ofSize: 13)
         subtitle.textColor = .secondaryLabelColor
+        welcome.font = NSFont.systemFont(ofSize: 14)
+        welcome.textColor = .labelColor
+        welcome.maximumNumberOfLines = 0
+        welcome.preferredMaxLayoutWidth = 664
+        welcome.stringValue = """
+        Yarn records meetings you start, on this Mac only. Nothing is uploaded.
+
+        To get started it will install two free, open-source apps if they are not already here:
+
+        • SwiftBar — the record button in your menu bar
+        • Ollama — written summaries, still on this computer
+
+        macOS may ask for your password or microphone permission. That’s normal. Then click Get started and wait — the long steps are downloads, not homework.
+        """
+        startButton.target = self
+        startButton.action = #selector(beginInstall)
+        startButton.keyEquivalent = "\r"
+        bar.isHidden = true
+        list.isHidden = true
+        detail.isHidden = true
         bar.isIndeterminate = false
         bar.minValue = 0
         bar.maxValue = 100
@@ -82,16 +103,17 @@ final class Controller: NSObject, NSWindowDelegate {
         list.spacing = 10
         list.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [heading, subtitle, bar, list, detail, cancel])
+        let stack = NSStackView(views: [heading, subtitle, welcome, startButton, bar, list, detail, cancel])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 20, right: 28)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        welcome.widthAnchor.constraint(equalToConstant: 664).isActive = true
         bar.widthAnchor.constraint(equalToConstant: 664).isActive = true
         detail.widthAnchor.constraint(equalToConstant: 664).isActive = true
 
-        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 520))
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 580))
         window.contentView?.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
@@ -295,6 +317,18 @@ final class Controller: NSObject, NSWindowDelegate {
             cancel.title = "Close"
         }
         finished = true
+    }
+
+    @objc private func beginInstall() {
+        welcome.isHidden = true
+        startButton.isHidden = true
+        bar.isHidden = false
+        list.isHidden = false
+        detail.isHidden = false
+        heading.stringValue = "Install Yarn"
+        subtitle.stringValue = "Preparing…"
+        cancel.title = "Cancel"
+        launchWorker()
     }
 
     @objc private func cancelRun() {

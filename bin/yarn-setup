@@ -9,6 +9,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+xattr -cr "$REPO_DIR" 2>/dev/null || true
 SWIFT_SRC="$REPO_DIR/ui/setup/YarnSetup.swift"
 APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Setup.app"
 APP_BIN="$APP_DIR/Contents/MacOS/YarnSetup"
