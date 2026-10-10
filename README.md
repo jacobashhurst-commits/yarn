@@ -61,7 +61,21 @@ header all reversible later.
 
 ## Setup
 
-### 1. Install
+### Mac (Apple Silicon)
+
+From this folder, run:
+
+```bash
+bin/yarn-setup
+```
+
+A window walks through Python, speech models, Ollama, and the menu bar — the
+same shape as a Hermes-style installer. You should not have to install Python
+or Ollama by hand. Re-running skips work that is already done.
+
+`bin/yarn-setup --cli` prints the same steps in a terminal.
+
+### 1. Install (developers)
 
 ```bash
 brew install ffmpeg

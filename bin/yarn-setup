@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# Open the Yarn Setup window. Non-tech path: double-click later; for now run
+# this from the checkout. `--cli` skips the window and prints the same steps.
+#
+#   bin/yarn-setup
+#   bin/yarn-setup --cli
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SWIFT_SRC="$REPO_DIR/ui/setup/YarnSetup.swift"
+APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Setup.app"
+APP_BIN="$APP_DIR/Contents/MacOS/YarnSetup"
+
+host_python() {
+  for c in python3.12 python3.13 python3.11 python3; do
+    if command -v "$c" >/dev/null 2>&1; then
+      command -v "$c"
+      return 0
+    fi
+  done
+  echo "yarn-setup: Python 3.11+ is required" >&2
+  exit 1
+}
+
+PYTHON="$(host_python)"
+
+if [[ "${1:-}" == "--cli" ]]; then
+  export PYTHONPATH="$REPO_DIR"
+  export PATH="$REPO_DIR/.venv/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+  exec "$PYTHON" -m meeting_archive.setup --repo "$REPO_DIR"
+fi
+
+build_app() {
+  command -v swiftc >/dev/null 2>&1 || return 1
+  mkdir -p "$APP_DIR/Contents/MacOS" || return 1
+  cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.setup</string>
+  <key>CFBundleName</key><string>Yarn Setup</string>
+  <key>CFBundleExecutable</key><string>YarnSetup</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Yarn records meetings you start, on this Mac only.</string>
+</dict>
+</plist>
+PLIST
+  swiftc -parse-as-library -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
+    -framework AppKit >/dev/null 2>&1 || return 1
+  mv -f "$APP_BIN.partial" "$APP_BIN"
+}
+
+if [[ ! -x "$APP_BIN" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+  if ! build_app; then
+    echo "yarn-setup: could not build the window; running in the terminal instead" >&2
+    export PYTHONPATH="$REPO_DIR"
+    export PATH="$REPO_DIR/.venv/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+    exec "$PYTHON" -m meeting_archive.setup --repo "$REPO_DIR"
+  fi
+fi
+
+exec open -n "$APP_DIR" --args --repo "$REPO_DIR" --python "$PYTHON"

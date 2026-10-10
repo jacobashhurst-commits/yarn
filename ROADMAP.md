@@ -51,6 +51,9 @@ rewriting the pipeline.
 A one-time-fee product for people who want this workflow and do not want a
 subscription to a large hosted model.
 
+Mac first: `bin/yarn-setup` is the Hermes-style window. GitHub Releases will
+be the public download (a `.dmg` wrapping that same wizard). Windows later.
+
 - Installer for laptop (required); home server is an optional extra
 - Local capture, local transcription, local search
 - Buyer chooses: this computer, or their own server

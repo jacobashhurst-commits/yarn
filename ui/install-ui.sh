@@ -38,6 +38,14 @@ say "1/4  SwiftBar (menu bar UI)"
 
 if [[ -d "/Applications/SwiftBar.app" ]]; then
   info "already installed"
+elif [[ "${YARN_SETUP_NONINTERACTIVE:-}" == "1" ]]; then
+  if command -v brew >/dev/null 2>&1; then
+    info "installing SwiftBar with Homebrew"
+    brew install --cask swiftbar
+  else
+    info "SwiftBar is not installed; the menu bar icon is skipped."
+    info "Background jobs still run. Install SwiftBar later and re-run this script."
+  fi
 else
   info "SwiftBar is a free, open-source menu bar host for shell scripts."
   info "It is the only new dependency, and it is what gives you the record button."

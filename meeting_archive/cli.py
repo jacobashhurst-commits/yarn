@@ -26,6 +26,7 @@
     ma voices                 known-speaker library; --html / --play NAME
     ma benchmark              run local benchmark_audio/ files if present
     ma status                 counts and recent meetings
+    ma setup                  open the Mac installer window
 """
 
 from __future__ import annotations
@@ -281,6 +282,17 @@ def cmd_doctor(cfg: Config, args) -> int:
     )
     print('    "env": {"ANONYMIZED_TELEMETRY": "false"} }')
     return 0 if ok else 1
+
+
+def cmd_setup(cfg: Config, args) -> int:
+    """Open the Setup window, or run the same steps in this terminal."""
+    if not getattr(args, "cli", False):
+        script = Path(__file__).resolve().parents[1] / "bin" / "yarn-setup"
+        if script.is_file():
+            os.execv(str(script), [str(script)])
+    from . import setup as yarn_setup
+
+    return yarn_setup.run_setup()
 
 
 def cmd_devices(cfg: Config, args) -> int:
@@ -1008,6 +1020,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, help="path to config.toml")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("setup", help="install Yarn on this Mac")
+    p.add_argument(
+        "--cli",
+        action="store_true",
+        help="run the installer in this terminal instead of a window",
+    )
+    p.set_defaults(func=cmd_setup)
 
     sub.add_parser("doctor", help="check the setup").set_defaults(func=cmd_doctor)
     sub.add_parser("devices", help="list audio devices").set_defaults(func=cmd_devices)
