@@ -27,6 +27,7 @@ _EMPTY = {
     "working_id": "",
     "last_id": "",
     "last_finished_epoch": 0,
+    "blocker": "",
 }
 
 
@@ -54,6 +55,7 @@ def _load(cfg: Config) -> dict:
         # _load whitelists keys, so a field missing here is silently dropped
         # on every read no matter what end_work writes.
         "last_finished_epoch": int(data.get("last_finished_epoch") or 0),
+        "blocker": str(data.get("blocker") or ""),
     }
 
 
@@ -67,6 +69,7 @@ def _counts(cfg: Config, exclude: str = "") -> dict:
         if not path.name.endswith(".partial") and path.stem != exclude
     ]
     summaries: list[str] = []
+    blocker = ""
     if cfg.transcripts_dir.exists():
         for path in sorted(cfg.transcripts_dir.rglob("*.json")):
             try:
@@ -77,11 +80,15 @@ def _counts(cfg: Config, exclude: str = "") -> dict:
                 continue
             if needs_summary(transcript):
                 summaries.append(transcript.meeting_id)
+                err = str(getattr(transcript, "summary_error", "") or "").strip()
+                if err and not blocker:
+                    blocker = err.removeprefix("deferred: ").strip()
     _write_lines(cfg, inbox, summaries)
     return {
         "inbox": len(inbox),
         "summaries_pending": len(summaries),
         "remaining": len(inbox) + len(summaries),
+        "blocker": blocker,
     }
 
 

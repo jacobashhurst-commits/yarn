@@ -61,6 +61,7 @@ You only do this once. Yarn stays on this Mac. Nothing is uploaded.
    • To open Ollama       — click Open
 
    When it says Yarn is ready, you are done with this note.
+   The zip in Downloads can be deleted after that — Yarn now lives on this Mac.
 
 
 5. After that

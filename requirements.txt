@@ -1,5 +1,8 @@
 # Transcription. 1.1.0 is the first release with large-v3-turbo support.
 faster-whisper>=1.1.0
+# faster-whisper 1.2.1 still calls av.open(..., metadata_errors="ignore").
+# PyAV 19 dropped that argument; unconstrained install then fails every meeting.
+av>=11,<19
 
 # Vector store. The pipeline and chroma-mcp must agree on the embedding
 # function; both use Chroma's default, so keep them on compatible versions.

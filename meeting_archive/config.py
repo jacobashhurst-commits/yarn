@@ -100,8 +100,9 @@ class DiarizeConfig:
     min_span_s: float = 0.6
     # Ask who each unidentified voice was, once the transcript exists.
     identify_popup: bool = True
-    # sherpa is the stable engine. pyannote is experimental; compare runs both.
-    engine: str = "sherpa"
+    # pyannote is the default and still experimental. sherpa is the stable
+    # fallback. compare runs both.
+    engine: str = "pyannote"
 
 
 @dataclass
@@ -514,6 +515,8 @@ def _apply_settings_overlay(cfg: Config) -> None:
         cfg.processing.pause_on_pressure = bool(overlay["pause_on_pressure"])
     if "summarize_when" in overlay:
         cfg.summary.when = str(overlay["summarize_when"])
+    if "summary_model" in overlay:
+        cfg.summary.model = str(overlay["summary_model"])
     if "evening_hour" in overlay:
         try:
             hour = int(overlay["evening_hour"])

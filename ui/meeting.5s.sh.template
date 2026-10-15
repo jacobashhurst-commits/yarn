@@ -160,7 +160,8 @@ summarize_when="$(json_raw "$SETTINGS" summarize_when)"
 brief_on_login="$(json_raw "$SETTINGS" brief_on_login)"
 brief_manual_count="$(json_raw "$SETTINGS" brief_manual_count)"
 [[ "$brief_manual_count" =~ ^[0-9]+$ ]] || brief_manual_count=0
-[[ -n "$engine" ]] || engine="sherpa"
+summary_model="$(json_raw "$SETTINGS" summary_model)"
+[[ -n "$engine" ]] || engine="pyannote"
 [[ -n "$retention" ]] || retention="1_week"
 [[ -n "$summarize_when" ]] || summarize_when="after_meeting"
 
@@ -220,6 +221,7 @@ pending="$(count_files "$INBOX" '\.json$')"
 queue_remaining="$(json_raw "$QUEUE_STATUS" remaining)"
 queue_inbox="$(json_raw "$QUEUE_STATUS" inbox)"
 queue_summaries="$(json_raw "$QUEUE_STATUS" summaries_pending)"
+queue_blocker="$(json_raw "$QUEUE_STATUS" blocker)"
 queue_last_id="$(json_raw "$QUEUE_STATUS" last_id)"
 queue_updated="$(json_raw "$QUEUE_STATUS" last_finished_epoch)"
 [[ "$queue_remaining" =~ ^[0-9]+$ ]] || queue_remaining="$pending"
@@ -323,6 +325,8 @@ if [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
   fi
   if (( queue_summaries > 0 )) && ! pgrep -xq ollama && ! pgrep -xq Ollama; then
     echo "Summaries need Ollama, which isn't running | size=11 color=#cc0000 bash=/usr/bin/open param1=-a param2=Ollama terminal=false"
+  elif [[ -n "$queue_blocker" ]]; then
+    echo "Summaries waiting: ${queue_blocker} | size=11 color=#cc0000"
   fi
   if ! $processing; then
     echo "Process waiting now | bash=\"$MA\" param1=process terminal=false refresh=true"
@@ -344,7 +348,7 @@ echo "---"
 echo "Quick actions | size=12 color=#888888"
 echo "Import recording | bash=\"$(dirname "$REC")/yarn-import\" param1=audio param2=\"$MA\" terminal=false refresh=true"
 echo "Import transcript | bash=\"$(dirname "$REC")/yarn-import\" param1=transcript param2=\"$MA\" terminal=false refresh=true"
-echo "Daily brief | bash=/bin/bash param1=-lc param2='$MA brief --open --force' terminal=false refresh=true"
+echo "Daily brief | bash=\"$MA\" param1=brief param2=--open param3=--force terminal=false refresh=true"
 if [[ -f "$MA_ROOT/briefs/latest.html" ]]; then
   echo "Open last brief | bash=/usr/bin/open param1=\"$MA_ROOT/briefs/latest.html\" terminal=false"
 fi
@@ -381,10 +385,16 @@ if [[ "$recognise" == "true" || "$recognise" == "1" ]]; then
 else
   echo "Recognise known speakers: Off | bash=\"$MA\" param1=setting param2=recognise_known param3=on terminal=false refresh=true"
 fi
-echo "Speaker engine: ${engine} | size=11 color=#888888"
-echo "-- Stable (Sherpa) | bash=\"$MA\" param1=setting param2=speaker_engine param3=sherpa terminal=false refresh=true"
-echo "-- Experimental (pyannote) | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true"
-echo "-- Compare both | bash=\"$MA\" param1=setting param2=speaker_engine param3=compare terminal=false refresh=true"
+echo "Speaker engine: ${engine} | size=11 color=#617188"
+pyannote_mark=""; sherpa_mark=""; compare_mark=""
+case "$engine" in
+  sherpa) sherpa_mark="checked=true" ;;
+  compare) compare_mark="checked=true" ;;
+  *) pyannote_mark="checked=true" ;;
+esac
+echo "-- Experimental (pyannote, default) | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true ${pyannote_mark}"
+echo "-- Stable (Sherpa) | bash=\"$MA\" param1=setting param2=speaker_engine param3=sherpa terminal=false refresh=true ${sherpa_mark}"
+echo "-- Compare both | bash=\"$MA\" param1=setting param2=speaker_engine param3=compare terminal=false refresh=true ${compare_mark}"
 echo "Audio retention: ${retention} | size=11 color=#888888"
 echo "-- 1 week | bash=\"$MA\" param1=setting param2=audio_retention param3=1_week terminal=false refresh=true"
 echo "-- 1 month | bash=\"$MA\" param1=setting param2=audio_retention param3=1_month terminal=false refresh=true"
@@ -405,6 +415,51 @@ else
   if (( brief_manual_count >= 3 )); then
     echo "Tip: try Open brief at login after a few mornings | size=11 color=#888888"
   fi
+fi
+# Empty overlay means "whatever this Mac can run": 9B above 10 GB, 4B on a Neo.
+# The watcher also rewrites a 9B setting down on an 8 GB machine.
+mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+can_accurate=false
+if [[ "$mem_bytes" =~ ^[0-9]+$ ]] && (( mem_bytes > 10737418240 )); then
+  can_accurate=true
+fi
+if [[ -z "$summary_model" ]]; then
+  if $can_accurate; then summary_model="qwen3.5:9b"; else summary_model="qwen3.5:4b"; fi
+fi
+fast_mark=""; accurate_mark=""
+case "$summary_model" in
+  *9b*|accurate)
+    quality_label="Accurate (9B)"
+    accurate_mark="checked=true"
+    ;;
+  *)
+    quality_label="Fast (4B)"
+    fast_mark="checked=true"
+    ;;
+esac
+echo "Summary model: ${quality_label} | size=11 color=#617188"
+echo "-- Fast (4B) | bash=\"$MA\" param1=setting param2=summary_model param3=fast terminal=false refresh=true ${fast_mark}"
+if $can_accurate; then
+  echo "-- Accurate (9B) | bash=\"$MA\" param1=setting param2=summary_model param3=accurate terminal=false refresh=true ${accurate_mark}"
+else
+  echo "-- Accurate (9B) needs about 16 GB | disabled=true size=11 color=#617188"
+fi
+# SwiftBar drops a Python entry point often enough that the click looks like
+# it did nothing. A bash script keeps the target in one argument and logs it.
+YARN_CONNECT="$(cd "$(dirname "$MA")/../.." && pwd)/bin/yarn-connect"
+if [[ ! -x "$YARN_CONNECT" ]]; then
+  YARN_CONNECT=""
+fi
+if [[ -n "$YARN_CONNECT" ]]; then
+  echo "Connect Claude | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=claude terminal=false refresh=true"
+  echo "Connect Ollama | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=ollama terminal=false refresh=true"
+  echo "Connect Cursor | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=cursor terminal=false refresh=true"
+  echo "Connect ChatGPT | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=chatgpt terminal=false refresh=true"
+else
+  echo "Connect Claude | bash=\"$MA\" param1=connect param2=claude terminal=false refresh=true"
+  echo "Connect Ollama | bash=\"$MA\" param1=connect param2=ollama terminal=false refresh=true"
+  echo "Connect Cursor | bash=\"$MA\" param1=connect param2=cursor terminal=false refresh=true"
+  echo "Connect ChatGPT | bash=\"$MA\" param1=connect param2=chatgpt terminal=false refresh=true"
 fi
 echo "Diagnostics | bash=\"$MA\" param1=doctor terminal=true"
 echo "Logs | bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"

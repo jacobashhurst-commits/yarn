@@ -1046,14 +1046,12 @@ def forget_speaker(cfg: Config, name: str) -> bool:
 
 
 def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) -> Path:
+    from . import htmltheme
+
     people = people if people is not None else load_library(cfg)
     lines = [
-        "<!doctype html><meta charset=utf-8><title>Yarn known speakers</title>",
-        "<style>body{font:14px/1.4 -apple-system,sans-serif;margin:24px;max-width:720px}",
-        "audio{width:100%;margin-top:6px} .card{border-bottom:1px solid #ddd;padding:12px 0}",
-        ".meta{color:#666;font-size:12px}</style>",
-        "<h1>Known speakers</h1>",
-        "<p>These are voices you have named. Play a clip to check it is the "
+        htmltheme.masthead("Speakers", "Known speakers"),
+        "<p class=\"lede\">These are voices you have named. Play a clip to check it is the "
         "right person. Yarn will only attach a name to new speech after you "
         "confirm it in a meeting.</p>",
     ]
@@ -1064,23 +1062,26 @@ def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) ->
         clip_html = (
             f'<audio controls src="{clip.as_uri()}"></audio>'
             if clip is not None
-            else "<p class=meta>No reference clip yet. Name this voice while meeting audio is still kept.</p>"
+            else '<p class="mono">No reference clip yet. Name this voice while meeting audio is still kept.</p>'
         )
         last = person.last_seen or "—"
         lines.append(
-            "<div class=card>"
+            '<div class="voice">'
             f"<strong>{_esc(person.name)}</strong>"
-            f"<div class=meta>{person.confirmation_count} confirmation(s) · "
-            f"last seen { _esc(last)}</div>"
+            f'<div class="mono">{person.confirmation_count} confirmation(s) · '
+            f"last seen {_esc(last)}</div>"
             f"{clip_html}"
             "</div>"
         )
     lines.append(
-        "<p class=meta>To remove someone: <code>ma voices --forget NAME</code></p>"
+        '<p class="mono">To remove someone: <code>ma voices --forget NAME</code></p>'
     )
     path = cfg.root / "speakers" / "library.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text(
+        htmltheme.document("Yarn known speakers", "\n".join(lines)),
+        encoding="utf-8",
+    )
     return path
 
 

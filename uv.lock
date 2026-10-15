@@ -1102,6 +1102,7 @@ name = "meeting-archive"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "av" },
     { name = "chromadb" },
     { name = "faster-whisper" },
     { name = "sherpa-onnx" },
@@ -1115,6 +1116,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", specifier = ">=11,<19" },
     { name = "chromadb", specifier = ">=0.5.0" },
     { name = "faster-whisper", specifier = ">=1.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

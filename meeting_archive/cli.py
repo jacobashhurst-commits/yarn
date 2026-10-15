@@ -51,6 +51,42 @@ from .summarize import Summarizer
 from .transcribe import Transcriber
 
 
+def invoked_ma() -> str:
+    """The `ma` binary that is running, not whatever happens to be on PATH.
+
+    SwiftBar's PATH does not include the venv, so `which ma` misses and a
+    login job was written for /opt/homebrew/bin/ma, which is not installed.
+    """
+    candidate = Path(sys.argv[0]).resolve()
+    if candidate.is_file():
+        return str(candidate)
+    found = shutil.which("ma")
+    return found or str(candidate)
+
+
+def _tell(message: str, *, alert: bool = False) -> None:
+    """Surface a line the menu bar would otherwise throw away."""
+    if alert:
+        script = 'display alert "Yarn" message (item 1 of argv) as warning'
+    else:
+        script = 'display notification (item 1 of argv) with title "Yarn"'
+    subprocess.Popen(
+        [
+            "/usr/bin/osascript",
+            "-e",
+            "on run argv",
+            "-e",
+            script,
+            "-e",
+            "end run",
+            "--",
+            message,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def setup_logging(cfg: Config, verbose: bool = False) -> None:
     cfg.logs_dir.mkdir(parents=True, exist_ok=True)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
@@ -222,6 +258,8 @@ def cmd_doctor(cfg: Config, args) -> int:
                 for line in proc.stdout.splitlines()[1:]
                 if line.split()
             }
+            from .resources import SUMMARY_MODEL_FULL, summary_model_choice
+
             if proc.returncode == 0 and cfg.summary.model in models:
                 print(
                     f"[ok  ] local summary -- Ollama model={cfg.summary.model}"
@@ -231,6 +269,9 @@ def cmd_doctor(cfg: Config, args) -> int:
                     f"[warn] local summary -- model {cfg.summary.model!r} is not "
                     "installed locally; summaries will be skipped"
                 )
+            _, notice = summary_model_choice()
+            if notice and cfg.summary.model == SUMMARY_MODEL_FULL:
+                print(f"[warn] local summary -- {notice}")
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"[warn] local summary -- Ollama unavailable: {exc}")
     else:
@@ -440,6 +481,8 @@ def cmd_process(cfg: Config, args) -> int:
     count = watcher.sweep_inbox(
         cfg, transcriber, store, diarizer, summarizer, force=True
     )
+    transcriber.unload()
+    diarizer.unload()
     count += watcher.sweep_summaries(cfg, summarizer, store, force=True)
     from . import queue as queue_mod
 
@@ -927,14 +970,32 @@ def cmd_setting(cfg: Config, args) -> int:
             )
             return 1
         value = lowered
+    elif args.key == "summary_model":
+        from .resources import (
+            SUMMARY_MODEL_FULL,
+            can_run_accurate,
+            model_for_quality,
+        )
+
+        value = model_for_quality(lowered)
+        if value == SUMMARY_MODEL_FULL and not can_run_accurate():
+            print("this Mac can only run Fast summaries", file=sys.stderr)
+            return 1
     else:
         value = raw
     write_setting(cfg, args.key, value)
     if args.key == "brief_on_login":
         from . import brief as brief_mod
 
-        ma_bin = shutil.which("ma") or "/opt/homebrew/bin/ma"
+        ma_bin = invoked_ma()
         if value:
+            if not Path(ma_bin).is_file():
+                _tell(
+                    f"Open brief at login is on, but Yarn could not find {ma_bin} "
+                    "to run it at login.",
+                    alert=True,
+                )
+                return 1
             path = brief_mod.install_login_agent(cfg, ma_bin)
             print(f"login brief enabled ({path})")
         else:
@@ -949,6 +1010,10 @@ def cmd_brief(cfg: Config, args) -> int:
     from . import brief as brief_mod
     from .summarize import SummaryUnavailable
 
+    # The menu runs this with the terminal hidden, and a brief takes about a
+    # minute. Without a note on screen the click looks like it did nothing.
+    if not args.login:
+        _tell("Writing today's brief on this Mac. It usually takes about a minute.")
     try:
         result = brief_mod.generate_brief(
             cfg,
@@ -960,6 +1025,8 @@ def cmd_brief(cfg: Config, args) -> int:
         if args.login and "on login is off" in str(exc).lower():
             return 0
         print(exc, file=sys.stderr)
+        if not args.login:
+            _tell(str(exc), alert=True)
         return 1
     if result.path is None:
         return 0
@@ -969,6 +1036,21 @@ def cmd_brief(cfg: Config, args) -> int:
             brief_mod._open_path(result.path)  # noqa: SLF001
         return 0
     print(f"wrote {result.path}")
+    return 0
+
+
+def cmd_connect(cfg: Config, args) -> int:
+    """Point a desktop chat app at the local meeting search index."""
+    from .connect import ConnectError, connect_target
+
+    try:
+        text = connect_target(cfg, args.target, notify=_tell)
+    except (OSError, ConnectError) as exc:
+        print(exc, file=sys.stderr)
+        _tell(str(exc), alert=True)
+        return 1
+    print(text)
+    _tell(text, alert=True)
     return 0
 
 
@@ -1267,6 +1349,7 @@ def build_parser() -> argparse.ArgumentParser:
             "pause_on_pressure",
             "summarize_when",
             "brief_on_login",
+            "summary_model",
         ),
     )
     p.add_argument("value")
@@ -1292,6 +1375,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="rewrite today's brief even if it already exists",
     )
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser(
+        "connect",
+        help="let Claude, Ollama, Cursor, or ChatGPT search this Mac's meetings",
+    )
+    p.add_argument("target", choices=("claude", "ollama", "cursor", "chatgpt"))
+    p.set_defaults(func=cmd_connect)
 
     sub.add_parser(
         "benchmark", help="time local benchmark_audio/ files if present"

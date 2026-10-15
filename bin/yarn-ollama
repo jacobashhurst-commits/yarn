@@ -1,0 +1,30 @@
+#!/bin/bash
+# Local Ollama chat that can call Yarn's search server.
+# Usage: yarn-ollama <model> <servers.json>
+set -euo pipefail
+
+MODEL="${1:-}"
+SERVERS="${2:-}"
+if [[ -z "$MODEL" || -z "$SERVERS" ]]; then
+  echo "usage: yarn-ollama <model> <servers.json>" >&2
+  exit 2
+fi
+if [[ ! -f "$SERVERS" ]]; then
+  echo "Yarn search config is missing at $SERVERS" >&2
+  exit 1
+fi
+
+UVX="${UVX:-/opt/homebrew/bin/uvx}"
+if [[ ! -x "$UVX" ]]; then
+  UVX="$(command -v uvx || true)"
+fi
+if [[ -z "${UVX}" ]]; then
+  echo "uvx not found; install with: brew install uv" >&2
+  exit 1
+fi
+
+exec "$UVX" --python 3.12 ollmcp \
+  --provider ollama \
+  --host http://127.0.0.1:11434 \
+  --model "$MODEL" \
+  --servers-json "$SERVERS"

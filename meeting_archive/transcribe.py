@@ -275,6 +275,40 @@ def _cli_line_end_seconds(line: str) -> float | None:
     )
 
 
+def _load_audio(src: Path) -> "np.ndarray":
+    """16 kHz mono float32. Our channel wavs never need PyAV.
+
+    faster-whisper's decode_audio goes through PyAV and passes
+    metadata_errors=, which PyAV 19 dropped. A fresh Setup then failed every
+    meeting in VAD before Whisper ran. Read our own 16 kHz wavs with `wave`.
+    """
+    if src.suffix.lower() == ".wav":
+        try:
+            return _read_wav(src)
+        except Exception:
+            pass
+    from faster_whisper.audio import decode_audio
+
+    return decode_audio(str(src), sampling_rate=SAMPLE_RATE)
+
+
+def _read_wav(src: Path) -> "np.ndarray":
+    with wave.open(str(src), "rb") as inp:
+        channels = inp.getnchannels()
+        width = inp.getsampwidth()
+        rate = inp.getframerate()
+        raw = inp.readframes(inp.getnframes())
+    if width == 2:
+        samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    else:
+        raise ValueError(f"unsupported sample width {width}")
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+    if rate != SAMPLE_RATE:
+        raise ValueError(f"expected {SAMPLE_RATE} Hz, got {rate}")
+    return samples
+
+
 def _write_pcm16(path: Path, samples: "np.ndarray", sample_rate: int) -> None:
     pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
     with wave.open(str(path), "wb") as out:
@@ -300,14 +334,13 @@ def _vad_audio(
     channel is silent whenever Jacob is the one talking, and handing that to
     Whisper is how "Thanks for watching!" ends up in a transcript.
     """
-    from faster_whisper.audio import decode_audio
     from faster_whisper.vad import (
         SpeechTimestampsMap,
         VadOptions,
         get_speech_timestamps,
     )
 
-    audio = decode_audio(str(src), sampling_rate=SAMPLE_RATE)
+    audio = _load_audio(src)
     chunks = get_speech_timestamps(
         audio, VadOptions(min_silence_duration_ms=min_silence_ms)
     )

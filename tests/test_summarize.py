@@ -38,6 +38,33 @@ def test_summarizer_refuses_missing_model_without_downloading(monkeypatch):
     assert calls == [["/usr/local/bin/ollama", "list"]]
 
 
+def test_ollama_oom_is_a_deferred_human_line():
+    from meeting_archive.summarize import is_pending_summary, ollama_http_message
+
+    message = ollama_http_message(
+        500,
+        '{"error":"model requires 7.1 GiB but only 4.8 GiB are available"}',
+    )
+    assert "7.1 GiB" in message
+    assert is_pending_summary(message)
+
+
+def test_recent_memory_refusal_is_not_retried_every_sweep(tmp_path):
+    from meeting_archive.records import Transcript
+    from meeting_archive.summarize import should_retry_summary
+
+    path = tmp_path / "meeting.json"
+    transcript = Transcript(
+        meeting_id="m1",
+        summary_error="deferred: model requires 7.1 GiB but only 4.8 GiB are available",
+    )
+    path.write_text("{}", encoding="utf-8")
+    now = path.stat().st_mtime
+    assert should_retry_summary(path, transcript, force=False, now=now + 10) is False
+    assert should_retry_summary(path, transcript, force=True, now=now + 10) is True
+    assert should_retry_summary(path, transcript, force=False, now=now + 700) is True
+
+
 def test_timeout_and_deferred_messages_are_retryable():
     from meeting_archive.summarize import DEFERRED_TIMEOUT, is_pending_summary
 

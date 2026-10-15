@@ -708,7 +708,8 @@ def rediarize(
 
         # The old summary referred to obsolete Speaker N labels. Rewrite it
         # now when Ollama is available; otherwise remove the misleading text
-        # and let `ma summarize --today` fill it later.
+        # and let `ma summarize --today` fill it later. A refused summary
+        # must not throw away the speaker labels we just computed.
         transcript.summary = ""
         transcript.summary_model = ""
         if summarizer is not None and summarizer.enabled and summarizer.is_running():
@@ -716,11 +717,15 @@ def rediarize(
                 cfg, meeting_id, "Writing summary", 0, indeterminate=True
             )
             roster = records.speaker_roster(notes)
-            transcript.summary = summarizer.summarize(
-                transcript.turns, cfg.turn_labeller(roster)
-            )
-            transcript.summary_model = cfg.summary.model
-            transcript.summary_error = ""
+            try:
+                transcript.summary = summarizer.summarize(
+                    transcript.turns, cfg.turn_labeller(roster)
+                )
+                transcript.summary_model = cfg.summary.model
+                transcript.summary_error = ""
+            except SummaryUnavailable as exc:
+                transcript.summary_error = str(exc)
+                log.error("summary unavailable after rediarize meeting=%s: %s", meeting_id, exc)
         else:
             transcript.summary_error = DEFERRED_SUMMARY
 

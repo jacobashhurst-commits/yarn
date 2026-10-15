@@ -7,10 +7,12 @@ meetings produce numbers. Do not invent a single quality score.
 
 MacBook Neo — Apple Silicon A18 Pro, 8 GB unified memory.
 
-Quality defaults do not change on this machine. Scheduling and model
-lifecycle do. The same Whisper large-v3-turbo and qwen3.5:9b run on both
-laptops; a more powerful machine finishes the same model faster and can
-keep it warm. It is not a reason to pick a worse model on Neo.
+Whisper stays large-v3-turbo on this machine. Written summaries do not:
+qwen3.5:9b needs ~7.1 GiB free, and an 8 GB Neo with the OS and a few
+apps only has ~4.8 GiB. Setup therefore installs qwen3.5:4b here and
+tells you. The work laptop still uses 9B. Evening scheduling used to
+wait until other apps were closed so 9B might fit; that is not a launch
+default.
 
 ## Baseline (pre-V2, 2026-09-11, work laptop)
 
@@ -34,7 +36,7 @@ Setup only. Live quality bake-off not yet run.
 | whisper.cpp | 1.9.4 (`whisper-cli`), ggml-large-v3-turbo 1.6 GB |
 | faster-whisper | present (VAD + CUDA-server fallback) |
 | sherpa-onnx | 1.13.8 |
-| Ollama | qwen3.5:9b |
+| Ollama | qwen3.5:4b on ≤10 GB; qwen3.5:9b otherwise |
 | Unit/integration tests | 267 passing after V2 queue/retention/import/library landing |
 
 ### Engine bake-off (large-v3-turbo, same files)

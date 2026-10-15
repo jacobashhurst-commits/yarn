@@ -115,6 +115,12 @@ the same words on `room` are somebody else. There are tests for both.
   when AirPods connected during live testing. Recording selects the configured
   device name and preflights its channel count; do not regress to index-only
   capture.
+- **Do not put the recorder in Downloads, Desktop, or Documents.** macOS
+  Files-and-Folders TCC lets Terminal read those folders and silently refuses
+  launchd. Python then dies on `.venv/pyvenv.cfg` with `Operation not
+  permitted`; the menu bar only shows "the recorder exited before it started
+  recording". Yarn Setup copies a GitHub zip out of Downloads into
+  `~/Library/Application Support/Yarn/app` before it writes LaunchAgents.
 - **The capture must run under launchd, not as a child of SwiftBar.** macOS
   gives microphone permission to the responsible process. For a SwiftBar
   plugin that is SwiftBar, whose bundle has no
@@ -153,6 +159,23 @@ the same words on `room` are somebody else. There are tests for both.
   preflight probe refuses to start on it and `finalize` refuses to publish
   it, so a permission fault can never reach the archive as an empty
   transcript.
+- **Extract the pyannote tarball into `models/diarization/`, not into the
+  model folder itself.** The archive already contains
+  `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`. Extracting into that
+  folder nests it, Setup reports success, and every room stays Unknown.
+- **Summaries are Fast (4b) or Accurate (9b), chosen in the menu.** Setup
+  asks which to download. An 8 GB Neo can only run Fast and the Accurate
+  menu item is disabled there. SwiftBar `--` lines belong to the item
+  immediately above them — never put another setting between Process when
+  and its After/Evening/Manual children.
+- **Unload Whisper before Ollama.** qwen3.5:9b needs ~7 GiB. Leaving the
+  watcher transcriber resident is why a fresh install 500'd every summary
+  (`only 4.8 GiB are available`) and Process waiting now looked dead.
+- **Pin PyAV below 19, and install from the lockfile.** faster-whisper 1.2.1
+  still calls `av.open(..., metadata_errors="ignore")`. PyAV 19 dropped that
+  argument. A fresh `uv pip install -e` (no lock) pulled 19 and every meeting
+  died in VAD before Whisper ran. Channel wavs are decoded with `wave` now;
+  Setup uses `uv sync --frozen` when `uv.lock` is present.
 - **A Chroma collection handle is pinned to a uuid.** `ma rebuild` drops and
   recreates the collection, which invalidates the handle held by the running
   watcher. `MeetingStore._run` reopens on that error; without it a rebuild

@@ -64,8 +64,10 @@ header all reversible later.
 ### Mac (Apple Silicon)
 
 Open the Yarn folder and double-click **Yarn Setup**. Read **Start here.txt**
-if the Mac refuses to open it (unsigned download). Developers can still run
-`bin/yarn-setup --cli`.
+if the Mac refuses to open it (unsigned download). Setup copies Yarn out of
+Downloads into `~/Library/Application Support/Yarn` so the recorder can run
+as a background job — macOS blocks LaunchAgents from reading Downloads.
+Developers can still run `bin/yarn-setup --cli`.
 
 ### 1. Install (developers)
 

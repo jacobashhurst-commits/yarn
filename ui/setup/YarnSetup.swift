@@ -5,6 +5,7 @@
 // Built by bin/yarn-setup into an .app and launched with `open`.
 
 import AppKit
+import Darwin
 
 struct Step: Equatable {
     let id: String
@@ -33,6 +34,9 @@ final class Controller: NSObject, NSWindowDelegate {
     let subtitle = NSTextField(labelWithString: "")
     let welcome = NSTextField(wrappingLabelWithString: "")
     let startButton = NSButton(title: "Get started", target: nil, action: nil)
+    let fastBox = NSButton(checkboxWithTitle: "Fast summaries (smaller, quicker)", target: nil, action: nil)
+    let accurateBox = NSButton(checkboxWithTitle: "Accurate summaries (better writing, more memory)", target: nil, action: nil)
+    let summaryHint = NSTextField(wrappingLabelWithString: "")
     let bar = NSProgressIndicator()
     let list = NSStackView()
     let detail = NSTextField(wrappingLabelWithString: "")
@@ -45,7 +49,7 @@ final class Controller: NSObject, NSWindowDelegate {
         self.repo = repo
         self.python = python
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 640),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -81,6 +85,24 @@ final class Controller: NSObject, NSWindowDelegate {
 
         macOS may ask for your password or microphone permission. That’s normal. Then click Get started and wait — the long steps are downloads, not homework.
         """
+        let ram = memoryGB()
+        let neo = ram > 0 && ram <= 10
+        fastBox.state = .on
+        accurateBox.state = neo ? .off : .on
+        accurateBox.isEnabled = !neo
+        summaryHint.font = NSFont.systemFont(ofSize: 12)
+        summaryHint.textColor = .secondaryLabelColor
+        summaryHint.maximumNumberOfLines = 0
+        summaryHint.preferredMaxLayoutWidth = 664
+        if neo {
+            summaryHint.stringValue = String(
+                format: "This Mac has %.0f GB, so it can only run Fast. Accurate needs about 16 GB.",
+                ram
+            )
+            fastBox.isEnabled = false
+        } else {
+            summaryHint.stringValue = "Download Fast, Accurate, or both. You pick which one Yarn uses in the menu bar."
+        }
         startButton.target = self
         startButton.action = #selector(beginInstall)
         startButton.keyEquivalent = "\r"
@@ -103,7 +125,10 @@ final class Controller: NSObject, NSWindowDelegate {
         list.spacing = 10
         list.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [heading, subtitle, welcome, startButton, bar, list, detail, cancel])
+        let stack = NSStackView(views: [
+            heading, subtitle, welcome, summaryHint, fastBox, accurateBox,
+            startButton, bar, list, detail, cancel,
+        ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -113,7 +138,7 @@ final class Controller: NSObject, NSWindowDelegate {
         bar.widthAnchor.constraint(equalToConstant: 664).isActive = true
         detail.widthAnchor.constraint(equalToConstant: 664).isActive = true
 
-        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 580))
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 640))
         window.contentView?.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
@@ -196,7 +221,15 @@ final class Controller: NSObject, NSWindowDelegate {
     private func launchWorker() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = ["-m", "meeting_archive.setup", "--repo", repo]
+        var pull: [String] = []
+        if fastBox.state == .on { pull.append("fast") }
+        if accurateBox.state == .on { pull.append("accurate") }
+        if pull.isEmpty { pull = ["fast"] }
+        process.arguments = [
+            "-m", "meeting_archive.setup",
+            "--repo", repo,
+            "--pull", pull.joined(separator: ","),
+        ]
         var env = ProcessInfo.processInfo.environment
         env["PYTHONPATH"] = repo
         env["PATH"] = "\(repo)/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -321,6 +354,9 @@ final class Controller: NSObject, NSWindowDelegate {
 
     @objc private func beginInstall() {
         welcome.isHidden = true
+        summaryHint.isHidden = true
+        fastBox.isHidden = true
+        accurateBox.isHidden = true
         startButton.isHidden = true
         bar.isHidden = false
         list.isHidden = false
@@ -367,6 +403,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+}
+
+func memoryGB() -> Double {
+    var value = UInt64(0)
+    var size = MemoryLayout<UInt64>.size
+    sysctlbyname("hw.memsize", &value, &size, nil, 0)
+    return Double(value) / 1_073_741_824.0
 }
 
 @main

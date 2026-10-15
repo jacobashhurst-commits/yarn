@@ -8,6 +8,7 @@ import re
 import subprocess
 import urllib.error
 import urllib.request
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -79,6 +80,56 @@ def should_attempt_summary(cfg, meeting_id: str = "", now: datetime | None = Non
 
 class SummaryUnavailable(RuntimeError):
     pass
+
+
+def _http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def ollama_http_message(code: int, body: str) -> str:
+    """Turn Ollama's HTTP body into a retryable, human line.
+
+    A 500 that says the 9B model needs 7.1 GiB and only 4.8 are free is not a
+    dead meeting. Treating it as a generic HTTP 500 made Process waiting now
+    look like a no-op, and the watcher retried every 5s.
+    """
+    err = ""
+    try:
+        err = str((json.loads(body) or {}).get("error") or "").strip()
+    except ValueError:
+        err = body.strip()[:300]
+    if err:
+        return f"deferred: {err}"
+    return f"deferred: local summary failed: Ollama HTTP {code}"
+
+
+SUMMARY_RETRY_S = 600
+
+
+def should_retry_summary(
+    path: Path,
+    transcript,
+    *,
+    force: bool = False,
+    now: float | None = None,
+) -> bool:
+    """Avoid hammering Ollama every 5s after a memory refusal."""
+    if force:
+        return True
+    err = str(getattr(transcript, "summary_error", "") or "")
+    if not err:
+        return True
+    lowered = err.lower()
+    if "available" not in lowered and "gib" not in lowered and "memory" not in lowered:
+        return True
+    try:
+        age = (now if now is not None else time.time()) - path.stat().st_mtime
+    except OSError:
+        return True
+    return age >= SUMMARY_RETRY_S
 
 
 class Summarizer:
@@ -167,13 +218,17 @@ class Summarizer:
         try:
             text = self._generate(url, payload)
         except urllib.error.HTTPError as exc:
+            body = _http_error_body(exc)
             if exc.code in {400, 422}:
                 payload.pop("think", None)
-                text = self._generate(url, payload)
+                try:
+                    text = self._generate(url, payload)
+                except urllib.error.HTTPError as retry_exc:
+                    raise SummaryUnavailable(
+                        ollama_http_message(retry_exc.code, _http_error_body(retry_exc))
+                    ) from retry_exc
             else:
-                raise SummaryUnavailable(
-                    f"local summary failed: Ollama HTTP {exc.code}"
-                ) from exc
+                raise SummaryUnavailable(ollama_http_message(exc.code, body)) from exc
         except TimeoutError as exc:
             raise SummaryUnavailable(DEFERRED_TIMEOUT) from exc
         except urllib.error.URLError as exc:

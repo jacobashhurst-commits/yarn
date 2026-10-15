@@ -106,14 +106,12 @@ def list_meetings(cfg: Config) -> list[MeetingRow]:
 
 
 def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
+    from . import htmltheme
+
     rows = rows if rows is not None else list_meetings(cfg)
     lines = [
-        "<!doctype html><meta charset=utf-8><title>Yarn library</title>",
-        "<style>body{font:14px/1.4 -apple-system,sans-serif;margin:24px;max-width:960px}",
-        "table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left}",
-        ".err{color:#b00}.note{color:#8a5a00}</style>",
-        "<h1>Yarn library</h1>",
-        f"<p>{len(rows)} meeting(s). Transcripts are the archive; audio may expire.</p>",
+        htmltheme.masthead("Library", "Meetings on this Mac"),
+        f"<p class=\"lede\">{len(rows)} meeting(s). Transcripts are the archive. Audio may expire.</p>",
         "<table><thead><tr>",
         "<th>When</th><th>Title</th><th>State</th><th>Duration</th>",
         "<th>Speakers</th><th>Summary</th><th>Audio</th>",
@@ -136,7 +134,7 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
         )
         lines.append(
             "<tr>"
-            f"<td>{_esc(row.date)}</td>"
+            f"<td class=\"mono\">{_esc(row.date)}</td>"
             f"<td>{title}</td>"
             f"<td>{_esc(row.state)}</td>"
             f"<td>{mins}m {secs:02d}s</td>"
@@ -148,11 +146,14 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
         if row.error:
             css = "note" if is_pending_summary(row.error) else "err"
             lines.append(
-                f'<tr><td colspan=7 class={css}>{_esc(_meeting_notice(row.error))}</td></tr>'
+                f'<tr><td colspan="7" class="{css}">{_esc(_meeting_notice(row.error))}</td></tr>'
             )
     lines.append("</tbody></table>")
     path = cfg.root / "library.html"
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text(
+        htmltheme.document("Yarn library", "\n".join(lines)),
+        encoding="utf-8",
+    )
     return path
 
 

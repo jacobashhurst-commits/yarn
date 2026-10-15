@@ -5,6 +5,9 @@ description = "Local, manually triggered meeting transcription and semantic sear
 requires-python = ">=3.11"
 dependencies = [
     "faster-whisper>=1.1.0",
+    # 19 dropped metadata_errors; faster-whisper 1.2.1 still passes it and
+    # every meeting then dies in VAD with a TypeError.
+    "av>=11,<19",
     "chromadb>=0.5.0",
     "sherpa-onnx>=1.12.0",
     # Capture goes through CoreAudio, not ffmpeg. The wheel carries its own
@@ -28,6 +31,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["meeting_archive"]
+
+[tool.setuptools.package-data]
+meeting_archive = ["assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

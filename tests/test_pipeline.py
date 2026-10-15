@@ -127,6 +127,16 @@ def make_wav(
     return path
 
 
+def test_read_wav_does_not_need_pyav(tmp_path):
+    from meeting_archive.transcribe import SAMPLE_RATE, _read_wav
+
+    path = make_wav(tmp_path / "tone.wav", [True], duration=0.25)
+    samples = _read_wav(path)
+    assert samples.dtype == "float32"
+    assert len(samples) == int(0.25 * SAMPLE_RATE)
+    assert samples.max() > 0.4
+
+
 def mean_volume_db(path: Path) -> float:
     """Mean volume in dB via ffmpeg's volumedetect. Silence returns -inf."""
     proc = subprocess.run(

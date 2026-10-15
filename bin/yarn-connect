@@ -1,0 +1,21 @@
+#!/bin/bash
+# Menu-bar entry for `ma connect`. SwiftBar hides stderr, so failures land
+# in the archive log and in an alert.
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MA="$ROOT/.venv/bin/ma"
+LOG="${HOME}/meeting-archive/logs/connect.log"
+mkdir -p "$(dirname "$LOG")"
+{
+  echo "=== $(date '+%Y-%m-%dT%H:%M:%S') $* ==="
+  if [[ ! -x "$MA" ]]; then
+    echo "ma is missing at $MA"
+    exit 127
+  fi
+  "$MA" connect "$@"
+} >>"$LOG" 2>&1
+status=$?
+if [[ "$status" -ne 0 ]]; then
+  /usr/bin/osascript -e "display alert \"Yarn\" message \"Connect failed. The details are in ${LOG}\" as warning" >/dev/null 2>&1 || true
+fi
+exit "$status"

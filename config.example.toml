@@ -125,6 +125,7 @@ enabled = true
 command = "/usr/local/bin/ollama"
 # Probe only. Do not use `ollama list` to detect this — that starts the daemon.
 host = "http://127.0.0.1:11434"
+# 9B on 16 GB+ Macs. 4B on 8 GB machines (Neo): 9B needs ~7.1 GiB free.
 model = "qwen3.5:9b"
 timeout_s = 900
 # Longer transcripts are summarized in chunks and combined locally.

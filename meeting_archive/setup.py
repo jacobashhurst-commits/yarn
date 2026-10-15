@@ -39,7 +39,6 @@ SWIFTBAR_ZIP = (
     "https://github.com/swiftbar/SwiftBar/releases/download/"
     "v2.1.1/SwiftBar.v2.1.1.b597.zip"
 )
-SUMMARY_MODEL = "qwen3.5:9b"
 MIN_FREE_BYTES = 10 * 1024 ** 3
 
 STEPS: list[tuple[str, str]] = [
@@ -57,6 +56,63 @@ STEPS: list[tuple[str, str]] = [
 
 def repo_dir() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def runtime_dir() -> Path:
+    return Path.home() / "Library" / "Application Support" / "Yarn" / "app"
+
+
+# macOS Files-and-Folders TCC. Terminal can read these; a LaunchAgent cannot.
+# The recorder then dies on `.venv/pyvenv.cfg` with Operation not permitted.
+TCC_BLOCKED_FOLDERS = ("Downloads", "Desktop", "Documents")
+
+
+def is_blocked_for_launchd(path: Path) -> bool:
+    resolved = path.expanduser().resolve()
+    try:
+        relative = resolved.relative_to(Path.home().resolve())
+    except ValueError:
+        return False
+    if relative.parts and relative.parts[0] in TCC_BLOCKED_FOLDERS:
+        return True
+    return "Mobile Documents" in str(relative)
+
+
+def copy_checkout(source: Path, dest: Path) -> None:
+    if dest.exists() and dest.resolve() == source.resolve():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        source,
+        dest,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(
+            ".venv", "__pycache__", "*.pyc", ".pytest_cache", ".git"
+        ),
+    )
+
+
+def materialize_runtime(source: Path) -> Path:
+    """Yarn's recorder is a LaunchAgent. It must not live in Downloads."""
+    source = source.expanduser().resolve()
+    if not is_blocked_for_launchd(source):
+        emit({"type": "log", "id": "venv", "text": f"Installing in place at {source}"})
+        return source
+    dest = runtime_dir()
+    folder = source.relative_to(Path.home().resolve()).parts[0]
+    emit(
+        {
+            "type": "log",
+            "id": "venv",
+            "text": (
+                f"macOS blocks background jobs in {folder}; "
+                f"copying Yarn to {dest}"
+            ),
+        }
+    )
+    copy_checkout(source, dest)
+    run(["xattr", "-cr", str(dest)], timeout=60)
+    return dest
 
 
 def venv_python(repo: Path) -> Path:
@@ -216,6 +272,22 @@ def step_prereqs(repo: Path) -> None:
         )
     py = host_python()
     emit({"type": "log", "id": "prereqs", "text": f"Using {py}"})
+    from .resources import summary_model_choice, unified_memory_gb
+
+    ram_gb = unified_memory_gb()
+    if ram_gb:
+        emit({"type": "log", "id": "prereqs", "text": f"{ram_gb:.0f} GB of memory"})
+    model, notice = summary_model_choice(ram_gb)
+    if notice:
+        emit({"type": "log", "id": "prereqs", "text": notice})
+    else:
+        emit(
+            {
+                "type": "log",
+                "id": "prereqs",
+                "text": f"Written summaries will use {model}",
+            }
+        )
     if not (repo / "pyproject.toml").is_file():
         raise RuntimeError(f"This does not look like a Yarn checkout: {repo}")
 
@@ -240,16 +312,24 @@ def step_venv(repo: Path) -> None:
 def step_deps(repo: Path) -> None:
     py = venv_python(repo)
     emit({"type": "log", "id": "deps", "text": "Installing Yarn into the local environment"})
-    pip = run([str(py), "-m", "pip", "--version"], timeout=30)
-    if pip.returncode == 0:
-        proc = run([str(py), "-m", "pip", "install", "-e", str(repo)], timeout=600)
-    elif which("uv"):
+    uv = which("uv")
+    lock = repo / "uv.lock"
+    if uv and lock.is_file():
+        # Bare `uv pip install -e` ignores the lock and once pulled PyAV 19,
+        # which cannot open audio for faster-whisper's VAD.
         proc = run(
-            [which("uv"), "pip", "install", "--python", str(py), "-e", str(repo)],
+            [uv, "sync", "--frozen", "--directory", str(repo)],
+            timeout=600,
+        )
+    elif uv:
+        proc = run(
+            [uv, "pip", "install", "--python", str(py), "-e", str(repo)],
             timeout=600,
         )
     else:
-        run([str(py), "-m", "ensurepip", "--upgrade"], timeout=120)
+        pip = run([str(py), "-m", "pip", "--version"], timeout=30)
+        if pip.returncode != 0:
+            run([str(py), "-m", "ensurepip", "--upgrade"], timeout=120)
         proc = run([str(py), "-m", "pip", "install", "-e", str(repo)], timeout=600)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "install failed").strip()[-2000:])
@@ -312,38 +392,40 @@ def _gecos_name() -> str:
 
 
 def _guess_mic() -> str:
-    ffmpeg = which("ffmpeg") or str(support_bin() / "ffmpeg")
-    proc = run(
-        [ffmpeg, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-        timeout=20,
-    )
-    text = (proc.stderr or "") + (proc.stdout or "")
-    for line in text.splitlines():
-        lower = line.lower()
+    # ffmpeg prefixes every line with `[AVFoundation indev @ 0x…]`. Taking the
+    # first `]` produced `1] MacBook Neo Microphone` and the recorder refused
+    # to start. Use the same parser as `ma devices`.
+    from .audio import list_avfoundation_devices, parse_audio_devices
+
+    try:
+        devices = parse_audio_devices(list_avfoundation_devices())
+    except Exception:
+        return ""
+    for name in devices.values():
+        lower = name.lower()
         if "macbook" in lower and "micro" in lower:
-            start = line.find("]")
-            name = line[start + 1 :].strip() if start >= 0 else line.strip()
-            return name.strip("[] ")
+            return name
         if "built-in" in lower and "micro" in lower:
-            start = line.find("]")
-            name = line[start + 1 :].strip() if start >= 0 else line.strip()
-            return name.strip("[] ")
+            return name
     return ""
 
 
 def step_config(repo: Path) -> None:
     from .config import DEFAULT_CONFIG_PATH, DEFAULT_ROOT
+    from .resources import summary_model_choice
 
     DEFAULT_ROOT.mkdir(parents=True, exist_ok=True)
     (DEFAULT_ROOT / "models" / "whisper-cpp").mkdir(parents=True, exist_ok=True)
     (DEFAULT_ROOT / "models" / "diarization").mkdir(parents=True, exist_ok=True)
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    summary_model, _ = summary_model_choice()
     if DEFAULT_CONFIG_PATH.exists():
+        write_summary_model(DEFAULT_CONFIG_PATH, summary_model)
         emit(
             {
                 "type": "log",
                 "id": "config",
-                "text": f"Keeping existing {DEFAULT_CONFIG_PATH}",
+                "text": f"Keeping existing {DEFAULT_CONFIG_PATH} (summaries: {summary_model})",
             }
         )
         return
@@ -386,9 +468,14 @@ condition_on_previous_text = false
 
 [diarize]
 enabled = true
+engine = "pyannote"
 segmentation_model = "{root}/models/diarization/sherpa-onnx-pyannote-segmentation-3-0/model.onnx"
 embedding_model = "{root}/models/diarization/speaker-embedding.onnx"
 identify_popup = true
+
+[summary]
+model = "{summary_model}"
+when = "after_meeting"
 """
     DEFAULT_CONFIG_PATH.write_text(body, encoding="utf-8")
     emit(
@@ -422,30 +509,93 @@ def step_whisper(repo: Path) -> None:
     emit({"type": "log", "id": "whisper", "text": f"Saved {path}"})
 
 
+def extract_segmentation_archive(archive: Path, dest_model: Path) -> None:
+    """Unpack the sherpa tarball where diarize actually looks.
+
+    The archive is a folder named `sherpa-onnx-pyannote-segmentation-3-0`.
+    Extracting into that folder itself nests `model.onnx` one level too deep,
+    which is how a fresh Setup left every room labelled Unknown.
+    """
+    import tarfile
+
+    dest_model.parent.mkdir(parents=True, exist_ok=True)
+    extract_root = dest_model.parent.parent
+    extract_root.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r:bz2") as tar:
+        kwargs = {"filter": "data"} if sys.version_info >= (3, 12) else {}
+        tar.extractall(extract_root, **kwargs)
+    flatten_segmentation_model(dest_model)
+
+
+def flatten_segmentation_model(dest_model: Path) -> None:
+    """Undo a nested extract from an earlier Setup."""
+    if dest_model.is_file():
+        return
+    nested = dest_model.parent / dest_model.parent.name / dest_model.name
+    if not nested.is_file():
+        return
+    nested_dir = nested.parent
+    for item in nested_dir.iterdir():
+        target = dest_model.parent / item.name
+        if target.exists():
+            continue
+        item.rename(target)
+
+
 def step_speakers(repo: Path) -> None:
     from .config import load_config
 
     cfg = load_config()
     seg = Path(cfg.diarize.segmentation_model).expanduser()
     emb = Path(cfg.diarize.embedding_model).expanduser()
+    flatten_segmentation_model(seg)
     if seg.is_file() and emb.is_file():
         emit({"type": "log", "id": "speakers", "text": "Speaker models already on disk"})
         return
-    import tarfile
-
     tmp = Path.home() / "Library" / "Caches" / "Yarn"
     tmp.mkdir(parents=True, exist_ok=True)
     archive = tmp / "segmentation.tar.bz2"
     if not seg.is_file():
         download(DIARIZE_SEG, archive, "speakers")
-        seg.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive, "r:bz2") as tar:
-            kwargs = {"filter": "data"} if sys.version_info >= (3, 12) else {}
-            tar.extractall(seg.parent, **kwargs)
+        extract_segmentation_archive(archive, seg)
         emit({"type": "log", "id": "speakers", "text": f"Segmentation model in {seg.parent}"})
     if not emb.is_file():
         download(DIARIZE_EMB, emb, "speakers")
     emit({"type": "log", "id": "speakers", "text": "Speaker models ready"})
+
+
+def write_summary_model(path: Path, model: str) -> None:
+    """Add or replace only the summary model. Never rewrite the rest of config."""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if "[summary]" not in text:
+        path.write_text(
+            text.rstrip()
+            + f'\n\n[summary]\nmodel = "{model}"\nwhen = "after_meeting"\n',
+            encoding="utf-8",
+        )
+        return
+    lines = text.splitlines()
+    in_summary = False
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_summary = stripped == "[summary]"
+        if in_summary and stripped.startswith("model "):
+            out.append(f'model = "{model}"')
+            replaced = True
+            continue
+        out.append(line)
+    if not replaced:
+        patched: list[str] = []
+        for line in out:
+            patched.append(line)
+            if line.strip() == "[summary]":
+                patched.append(f'model = "{model}"')
+                replaced = True
+        out = patched
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def step_ollama(repo: Path) -> None:
@@ -481,23 +631,62 @@ def step_ollama(repo: Path) -> None:
             }
         )
         return
-    emit({"type": "log", "id": "ollama", "text": f"Using {ollama}"})
+    from .config import DEFAULT_CONFIG_PATH, load_config, write_setting
+    from .resources import (
+        QUALITY_ACCURATE,
+        can_run_accurate,
+        model_for_quality,
+        quality_for_model,
+        summary_model_choice,
+    )
+
+    pulls = requested_pulls()
     listed = run([ollama, "list"], timeout=60)
-    if SUMMARY_MODEL in (listed.stdout or ""):
-        emit({"type": "log", "id": "ollama", "text": f"{SUMMARY_MODEL} already installed"})
-        return
-    emit({"type": "log", "id": "ollama", "text": f"Pulling {SUMMARY_MODEL} (several GB)"})
-    proc = run([ollama, "pull", SUMMARY_MODEL], timeout=3600)
-    if proc.returncode != 0:
+    installed = listed.stdout or ""
+    emit({"type": "log", "id": "ollama", "text": f"Using {ollama}"})
+    if not can_run_accurate():
         emit(
             {
                 "type": "log",
                 "id": "ollama",
-                "text": "Could not pull the summary model; summaries will wait.",
+                "text": "This Mac can only run Fast summaries (8 GB). Accurate needs about 16 GB.",
             }
         )
-        return
-    emit({"type": "log", "id": "ollama", "text": f"{SUMMARY_MODEL} ready"})
+    for quality in pulls:
+        model = model_for_quality(quality)
+        label = "Accurate" if quality == QUALITY_ACCURATE else "Fast"
+        if model in installed:
+            emit({"type": "log", "id": "ollama", "text": f"{label} ({model}) already installed"})
+            continue
+        emit({"type": "log", "id": "ollama", "text": f"Downloading {label} ({model})"})
+        proc = run([ollama, "pull", model], timeout=3600)
+        if proc.returncode != 0:
+            emit(
+                {
+                    "type": "log",
+                    "id": "ollama",
+                    "text": f"Could not download {label}; summaries can wait.",
+                }
+            )
+            continue
+        installed += f"\n{model}"
+        emit({"type": "log", "id": "ollama", "text": f"{label} ready"})
+    default, _ = summary_model_choice()
+    if QUALITY_ACCURATE in pulls and can_run_accurate() and model_for_quality(QUALITY_ACCURATE) in installed:
+        default = model_for_quality(QUALITY_ACCURATE)
+    elif model_for_quality(pulls[0]) in installed:
+        default = model_for_quality(pulls[0])
+    write_summary_model(DEFAULT_CONFIG_PATH, default)
+    cfg = load_config()
+    cfg.summary.model = default
+    write_setting(cfg, "summary_model", default)
+    emit(
+        {
+            "type": "log",
+            "id": "ollama",
+            "text": f"Yarn will use {quality_for_model(default).title()} ({default})",
+        }
+    )
 
 
 def step_menubar(repo: Path) -> None:
@@ -550,6 +739,20 @@ def step_menubar(repo: Path) -> None:
     subprocess.Popen(["open", "-a", "SwiftBar"])
 
 
+_PULL: list[str] = []
+
+
+def requested_pulls() -> list[str]:
+    from .resources import QUALITY_ACCURATE, QUALITY_FAST, can_run_accurate
+
+    wanted = list(_PULL) if _PULL else (
+        [QUALITY_FAST, QUALITY_ACCURATE] if can_run_accurate() else [QUALITY_FAST]
+    )
+    if not can_run_accurate():
+        wanted = [q for q in wanted if q != QUALITY_ACCURATE] or [QUALITY_FAST]
+    return wanted
+
+
 HANDLERS = {
     "prereqs": step_prereqs,
     "venv": step_venv,
@@ -579,6 +782,8 @@ def run_setup(repo: Path | None = None) -> int:
         )
         started = time.perf_counter()
         try:
+            if step_id == "venv":
+                repo = materialize_runtime(repo)
             HANDLERS[step_id](repo)
         except Exception as exc:
             emit(
@@ -611,11 +816,17 @@ def run_setup(repo: Path | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _PULL
     args = list(sys.argv[1:] if argv is None else argv)
     repo = repo_dir()
     if "--repo" in args:
         i = args.index("--repo")
         repo = Path(args[i + 1]).expanduser().resolve()
+        del args[i : i + 2]
+    if "--pull" in args:
+        i = args.index("--pull")
+        _PULL = [part.strip().lower() for part in args[i + 1].split(",") if part.strip()]
+        del args[i : i + 2]
     return run_setup(repo)
 
 

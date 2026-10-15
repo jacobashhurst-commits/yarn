@@ -44,6 +44,9 @@ def run(cfg: Config, interval: float = 5.0, once: bool = False) -> None:
     summarizer = Summarizer(cfg.summary)
     store = MeetingStore(cfg.chroma_dir, cfg.collection)
 
+    notice = resources.apply_fit_summary_model(cfg)
+    if notice:
+        log.warning("%s", notice)
     log.info("watching %s (interval=%.0fs)", cfg.inbox_dir, interval)
     while True:
         handled = 0
@@ -55,6 +58,11 @@ def run(cfg: Config, interval: float = 5.0, once: bool = False) -> None:
             queue_mod.refresh(cfg)
             handled = sweep_inbox(cfg, transcriber, store, diarizer, summarizer)
             handled += sweep_notes(cfg, store)
+            # Whisper/VAD stay resident across an inbox batch, then must go
+            # before Ollama. A 9B summary needs ~7 GiB; leaving the
+            # transcriber loaded is why a fresh install 500'd every retry.
+            transcriber.unload()
+            diarizer.unload()
             if handled == 0:
                 handled += sweep_summaries(cfg, summarizer, store)
             queue_mod.refresh(cfg)
@@ -155,7 +163,11 @@ def sweep_summaries(
     One meeting per automatic sweep so a new inbox item still wins the next
     loop. An explicit Process run drains everything waiting.
     """
-    from .summarize import should_attempt_summary
+    from .summarize import (
+        SummaryUnavailable,
+        should_attempt_summary,
+        should_retry_summary,
+    )
 
     if summarizer is None or not summarizer.enabled:
         return 0
@@ -178,12 +190,18 @@ def sweep_summaries(
             continue
         if not force and not should_attempt_summary(cfg, meeting_id):
             continue
+        if not should_retry_summary(path, transcript, force=force):
+            continue
         try:
             if pipeline.apply_summary(cfg, meeting_id, summarizer, store):
                 log.info("filled pending summary for meeting=%s", meeting_id)
                 handled += 1
                 if not force:
                     return handled
+        except SummaryUnavailable as exc:
+            log.error("summary unavailable for meeting=%s: %s", meeting_id, exc)
+            if not force:
+                return handled
         except Exception:
             log.exception("could not summarize meeting=%s", meeting_id)
             if not force:

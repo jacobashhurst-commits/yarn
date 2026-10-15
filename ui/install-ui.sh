@@ -33,6 +33,20 @@ MA_BIN="$(command -v ma)"
 CAPTURE_BIN="$(ma rec-config | sed -n 's/^MA_CAPTURE_BIN="\(.*\)"$/\1/p')"
 [[ -x "$CAPTURE_BIN" ]] || die "ma-capture is missing; re-run 'pip install -e .'"
 
+# launchd cannot read Downloads, Desktop, or Documents (macOS TCC). A recorder
+# whose venv lives there dies on pyvenv.cfg with "Operation not permitted",
+# and the menu bar only shows "exited before it started recording".
+blocked=""
+case "$REPO_DIR" in
+  */Downloads/*|*/Desktop/*|*/Documents/*) blocked="$REPO_DIR" ;;
+esac
+case "$CAPTURE_BIN" in
+  */Downloads/*|*/Desktop/*|*/Documents/*) blocked="$CAPTURE_BIN" ;;
+esac
+if [[ -n "$blocked" ]]; then
+  die "Yarn cannot run from Downloads, Desktop, or Documents ($blocked). macOS blocks the recorder there. Re-run Yarn Setup."
+fi
+
 # ---------------------------------------------------------------------------
 say "1/4  SwiftBar (menu bar UI)"
 

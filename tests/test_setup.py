@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -91,3 +92,118 @@ def test_prereqs_reject_intel_macs(tmp_path, monkeypatch):
     monkeypatch.setattr(yarn_setup.platform, "machine", lambda: "x86_64")
     with pytest.raises(RuntimeError, match="Apple Silicon"):
         yarn_setup.step_prereqs(tmp_path)
+
+
+def test_launchd_cannot_use_downloads(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    downloads = home / "Downloads" / "yarn-main"
+    downloads.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert yarn_setup.is_blocked_for_launchd(downloads)
+    assert not yarn_setup.is_blocked_for_launchd(home / "code" / "yarn")
+    assert not yarn_setup.is_blocked_for_launchd(
+        home / "Library" / "Application Support" / "Yarn" / "app"
+    )
+
+
+def test_setup_copies_a_downloads_zip_before_creating_the_venv(
+    tmp_path, monkeypatch, capsys
+):
+    home = tmp_path / "home"
+    source = home / "Downloads" / "yarn-main"
+    source.mkdir(parents=True)
+    (source / "pyproject.toml").write_text("[project]\nname='yarn'\n", encoding="utf-8")
+    (source / "keep.txt").write_text("ok", encoding="utf-8")
+    (source / ".venv").mkdir()
+    (source / ".venv" / "stale").write_text("no", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(yarn_setup, "run", lambda *_a, **_k: None)
+
+    dest = yarn_setup.materialize_runtime(source)
+    assert dest == home / "Library" / "Application Support" / "Yarn" / "app"
+    assert (dest / "keep.txt").read_text(encoding="utf-8") == "ok"
+    assert not (dest / ".venv" / "stale").exists()
+    logs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert any("Downloads" in e.get("text", "") for e in logs)
+
+
+def test_setup_installs_from_the_lockfile_when_uv_is_there(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_k):
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+    (tmp_path / ".venv" / "bin" / "ma").write_text("", encoding="utf-8")
+    monkeypatch.setattr(yarn_setup, "which", lambda name: "/opt/homebrew/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(yarn_setup, "run", fake_run)
+    monkeypatch.setattr(yarn_setup, "venv_python", lambda repo: repo / ".venv" / "bin" / "python")
+
+    yarn_setup.step_deps(tmp_path)
+    assert calls[0][:3] == ["/opt/homebrew/bin/uv", "sync", "--frozen"]
+    assert "--directory" in calls[0]
+
+
+def test_neo_setup_will_not_download_accurate(monkeypatch):
+    monkeypatch.setattr(yarn_setup, "_PULL", ["fast", "accurate"])
+    monkeypatch.setattr("meeting_archive.resources.can_run_accurate", lambda ram_gb=None: False)
+    assert yarn_setup.requested_pulls() == ["fast"]
+
+
+def test_summary_model_is_smaller_on_an_8gb_mac():
+    from meeting_archive.resources import summary_model_choice
+
+    model, notice = summary_model_choice(8.0)
+    assert model == "qwen3.5:4b"
+    assert "8 GB" in notice
+    model, notice = summary_model_choice(16.0)
+    assert model == "qwen3.5:9b"
+    assert notice == ""
+
+
+def test_write_summary_model_appends_and_replaces(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('root = "/tmp"\n', encoding="utf-8")
+    yarn_setup.write_summary_model(path, "qwen3.5:4b")
+    assert 'model = "qwen3.5:4b"' in path.read_text(encoding="utf-8")
+    yarn_setup.write_summary_model(path, "qwen3.5:9b")
+    text = path.read_text(encoding="utf-8")
+    assert text.count("[summary]") == 1
+    assert 'model = "qwen3.5:9b"' in text
+    assert 'model = "qwen3.5:4b"' not in text
+
+
+def test_flatten_nested_speaker_model(tmp_path):
+    dest = tmp_path / "sherpa-onnx-pyannote-segmentation-3-0" / "model.onnx"
+    nested = dest.parent / dest.parent.name / "model.onnx"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"onnx")
+    yarn_setup.flatten_segmentation_model(dest)
+    assert dest.read_bytes() == b"onnx"
+
+
+def test_guess_mic_uses_the_real_device_name(monkeypatch):
+    listing = (
+        "[AVFoundation indev @ 0x123] AVFoundation video devices:\n"
+        "[AVFoundation indev @ 0x123] [0] FaceTime HD Camera\n"
+        "[AVFoundation indev @ 0x123] AVFoundation audio devices:\n"
+        "[AVFoundation indev @ 0x123] [0] BlackHole 2ch\n"
+        "[AVFoundation indev @ 0x123] [1] MacBook Neo Microphone\n"
+    )
+    monkeypatch.setattr(
+        "meeting_archive.audio.list_avfoundation_devices", lambda: listing
+    )
+    assert yarn_setup._guess_mic() == "MacBook Neo Microphone"

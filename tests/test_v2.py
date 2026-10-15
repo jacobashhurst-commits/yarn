@@ -222,7 +222,7 @@ def test_library_treats_deferred_summary_as_pending_not_a_failure(cfg):
     transcript.write(cfg.transcript_json(transcript.meeting_id))
     html = library.render_html(cfg).read_text(encoding="utf-8")
     assert "Summary pending" in html
-    assert "class=note" in html
+    assert 'class="note"' in html
     assert "class=err" not in html
 
 
@@ -263,6 +263,27 @@ def test_sweep_summaries_respects_manual_schedule(cfg):
             raise AssertionError("manual mode must not auto-summarize")
 
     assert watcher.sweep_summaries(cfg, Boom(), FakeStore()) == 0
+
+
+def test_summary_setting_accepts_fast_and_accurate_names(cfg):
+    from meeting_archive.cli import cmd_setting
+
+    args = SimpleNamespace(key="summary_model", value="fast")
+    assert cmd_setting(cfg, args) == 0
+    from meeting_archive.config import _apply_settings_overlay
+
+    other = Config(root=cfg.root)
+    _apply_settings_overlay(other)
+    assert other.summary.model == "qwen3.5:4b"
+
+
+def test_summary_model_setting_overlay(cfg):
+    write_setting(cfg, "summary_model", "qwen3.5:4b")
+    other = Config(root=cfg.root)
+    from meeting_archive.config import _apply_settings_overlay
+
+    _apply_settings_overlay(other)
+    assert other.summary.model == "qwen3.5:4b"
 
 
 def test_summarize_when_setting_overlay(cfg):
