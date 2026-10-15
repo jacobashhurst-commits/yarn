@@ -1,11 +1,11 @@
-YARN — keep this open beside the other windows
+YARN. Keep this open beside the other windows.
 ==============================================
 
 You only do this once. Yarn stays on this Mac. Nothing is uploaded.
 
 
 1. Double-click “Yarn Setup” in this folder
-   (not the bin folder — this one, sitting next to this note)
+   (not the bin folder, this one, sitting next to this note)
 
    A welcome window should appear. Skip to step 4.
 
@@ -32,7 +32,7 @@ You only do this once. Yarn stays on this Mac. Nothing is uploaded.
 
    If there is no Open Anyway button yet:
       Double-click Yarn Setup once more, click Done,
-      then go back to Privacy & Security — the button
+      then go back to Privacy & Security. The button
       appears after the Mac has tried to open it.
 
 
@@ -55,18 +55,18 @@ You only do this once. Yarn stays on this Mac. Nothing is uploaded.
    Leave the window open. The long bits are downloads.
    Your Mac may ask for:
 
-   • Your password        — that’s fine
-   • Microphone access    — click Allow
-   • To open SwiftBar     — click Open
-   • To open Ollama       — click Open
+   • Your password. That’s fine
+   • Microphone access. Click Allow
+   • To open SwiftBar. Click Open
+   • To open Ollama. Click Open
 
    When it says Yarn is ready, you are done with this note.
-   The zip in Downloads can be deleted after that — Yarn now lives on this Mac.
+   The zip in Downloads can be deleted after that. Yarn now lives on this Mac.
 
 
 5. After that
 
-   Yarn is in the Dock — the row of icons along the bottom of the screen.
+   Yarn is in the Dock, the row of icons along the bottom of the screen.
    Click it to start a recording, watch it process, name the voices,
    open the daily brief, or ask about your meetings.
 

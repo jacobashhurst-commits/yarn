@@ -1064,7 +1064,7 @@ def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) ->
             if clip is not None
             else '<p class="mono">No reference clip yet. Name this voice while meeting audio is still kept.</p>'
         )
-        last = person.last_seen or "—"
+        last = person.last_seen or "not seen"
         lines.append(
             '<div class="voice">'
             f"<strong>{_esc(person.name)}</strong>"

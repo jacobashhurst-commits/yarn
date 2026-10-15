@@ -1,4 +1,4 @@
-"""Local daily brief — read-only HTML over recent meetings.
+"""Local daily brief - read-only HTML over recent meetings.
 
 Does not touch capture, inbox, jobs, or diarization. It only reads transcripts
 and notes, asks the already-running Ollama model for a short draft, and writes
@@ -181,8 +181,8 @@ def _context_blob(sources: list[MeetingBriefSource]) -> str:
             f"TITLE: {src.title}\n"
             f"WHEN: {src.when.isoformat(timespec='minutes')}\n"
             f"DURATION: {format_duration(src.duration_s)}\n"
-            f"ATTENDEES: {src.attendees or '—'}\n"
-            f"SUMMARY_STATUS: {'missing — excerpt only, not a written summary' if src.summary_missing else 'written'}\n"
+            f"ATTENDEES: {src.attendees or 'none'}\n"
+            f"SUMMARY_STATUS: {'missing, excerpt only, not a written summary' if src.summary_missing else 'written'}\n"
             f"SUMMARY:\n{src.summary}\n"
         )
     return "\n---\n".join(blocks)
@@ -450,7 +450,7 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
         d = date.fromisoformat(key)
         height = max(8, int(72 * (value / max_h))) if value else 4
         label = d.strftime("%a")
-        tip = f"{value:.1f}h" if value else "—"
+        tip = f"{value:.1f}h" if value else "-"
         week_bars.append(
             f'<div class="bar-col"><div class="bar" style="height:{height}px" title="{_esc(tip)}"></div>'
             f"<span>{_esc(label)}</span><small>{_esc(tip)}</small></div>"
@@ -506,7 +506,7 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
     if hint_login:
         hint = (
             '<p class="hint">You’ve built a few briefs by hand. When it feels useful, '
-            "turn on <strong>Open brief at login</strong> in the Yarn menu — "
+            "turn on <strong>Open brief at login</strong> in the Yarn menu. "
             "it stays off until you do.</p>"
         )
 
@@ -562,12 +562,12 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
     <ul>{"".join(sources) or "<li><span>No linked transcripts.</span></li>"}</ul>
   </section>
   <footer>
-    Saved on this Mac. Drafted locally — verify against the meetings.
+    Saved on this Mac. Drafted locally. Verify against the meetings.
     Model: {_esc(brief.model or "local")}.
     Read-only over your archive; nothing was changed.
   </footer>
 """
-    return htmltheme.document(f"Yarn brief — {brief.day.isoformat()}", body)
+    return htmltheme.document(f"Yarn brief, {brief.day.isoformat()}", body)
 
 
 def _esc(value: str) -> str:

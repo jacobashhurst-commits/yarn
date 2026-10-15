@@ -31,7 +31,7 @@ def _pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Exists, but we cannot signal it — treat as alive so we do not steal.
+        # Exists, but we cannot signal it - treat as alive so we do not steal.
         return True
     return True
 
@@ -397,7 +397,7 @@ def recover_stale(cfg: Config) -> int:
     """Jobs left RUNNING after a crash become queued (or failed) again.
 
     A live worker_pid means process() is still inside that meeting (including
-    after the lid closed — macOS freezes the process, it does not die). Those
+    after the lid closed - macOS freezes the process, it does not die). Those
     are left alone. A dead pid, or a missing one from older job files, means
     the machine rebooted or the watcher was killed: requeue, keep any Whisper
     checkpoint, and put the manifest back in the inbox so the next sweep
@@ -410,7 +410,7 @@ def recover_stale(cfg: Config) -> int:
         # A job that never left "queued" even though the transcript exists is
         # leftover metadata, not work. Showing it as queued in the library
         # looks like the meeting never processed. Skip when the audio is still
-        # mid-pipeline in processing/ — that meeting is genuinely unfinished.
+        # mid-pipeline in processing/ - that meeting is genuinely unfinished.
         if job.state == QUEUED and transcript_path.exists() and not processing_manifest.exists():
             title = job.title
             try:

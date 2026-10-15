@@ -86,7 +86,7 @@ def meeting_title(notes: dict | None, transcript: "Transcript") -> str:
 
 
 def markdown_filename(meeting_id: str, title: str) -> str:
-    """`2026-09-11 Watch show.md` — date first so a folder sorts chronologically."""
+    """`2026-09-11 Watch show.md` - date first so a folder sorts chronologically."""
     date = meeting_id[:10] if len(meeting_id) >= 10 else meeting_id
     cleaned = _UNSAFE_FILENAME.sub(" ", title).strip(" .")
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -359,7 +359,7 @@ def render_markdown(
     lines.append(f"*{date_label(transcript.meeting_id)}*")
     lines.append("")
 
-    # Same facts as before — labeled, just easier to scan.
+    # Same facts as before - labeled, just easier to scan.
     lines.append(f"- **Duration:** {minutes}m {seconds:02d}s")
     if notes.get("attendees"):
         lines.append(f"- **Attendees:** {notes['attendees']}")
@@ -425,12 +425,12 @@ def render_markdown(
             shown = name or f"Speaker {index}"
             detail = f"{format_duration(profile.speaking_s)} across {profile.turns} turns"
             if not name:
-                detail += " — not yet identified"
+                detail += ", not yet identified"
             elif name:
                 detail = f"track {index} · {detail}"
             line = f"- **{shown}** ({detail})"
             if profile.quip:
-                line += f' — said: "{profile.quip}"'
+                line += f' said: "{profile.quip}"'
             lines.append(line)
             if name:
                 key = name.casefold()
@@ -460,7 +460,7 @@ def render_markdown(
     if not transcript.turns:
         lines.append(
             "_No speech was recognised in this recording. The audio was "
-            "captured but Whisper found nothing to transcribe — usually a "
+            "captured but Whisper found nothing to transcribe, usually a "
             "microphone that was muted, unplugged, or not permitted._"
         )
         lines.append("")

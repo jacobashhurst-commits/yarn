@@ -254,7 +254,7 @@ PLIST_EOF
 launchctl bootout "gui/$(id -u)/$REC_LABEL" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "gui/$(id -u)" "$REC_PLIST"
-info "recorder loaded — it stays idle until you start a recording"
+info "recorder loaded. It stays idle until you start a recording"
 
 # ---------------------------------------------------------------------------
 say "3/4  Background watcher (LaunchAgent)"
@@ -303,7 +303,7 @@ if ! launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
   sleep 2
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
 fi
-info "watcher loaded — it will now start at login"
+info "watcher loaded. It will now start at login"
 
 # ---------------------------------------------------------------------------
 say "4/4  Daily audio prune"

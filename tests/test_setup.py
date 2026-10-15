@@ -190,6 +190,21 @@ def test_write_summary_model_appends_and_replaces(tmp_path):
     assert 'model = "qwen3.5:4b"' not in text
 
 
+def test_ollama_list_names_match_what_summaries_check():
+    listing = (
+        "NAME          ID    SIZE    MODIFIED\n"
+        "qwen3.5:4b    abc   2.5 GB  2 hours ago\n"
+        "qwen3.5:9b    def   6.6 GB  yesterday\n"
+    )
+    assert yarn_setup.ollama_model_names(listing) == {"qwen3.5:4b", "qwen3.5:9b"}
+    assert yarn_setup.ollama_model_names("NAME\n") == set()
+
+
+def test_pull_progress_reads_a_percent():
+    assert yarn_setup._percent_in("pulling a1b2  70% ") == 70
+    assert yarn_setup._percent_in("pulling manifest") is None
+
+
 def test_faster_whisper_repo_names_the_huggingface_id():
     assert (
         yarn_setup.faster_whisper_repo("large-v3-turbo")

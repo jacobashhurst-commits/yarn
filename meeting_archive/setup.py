@@ -149,7 +149,7 @@ def install_app_from_zip(url: str, app_name: str, step_id: str) -> Path:
     if extract.exists():
         shutil.rmtree(extract)
     extract.mkdir(parents=True)
-    download(url, archive, step_id)
+    download(url, archive, step_id, long=step_id == "ollama")
     unzip = run(["unzip", "-q", str(archive), "-d", str(extract)], timeout=120)
     if unzip.returncode != 0:
         raise RuntimeError(f"Could not unpack {app_name}: {(unzip.stderr or '')[-400:]}")
@@ -218,11 +218,20 @@ def run(
     )
 
 
-def download(url: str, dest: Path, step_id: str) -> None:
+LONG_DOWNLOAD_NOTE = (
+    "Don't worry, this one takes a minute. "
+    "Go get a coffee. When was the last time you called your mum?"
+)
+
+
+def download(url: str, dest: Path, step_id: str, *, long: bool = False) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
     req = urllib.request.Request(url, headers={"User-Agent": "YarnSetup/0.2"})
-    emit({"type": "log", "id": step_id, "text": f"Downloading {dest.name}"})
+    payload: dict = {"type": "log", "id": step_id, "text": f"Downloading {dest.name}"}
+    if long:
+        payload["note"] = LONG_DOWNLOAD_NOTE
+    emit(payload)
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         got = 0
@@ -235,7 +244,7 @@ def download(url: str, dest: Path, step_id: str) -> None:
                 fh.write(chunk)
                 got += len(chunk)
                 if total:
-                    percent = min(100, int(got * 100 / total))
+                    percent = min(99, int(got * 100 / total))
                     if percent != last:
                         last = percent
                         emit(
@@ -246,6 +255,9 @@ def download(url: str, dest: Path, step_id: str) -> None:
                             }
                         )
     partial.replace(dest)
+    # The byte count can finish under the advertised length. The file is
+    # on disk, so the bar has to be allowed to reach 100.
+    emit({"type": "progress", "id": step_id, "percent": 100})
 
 
 def host_python() -> str:
@@ -360,7 +372,7 @@ def step_tools(repo: Path) -> None:
     if not ffmpeg:
         dest = support_bin() / "ffmpeg"
         if not dest.is_file():
-            download(FFMPEG_STATIC, dest, "tools")
+            download(FFMPEG_STATIC, dest, "tools", long=True)
             dest.chmod(0o755)
         ffmpeg = str(dest)
     os.environ["PATH"] = f"{support_bin()}:{os.environ.get('PATH', '')}"
@@ -503,7 +515,14 @@ def _prefetch_faster_whisper(repo: Path, model: str) -> None:
     that install then selects.
     """
     repo_id = faster_whisper_repo(model)
-    emit({"type": "log", "id": "whisper", "text": f"Downloading speech model {repo_id}"})
+    emit(
+        {
+            "type": "log",
+            "id": "whisper",
+            "text": f"Downloading speech model {repo_id}",
+            "note": LONG_DOWNLOAD_NOTE,
+        }
+    )
     py = venv_python(repo)
     code = (
         "from huggingface_hub import snapshot_download\n"
@@ -527,7 +546,7 @@ def step_whisper(repo: Path) -> None:
     if path.is_file() and path.stat().st_size > 100_000_000:
         emit({"type": "log", "id": "whisper", "text": f"Already have {path.name}"})
         return
-    download(WHISPER_GGML, path, "whisper")
+    download(WHISPER_GGML, path, "whisper", long=True)
     emit({"type": "log", "id": "whisper", "text": f"Saved {path}"})
 
 
@@ -578,11 +597,11 @@ def step_speakers(repo: Path) -> None:
     tmp.mkdir(parents=True, exist_ok=True)
     archive = tmp / "segmentation.tar.bz2"
     if not seg.is_file():
-        download(DIARIZE_SEG, archive, "speakers")
+        download(DIARIZE_SEG, archive, "speakers", long=True)
         extract_segmentation_archive(archive, seg)
         emit({"type": "log", "id": "speakers", "text": f"Segmentation model in {seg.parent}"})
     if not emb.is_file():
-        download(DIARIZE_EMB, emb, "speakers")
+        download(DIARIZE_EMB, emb, "speakers", long=True)
     emit({"type": "log", "id": "speakers", "text": "Speaker models ready"})
 
 
@@ -620,6 +639,93 @@ def write_summary_model(path: Path, model: str) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def ollama_model_names(list_output: str) -> set[str]:
+    """Names from `ollama list`, skipping the header the same way summaries do."""
+    names: set[str] = set()
+    for line in list_output.splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            names.add(parts[0])
+    return names
+
+
+def _percent_in(line: str) -> int | None:
+    import re
+
+    match = re.search(r"(\d{1,3})\s*%", line)
+    if not match:
+        return None
+    return min(100, int(match.group(1)))
+
+
+def ensure_ollama_ready(binary: str) -> str:
+    """Return `ollama list` output once the app is actually answering."""
+    probe = run([binary, "list"], timeout=20)
+    if probe.returncode == 0:
+        return probe.stdout or ""
+    subprocess.Popen(["open", "-a", "Ollama"])
+    last = (probe.stderr or probe.stdout or "").strip()
+    for _ in range(30):
+        time.sleep(2)
+        probe = run([binary, "list"], timeout=20)
+        if probe.returncode == 0:
+            return probe.stdout or ""
+        last = (probe.stderr or probe.stdout or last).strip()
+    raise RuntimeError(
+        "Ollama did not start"
+        + (f" ({last[-300:]})" if last else "")
+        + ". Open Ollama, then run Yarn Setup again."
+    )
+
+
+def pull_ollama_model(binary: str, model: str, label: str) -> None:
+    emit(
+        {
+            "type": "log",
+            "id": "ollama",
+            "text": f"Downloading {label} ({model})",
+            "note": LONG_DOWNLOAD_NOTE,
+        }
+    )
+    proc = subprocess.Popen(
+        [binary, "pull", model],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    last = -1
+    tail: list[str] = []
+    stream = proc.stdout
+    if stream is not None:
+        pending = ""
+        while True:
+            chunk = stream.read(256)
+            if not chunk:
+                break
+            pending += chunk.replace("\r", "\n")
+            lines = pending.split("\n")
+            pending = lines.pop() if lines else ""
+            for raw in lines:
+                clean = raw.strip()
+                if not clean:
+                    continue
+                tail.append(clean)
+                tail[:] = tail[-8:]
+                percent = _percent_in(clean)
+                if percent is not None and percent != last:
+                    last = percent
+                    emit({"type": "progress", "id": "ollama", "percent": min(percent, 99)})
+    code = proc.wait(timeout=3600)
+    if code != 0:
+        detail = " ".join(tail)[-400:]
+        raise RuntimeError(
+            f"Could not download {label} ({model})"
+            + (f": {detail}" if detail else "")
+        )
+    emit({"type": "progress", "id": "ollama", "percent": 100})
+
+
 def step_ollama(repo: Path) -> None:
     ollama = ollama_binary()
     if not ollama:
@@ -630,14 +736,9 @@ def step_ollama(repo: Path) -> None:
         try:
             app = install_app_from_zip(OLLAMA_ZIP, "Ollama.app", "ollama")
         except Exception as exc:
-            emit(
-                {
-                    "type": "log",
-                    "id": "ollama",
-                    "text": f"Could not install Ollama ({exc}). Recording still works; summaries can wait.",
-                }
-            )
-            return
+            raise RuntimeError(
+                f"Could not install Ollama ({exc}). Open Ollama, then run Yarn Setup again."
+            ) from exc
         subprocess.Popen(["open", "-a", str(app)])
         for _ in range(20):
             time.sleep(2)
@@ -645,14 +746,9 @@ def step_ollama(repo: Path) -> None:
             if ollama:
                 break
     if not ollama:
-        emit(
-            {
-                "type": "log",
-                "id": "ollama",
-                "text": "Ollama is installed but not ready yet. Open it once from the Yarn menu.",
-            }
+        raise RuntimeError(
+            "Ollama is installed but not ready yet. Open it once, then run Yarn Setup again."
         )
-        return
     from .config import DEFAULT_CONFIG_PATH, load_config, write_setting
     from .resources import (
         QUALITY_ACCURATE,
@@ -663,9 +759,8 @@ def step_ollama(repo: Path) -> None:
     )
 
     pulls = requested_pulls()
-    listed = run([ollama, "list"], timeout=60)
-    installed = listed.stdout or ""
     emit({"type": "log", "id": "ollama", "text": f"Using {ollama}"})
+    installed = ollama_model_names(ensure_ollama_ready(ollama))
     if not can_run_accurate():
         emit(
             {
@@ -680,24 +775,24 @@ def step_ollama(repo: Path) -> None:
         if model in installed:
             emit({"type": "log", "id": "ollama", "text": f"{label} ({model}) already installed"})
             continue
-        emit({"type": "log", "id": "ollama", "text": f"Downloading {label} ({model})"})
-        proc = run([ollama, "pull", model], timeout=3600)
-        if proc.returncode != 0:
-            emit(
-                {
-                    "type": "log",
-                    "id": "ollama",
-                    "text": f"Could not download {label}; summaries can wait.",
-                }
+        pull_ollama_model(ollama, model, label)
+        installed = ollama_model_names(ensure_ollama_ready(ollama))
+        if model not in installed:
+            raise RuntimeError(
+                f"{label} ({model}) did not appear in Ollama after the download."
             )
-            continue
-        installed += f"\n{model}"
         emit({"type": "log", "id": "ollama", "text": f"{label} ready"})
     default, _ = summary_model_choice()
-    if QUALITY_ACCURATE in pulls and can_run_accurate() and model_for_quality(QUALITY_ACCURATE) in installed:
-        default = model_for_quality(QUALITY_ACCURATE)
+    accurate = model_for_quality(QUALITY_ACCURATE)
+    if QUALITY_ACCURATE in pulls and can_run_accurate() and accurate in installed:
+        default = accurate
     elif model_for_quality(pulls[0]) in installed:
         default = model_for_quality(pulls[0])
+    if default not in installed:
+        raise RuntimeError(
+            f"Ollama model {default} is not installed. "
+            "Yarn will not pretend a summary model is ready."
+        )
     write_summary_model(DEFAULT_CONFIG_PATH, default)
     cfg = load_config()
     cfg.summary.model = default

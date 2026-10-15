@@ -1,4 +1,4 @@
-// Yarn Setup — a window, not a terminal.
+// Yarn Setup - a window, not a terminal.
 //
 //   YarnSetup --repo /path/to/yarn. --python /usr/bin/python3
 //
@@ -41,6 +41,10 @@ final class Controller: NSObject, NSWindowDelegate {
     let list = NSStackView()
     let detail = NSTextField(wrappingLabelWithString: "")
     let cancel = NSButton(title: "Not now", target: nil, action: nil)
+    var statusLine = ""
+    var statusNote = ""
+    var stepIndex = 1
+    var stepTotal = 1
     var rowLabels: [NSTextField] = []
     var rowTimes: [NSTextField] = []
     var rowMarks: [NSTextField] = []
@@ -82,10 +86,10 @@ final class Controller: NSObject, NSWindowDelegate {
 
         It will install two free, open-source apps if they are not already here:
 
-        • SwiftBar — the menu-bar icon
-        • Ollama — summaries and Ask Yarn, still on this computer
+        • SwiftBar, the menu-bar icon
+        • Ollama, summaries and Ask Yarn, still on this computer
 
-        macOS may ask for your password or microphone permission. That’s normal. Click Get started and wait — the long steps are downloads, not homework.
+        macOS may ask for your password or microphone permission. That’s normal. Click Get started and wait. The long steps are downloads, not homework.
         """
         let ram = memoryGB()
         let neo = ram > 0 && ram <= 10
@@ -117,7 +121,7 @@ final class Controller: NSObject, NSWindowDelegate {
         bar.doubleValue = 0
         detail.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         detail.textColor = .secondaryLabelColor
-        detail.maximumNumberOfLines = 4
+        detail.maximumNumberOfLines = 6
         cancel.target = self
         cancel.action = #selector(cancelRun)
         cancel.keyEquivalent = "\u{1b}"
@@ -298,19 +302,24 @@ final class Controller: NSObject, NSWindowDelegate {
             let total = obj["total"] as? Int ?? steps.count
             set(id, state: "running")
             heading.stringValue = obj["title"] as? String ?? "Install Yarn"
+            stepIndex = index
+            stepTotal = total
+            statusNote = ""
             subtitle.stringValue = "\(index) of \(total) steps"
             bar.doubleValue = Double(index - 1) * 100.0 / Double(max(total, 1))
             cancel.isEnabled = true
         case "log":
             if let text = obj["text"] as? String {
-                detail.stringValue = text
+                statusLine = text
+                statusNote = obj["note"] as? String ?? ""
+                showStatus(percent: nil)
             }
         case "progress":
             if let percent = obj["percent"] as? Int {
-                bar.doubleValue = Double(percent)
-                if let text = detail.stringValue.split(separator: "\n").first {
-                    detail.stringValue = "\(text)  \(percent)%"
-                }
+                let shown = min(100, max(0, percent))
+                bar.doubleValue = Double(shown)
+                subtitle.stringValue = "\(stepIndex) of \(stepTotal) steps, \(shown)%"
+                showStatus(percent: shown)
             }
         case "done":
             let id = obj["id"] as? String ?? ""
@@ -335,6 +344,14 @@ final class Controller: NSObject, NSWindowDelegate {
             break
         }
         refreshRows()
+    }
+
+    private func showStatus(percent: Int?) {
+        var lines: [String] = []
+        if !statusLine.isEmpty { lines.append(statusLine) }
+        if !statusNote.isEmpty { lines.append(statusNote) }
+        if let percent { lines.append("\(percent)%") }
+        detail.stringValue = lines.joined(separator: "\n")
     }
 
     private func set(_ id: String, state: String, elapsed: String? = nil) {

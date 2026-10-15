@@ -82,6 +82,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let progressStep = NSTextField(wrappingLabelWithString: "")
     let progressDetail = NSTextField(wrappingLabelWithString: "")
     let bar = NSProgressIndicator()
+    let percentLabel = NSTextField(labelWithString: "")
     let etaLabel = NSTextField(wrappingLabelWithString: "")
     let queueLabel = NSTextField(wrappingLabelWithString: "")
     let processButton = NSButton(title: "Process waiting", target: nil, action: nil)
@@ -150,7 +151,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mark.heightAnchor.constraint(equalToConstant: 54).isActive = true
 
         let word = label("Yarn", size: 20, weight: .medium, color: YarnColor.navy, mono: true)
-        let sub = label("Everything stays on the Mac", size: 13, weight: .regular, color: YarnColor.slate)
+        let sub = label("Everything stays on this Mac", size: 13, weight: .regular, color: YarnColor.slate)
         sub.maximumNumberOfLines = 1
         sub.lineBreakMode = .byTruncatingTail
         sub.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
@@ -194,6 +195,13 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         bar.maxValue = 100
         bar.isHidden = true
         bar.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        style(percentLabel, size: 12, weight: .medium, color: YarnColor.ink, mono: true)
+        percentLabel.alignment = .right
+        percentLabel.isHidden = true
+        percentLabel.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        bar.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let barRow = stack([bar, percentLabel], spacing: 8, horizontal: true)
+        barRow.distribution = .fill
 
         processButton.target = self
         processButton.action = #selector(processWaiting)
@@ -207,7 +215,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         resumeButton.isHidden = true
 
         let progress = card(stack([
-            progressTitle, progressStep, progressDetail, bar, etaLabel, queueLabel,
+            progressTitle, progressStep, progressDetail, barRow, etaLabel, queueLabel,
             processButton, resumeButton,
         ], spacing: 6), owner: self)
         progress.isHidden = true
@@ -293,14 +301,18 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             bar.isHidden = false
             bar.isIndeterminate = true
             bar.startAnimation(nil)
+            percentLabel.isHidden = true
         } else if let percent = snap.percent {
             bar.isIndeterminate = false
             bar.stopAnimation(nil)
             bar.isHidden = false
             bar.doubleValue = Double(percent)
+            percentLabel.stringValue = "\(percent)%"
+            percentLabel.isHidden = false
         } else {
             bar.stopAnimation(nil)
             bar.isHidden = true
+            percentLabel.isHidden = true
         }
         etaLabel.stringValue = snap.eta
         etaLabel.isHidden = snap.eta.isEmpty
@@ -366,13 +378,13 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var heading = title.isEmpty ? shortID(text(status["meeting_id"])) : title
             if !length.isEmpty { heading += " (\(length))" }
             if current > 0 && total > 0 {
-                heading = "Meeting \(current) of \(total) — \(heading)"
+                heading = "Meeting \(current) of \(total): \(heading)"
             }
             snap.heading = heading
             let step = text(status["step"]).isEmpty ? phase : text(status["step"])
             let started = integer(status["phase_started_epoch"]) ?? 0
             let elapsed = started > 0 ? max(0, now - started) : 0
-            snap.step = step.isEmpty ? "" : "\(step) — \(span(elapsed))"
+            snap.step = step.isEmpty ? "" : "\(step), \(span(elapsed))"
             let hint = phaseHint(phase)
             let written = text(status["detail"])
             if hint.isEmpty {

@@ -147,7 +147,7 @@ if [[ "$indeterminate" == "true" ]] && (( expected_s >= 1 )); then
   if (( left > 0 )); then
     live_eta="about $(span "$left") left (estimate from past meetings)"
   else
-    live_eta="taking longer than usual — still working"
+    live_eta="taking longer than usual, still working"
   fi
 elif [[ -n "$proc_eta" ]]; then
   live_eta="$proc_eta"
@@ -183,9 +183,9 @@ progress_bar() {
 
 stage_line() {
   if [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
-    printf '%s%s' "$phase" "${detail:+ — $detail}"
+    printf '%s%s' "$phase" "${detail:+: $detail}"
   else
-    printf '%s %s%%%s' "$phase" "$percent" "${detail:+ — $detail}"
+    printf '%s %s%%%s' "$phase" "$percent" "${detail:+: $detail}"
   fi
 }
 
@@ -276,7 +276,7 @@ if $recording; then
   echo "Mode: ${mode} | size=11 color=#888888"
   echo "Stop recording | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" stop' terminal=false refresh=true"
 else
-  echo "Start recording — laptop mic | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start room' terminal=false refresh=true"
+  echo "Start recording, laptop mic | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start room' terminal=false refresh=true"
 fi
 
 echo "---"
@@ -286,11 +286,11 @@ if $processing; then
   heading="Now: ${proc_title:-$(short_id "$proc_id")}"
   [[ -n "$proc_length" ]] && heading="$heading (${proc_length} recording)"
   if [[ -n "$frac" ]]; then
-    heading="Meeting ${proc_current} of ${proc_total} — ${heading#Now: }"
+    heading="Meeting ${proc_current} of ${proc_total}: ${heading#Now: }"
   fi
   echo "$heading | size=12 color=#cc8800"
   step_text="${proc_step:-$phase}"
-  echo "${step_text} — running $(span "$phase_elapsed") | size=11 color=#cc8800"
+  echo "${step_text}, running $(span "$phase_elapsed") | size=11 color=#cc8800"
   [[ -n "$detail" ]] && echo "$detail | size=11 color=#888888"
   if [[ -n "$live_percent" ]]; then
     echo "$(progress_bar "$live_percent")  ~${live_percent}% | font=Menlo size=11 color=#cc8800"
@@ -307,7 +307,7 @@ else
   # finished, and when, is what makes an idle state checkable at a glance.
   idle_line="Nothing to process"
   if [[ -n "$queue_last_id" ]]; then
-    idle_line="Nothing to process — last finished $(short_id "$queue_last_id")"
+    idle_line="Nothing to process. Last finished $(short_id "$queue_last_id")"
     if [[ "$queue_updated" =~ ^[1-9][0-9]*$ ]]; then
       idle_line="$idle_line at $(clock_of "$queue_updated")"
     fi
@@ -374,7 +374,7 @@ failed="$(count_files "$FAILED" '\.json$')"
 echo "---"
 echo "$transcripts meeting(s) archived | size=11 color=#888888"
 if [[ "$failed" -gt 0 ]]; then
-  echo "⚠️ $failed failed — audio kept | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
+  echo "⚠️ $failed failed, audio kept | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 fi
 # A raw capture sitting here while nothing is recording was never published.
 # Short leftovers are failed Start clicks (the capture outlived the error

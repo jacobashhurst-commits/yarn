@@ -138,7 +138,7 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
             f"<td>{title}</td>"
             f"<td>{_esc(row.state)}</td>"
             f"<td>{mins}m {secs:02d}s</td>"
-            f"<td>{row.confirmed}/{row.speakers or '—'}</td>"
+            f"<td>{row.confirmed}/{row.speakers or '-'}</td>"
             f"<td>{summary}</td>"
             f"<td>{audio}</td>"
             "</tr>"
@@ -161,19 +161,19 @@ def _meeting_notice(error: str) -> str:
     if is_pending_summary(error):
         if "timed out" in error.lower():
             return (
-                "Summary pending — the local model ran out of time. "
+                "Summary pending. The local model ran out of time. "
                 "Open Ollama, then use Summarise pending."
             )
         if error.lower().startswith("deferred:"):
             if "evening" in error.lower():
                 return (
-                    "Summary pending — Yarn writes these in the evening, "
+                    "Summary pending. Yarn writes these in the evening, "
                     "or when you next open the laptop after that."
                 )
             if "manual" in error.lower():
-                return "Summary pending — summaries are manual. Use Summarise pending."
+                return "Summary pending. Summaries are manual. Use Summarise pending."
             return (
-                "Summary pending — Ollama was not running. "
+                "Summary pending. Ollama was not running. "
                 "Open Ollama, then use Summarise pending."
             )
     return error

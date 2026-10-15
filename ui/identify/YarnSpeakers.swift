@@ -258,7 +258,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     let nextButton = NSButton(title: "Next clip", target: nil, action: nil)
     let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     let backButton = NSButton(title: "Back", target: nil, action: nil)
-    let skipButton = NSButton(title: "Skip — don't know", target: nil, action: nil)
+    let skipButton = NSButton(title: "Skip, don't know", target: nil, action: nil)
     let quitButton = NSButton(title: "Stop asking", target: nil, action: nil)
     let saveButton = YarnButton(title: "Save & next")
     var formViews: [NSView] = []
@@ -334,7 +334,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         nameBox.isEditable = true
         nameBox.completes = true
         nameBox.controlSize = .large
-        nameBox.placeholderString = "Name — leave blank if you don't know"
+        nameBox.placeholderString = "Name, or leave blank if you don't know"
         nameBox.font = NSFont.systemFont(ofSize: 15)
 
         let pad: CGFloat = 22
@@ -790,7 +790,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     @objc func save() {
         record()
         // One confirmation covers every other voice that already guessed the
-        // same person — diarize often splits Charles into Charles×4.
+        // same person - diarize often splits Charles into Charles×4.
         propagateSameName()
         advance()
     }

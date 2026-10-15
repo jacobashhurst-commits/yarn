@@ -243,7 +243,7 @@ def _status_owned_by_other(cfg: Config, meeting_id: str) -> bool:
     """True when another meeting still owns the menu-bar status file.
 
     Summaries and one-shot `ma process` runs must not wipe the in-flight
-    diarize status of a longer job — that is what made the bar go idle while
+    diarize status of a longer job - that is what made the bar go idle while
     voice separation was still running after the lid opened.
     """
     current = records.read_notes(cfg.processing_status)
@@ -571,7 +571,7 @@ def apply_summary(
         transcript.write(path)
         raise
     finally:
-        # Only clear when this call owned the status file — never erase an
+        # Only clear when this call owned the status file - never erase an
         # in-flight Separate-voices card belonging to another meeting.
         if owned_status:
             _clear_processing_status(cfg, meeting_id)

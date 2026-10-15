@@ -50,7 +50,7 @@ def should_attempt_summary(cfg, meeting_id: str = "", now: datetime | None = Non
     """Whether the watcher may spend Whisper or Ollama time right now.
 
     Manual never auto-runs. Evening waits until evening_hour, but a leftover
-    from yesterday is fair game the moment the laptop is awake — that is how
+    from yesterday is fair game the moment the laptop is awake - that is how
     a closed lid overnight still gets processed.
     """
     when = str(getattr(cfg.summary, "when", "") or WHEN_AFTER)
@@ -213,7 +213,7 @@ class Summarizer:
         # HTTP generate, not `ollama run`. The CLI wraps the same model in an
         # extra process and on an 8 GB machine an 18-minute transcript
         # routinely burned the whole timeout with nothing written. The daemon
-        # is already up — is_running() probed it.
+        # is already up - is_running() probed it.
         url = self.config.host.rstrip("/") + "/api/generate"
         payload = {
             "model": self.config.model,

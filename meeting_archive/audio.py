@@ -218,7 +218,7 @@ def extract_clip(
     start_s: float,
     duration_s: float = 6.0,
 ) -> Path:
-    """Cut a short wav snippet. Offline ffmpeg only — not live capture."""
+    """Cut a short wav snippet. Offline ffmpeg only - not live capture."""
     require_tool("ffmpeg")
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".partial")

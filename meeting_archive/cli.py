@@ -314,7 +314,7 @@ def cmd_doctor(cfg: Config, args) -> int:
     print("Archive root:", cfg.root)
     print("Chroma dir:  ", cfg.chroma_dir)
     print()
-    # Prefer the repo launcher — bare `uvx chroma-mcp` re-resolves deps and
+    # Prefer the repo launcher - bare `uvx chroma-mcp` re-resolves deps and
     # breaks when pydantic>=2.14 drops eval_type_backport (mcp still imports it).
     launcher = Path(__file__).resolve().parents[1] / "bin" / "chroma-mcp"
     print("Point Claude/Cursor at the archive with this MCP config:")
@@ -739,7 +739,7 @@ def cmd_voices(cfg: Config, args) -> int:
         clip = "clip" if person.clip else "no-clip"
         print(
             f"{person.name}  x{person.confirmation_count}  "
-            f"{person.last_seen or '—'}  {clip}"
+            f"{person.last_seen or 'not seen'}  {clip}"
         )
     return 0
 

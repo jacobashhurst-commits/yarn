@@ -110,7 +110,7 @@ def _write_lines(cfg: Config, inbox: list[str], summaries: list[str]) -> None:
             about = _about(cfg, meeting_id)
         except Exception:
             about = ""
-        rows.append(f"{when}  {about or 'Untitled meeting'} — {what}")
+        rows.append(f"{when}  {about or 'Untitled meeting'}: {what}")
     path = lines_path(cfg)
     try:
         tmp = path.with_suffix(".partial")
