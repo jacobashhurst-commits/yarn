@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Put the Yarn mark on an .app. The logo is wide, so it is drawn at its
+# real shape on a white square. Stretching it to fill the tile is the
+# squashed icon.
+#
+#   bin/yarn-icon <mark.png> <Something.app> [label]
+#
+# A label is drawn under the mark. The Dock rounds the tile itself.
+# Assigning the bitmap as the running app icon skips that mask and
+# the tile stays a hard square.
+
+set -euo pipefail
+
+MARK="${1:-}"
+APP_DIR="${2:-}"
+LABEL="${3:-}"
+[[ -f "$MARK" && -n "$APP_DIR" ]] || {
+  echo "usage: yarn-icon <mark.png> <Something.app> [label]" >&2
+  exit 2
+}
+
+RES="$APP_DIR/Contents/Resources"
+PLIST="$APP_DIR/Contents/Info.plist"
+STAMP="$RES/.yarn-icon-label"
+mkdir -p "$RES"
+
+have=""
+[[ -f "$STAMP" ]] && have="$(cat "$STAMP")"
+if [[ ! -f "$RES/Yarn.icns" || "$MARK" -nt "$RES/Yarn.icns" || "$have" != "$LABEL" ]]; then
+  command -v swiftc >/dev/null 2>&1 || { echo "yarn-icon: swiftc is required" >&2; exit 1; }
+  command -v iconutil >/dev/null 2>&1 || { echo "yarn-icon: iconutil is required" >&2; exit 1; }
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "$WORK"' EXIT
+  ICONSET="$WORK/Yarn.iconset"
+  MASTER="$WORK/master.png"
+  mkdir -p "$ICONSET"
+  swiftc -o "$WORK/make-icon" -framework AppKit - <<'SWIFT'
+import AppKit
+let mark = NSImage(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))!
+let label = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
+let side = 1024
+let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil,
+    pixelsWide: side,
+    pixelsHigh: side,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    colorSpaceName: .deviceRGB,
+    bytesPerRow: 0,
+    bitsPerPixel: 0
+)!
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+NSColor.white.setFill()
+NSRect(x: 0, y: 0, width: side, height: side).fill()
+let aspect = mark.size.width / max(mark.size.height, 1)
+let canvas = CGFloat(side)
+if label.isEmpty {
+    let width = canvas * 0.88
+    let height = width / aspect
+    mark.draw(
+        in: NSRect(x: (canvas - width) / 2, y: (canvas - height) / 2, width: width, height: height),
+        from: .zero,
+        operation: .sourceOver,
+        fraction: 1
+    )
+} else {
+    let base = NSFont.systemFont(ofSize: 112, weight: .semibold)
+    let font = NSFont(descriptor: base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor, size: 112) ?? base
+    let text = NSAttributedString(string: label, attributes: [
+        .font: font,
+        .foregroundColor: NSColor(srgbRed: 13.0 / 255, green: 36.0 / 255, blue: 75.0 / 255, alpha: 1),
+    ])
+    let textSize = text.size()
+    let width = canvas * 0.70
+    let height = width / aspect
+    let gap: CGFloat = 28
+    let total = height + gap + textSize.height
+    let bottom = (canvas - total) / 2 + 8
+    text.draw(at: NSPoint(x: (canvas - textSize.width) / 2, y: bottom))
+    mark.draw(
+        in: NSRect(x: (canvas - width) / 2, y: bottom + textSize.height + gap, width: width, height: height),
+        from: .zero,
+        operation: .sourceOver,
+        fraction: 1
+    )
+}
+NSGraphicsContext.restoreGraphicsState()
+let png = rep.representation(using: .png, properties: [:])!
+try! png.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
+SWIFT
+  "$WORK/make-icon" "$MARK" "$MASTER" "$LABEL"
+  printf '%s' "$LABEL" > "$STAMP"
+  sips -z 16 16 "$MASTER" --out "$ICONSET/icon_16x16.png" >/dev/null
+  sips -z 32 32 "$MASTER" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+  sips -z 32 32 "$MASTER" --out "$ICONSET/icon_32x32.png" >/dev/null
+  sips -z 64 64 "$MASTER" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+  sips -z 128 128 "$MASTER" --out "$ICONSET/icon_128x128.png" >/dev/null
+  sips -z 256 256 "$MASTER" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+  sips -z 256 256 "$MASTER" --out "$ICONSET/icon_256x256.png" >/dev/null
+  sips -z 512 512 "$MASTER" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+  sips -z 512 512 "$MASTER" --out "$ICONSET/icon_512x512.png" >/dev/null
+  sips -z 1024 1024 "$MASTER" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+  iconutil -c icns "$ICONSET" -o "$RES/Yarn.icns"
+fi
+
+if [[ -f "$PLIST" ]]; then
+  if /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile Yarn" "$PLIST" >/dev/null
+  else
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Yarn" "$PLIST" >/dev/null
+  fi
+fi

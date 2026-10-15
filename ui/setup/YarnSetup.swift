@@ -15,6 +15,48 @@ struct Step: Equatable {
     var detail: String = ""
 }
 
+func yarnColor(light: UInt32, dark: UInt32) -> NSColor {
+    NSColor(name: nil) { appearance in
+        let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+        return NSColor(
+            srgbRed: CGFloat((hex >> 16) & 0xff) / 255,
+            green: CGFloat((hex >> 8) & 0xff) / 255,
+            blue: CGFloat(hex & 0xff) / 255,
+            alpha: 1
+        )
+    }
+}
+
+final class WelcomeButton: NSButton {
+    convenience init(title: String) {
+        self.init(frame: .zero)
+        self.title = title
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        yarnColor(light: 0x167DFF, dark: 0x167DFF).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        let shown = title as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = shown.size(withAttributes: attrs)
+        shown.draw(
+            in: NSRect(
+                x: (bounds.width - size.width) / 2,
+                y: (bounds.height - size.height) / 2 - 1,
+                width: size.width,
+                height: size.height
+            ),
+            withAttributes: attrs
+        )
+    }
+}
+
 func fmtMs(_ ms: Int) -> String {
     if ms < 1000 { return "\(ms)ms" }
     let s = Double(ms) / 1000.0
@@ -332,14 +374,17 @@ final class Controller: NSObject, NSWindowDelegate {
         case "finish":
             finished = true
             let ok = obj["ok"] as? Bool ?? false
-            heading.stringValue = ok ? "Yarn is ready" : "Setup stopped"
-            subtitle.stringValue = ok ? "Finished" : "Something needs attention"
-            bar.doubleValue = ok ? 100 : bar.doubleValue
-            if let message = obj["message"] as? String {
-                detail.stringValue = message
+            if ok {
+                showWelcome()
+            } else {
+                heading.stringValue = "Setup stopped"
+                subtitle.stringValue = "Something needs attention"
+                if let message = obj["message"] as? String {
+                    detail.stringValue = message
+                }
+                cancel.title = "Close"
+                cancel.isEnabled = true
             }
-            cancel.title = "Close"
-            cancel.isEnabled = true
         default:
             break
         }
@@ -364,11 +409,179 @@ final class Controller: NSObject, NSWindowDelegate {
     private func workerFinished(code: Int32) {
         worker = nil
         if !finished {
-            heading.stringValue = code == 0 ? "Yarn is ready" : "Setup stopped"
-            subtitle.stringValue = code == 0 ? "Finished" : "Exit \(code)"
-            cancel.title = "Close"
+            if code == 0 {
+                showWelcome()
+            } else {
+                heading.stringValue = "Setup stopped"
+                subtitle.stringValue = "Exit \(code)"
+                cancel.title = "Close"
+            }
         }
         finished = true
+    }
+
+    private var welcomed = false
+
+    private func showWelcome() {
+        if welcomed { return }
+        welcomed = true
+        window.title = "Welcome to Yarn"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = yarnColor(light: 0xFFFFFF, dark: 0x101820)
+        window.setContentSize(NSSize(width: 640, height: 760))
+        window.contentView = welcomeView()
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func welcomeView() -> NSView {
+        let canvas = NSView()
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 36, bottom: 12, right: 36)
+
+        let mark = NSImageView()
+        if let url = Bundle.main.url(forResource: "yarn-mark", withExtension: "png") {
+            mark.image = NSImage(contentsOf: url)
+        }
+        mark.imageScaling = .scaleProportionallyUpOrDown
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        mark.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        mark.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        stack.addArrangedSubview(mark)
+
+        stack.addArrangedSubview(welcomeText("Welcome to Yarn", size: 28, weight: .semibold, color: yarnColor(light: 0x0D244B, dark: 0xD6E4F5)))
+        stack.addArrangedSubview(welcomeText("Your meetings. Your memories. Your computer.", size: 16, weight: .medium, color: yarnColor(light: 0x167DFF, dark: 0x7AADFF)))
+        stack.setCustomSpacing(18, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(welcomeText(
+            "Yarn records your meetings, figures out who said what, and turns conversations into searchable notes and a daily brief of what matters.",
+            size: 14, weight: .regular, color: yarnColor(light: 0x19293D, dark: 0xE7EEF6)
+        ))
+        stack.addArrangedSubview(welcomeText(
+            "Your data stays on your Mac. No cloud, no subscriptions, no one else storing your conversations.",
+            size: 14, weight: .regular, color: yarnColor(light: 0x19293D, dark: 0xE7EEF6)
+        ))
+        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(welcomeText("So why Yarn?", size: 18, weight: .semibold, color: yarnColor(light: 0x0D244B, dark: 0xD6E4F5)))
+        addReason(
+            stack,
+            title: "Small brain. Surprisingly useful. (Like its creator.)",
+            body: "Yarn uses free, local AI. It's not as clever as ChatGPT or Claude, but you don't need a Ferrari to drive to the shops."
+        )
+        addReason(
+            stack,
+            title: "A little slower. Who cares?",
+            body: "Yarn processes meetings in the background. Record your next meeting while it's working on the last one."
+        )
+        addReason(
+            stack,
+            title: "Keep the memories, not the megabytes.",
+            body: "Transcripts take almost no space. Delete audio after processing, purge it later, or keep everything. Your call."
+        )
+        addReason(
+            stack,
+            title: "Your morning, sorted.",
+            body: "Get a daily brief of important discussions, outstanding actions and what needs your attention."
+        )
+        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(welcomeText("Getting started", size: 18, weight: .semibold, color: yarnColor(light: 0x0D244B, dark: 0xD6E4F5)))
+        addStep(stack, number: "1", title: "Record", body: "Click Yarn in your Mac's menu bar.")
+        addStep(stack, number: "2", title: "Carry on", body: "Yarn transcribes and summarises in the background.")
+        addStep(stack, number: "3", title: "Remember", body: "Search past meetings or open your daily brief.")
+        stack.setCustomSpacing(18, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(welcomeText(
+            "Yarn isn't trying to be ChatGPT or Claude (although you can connect them through MCP).",
+            size: 14, weight: .regular, color: yarnColor(light: 0x617188, dark: 0x9AAFC3)
+        ))
+        stack.addArrangedSubview(welcomeText(
+            "Not everything needs to be a SaaS. Isn't it nice to own your data and enjoy a little privacy?",
+            size: 14, weight: .medium, color: yarnColor(light: 0x19293D, dark: 0xE7EEF6)
+        ))
+
+        scroll.documentView = stack
+        canvas.addSubview(scroll)
+
+        let go = WelcomeButton(title: "Get started →")
+        go.target = self
+        go.action = #selector(openYarn)
+        go.keyEquivalent = "\r"
+        go.translatesAutoresizingMaskIntoConstraints = false
+        canvas.addSubview(go)
+
+        NSLayoutConstraint.activate([
+            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+
+            scroll.topAnchor.constraint(equalTo: canvas.topAnchor, constant: 12),
+            scroll.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: go.topAnchor, constant: -16),
+
+            go.leadingAnchor.constraint(equalTo: canvas.leadingAnchor, constant: 36),
+            go.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -36),
+            go.bottomAnchor.constraint(equalTo: canvas.bottomAnchor, constant: -24),
+            go.heightAnchor.constraint(equalToConstant: 40),
+        ])
+        return canvas
+    }
+
+    private func addReason(_ stack: NSStackView, title: String, body: String) {
+        let block = NSStackView()
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 4
+        block.translatesAutoresizingMaskIntoConstraints = false
+        block.addArrangedSubview(welcomeText(title, size: 15, weight: .semibold, color: yarnColor(light: 0x0D244B, dark: 0xD6E4F5)))
+        block.addArrangedSubview(welcomeText(body, size: 14, weight: .regular, color: yarnColor(light: 0x617188, dark: 0x9AAFC3)))
+        stack.addArrangedSubview(block)
+    }
+
+    private func addStep(_ stack: NSStackView, number: String, title: String, body: String) {
+        let n = NSTextField(labelWithString: number)
+        n.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        n.textColor = yarnColor(light: 0x167DFF, dark: 0x7AADFF)
+        n.translatesAutoresizingMaskIntoConstraints = false
+        n.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        let words = NSStackView()
+        words.orientation = .vertical
+        words.alignment = .leading
+        words.spacing = 2
+        words.addArrangedSubview(welcomeText(title, size: 15, weight: .semibold, color: yarnColor(light: 0x0D244B, dark: 0xD6E4F5)))
+        words.addArrangedSubview(welcomeText(body, size: 14, weight: .regular, color: yarnColor(light: 0x617188, dark: 0x9AAFC3)))
+        let row = NSStackView(views: [n, words])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 8
+        stack.addArrangedSubview(row)
+    }
+
+    private func welcomeText(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = NSFont.systemFont(ofSize: size, weight: weight)
+        field.textColor = color
+        field.maximumNumberOfLines = 0
+        field.preferredMaxLayoutWidth = 540
+        return field
+    }
+
+    @objc private func openYarn() {
+        let app = NSHomeDirectory() + "/Applications/Yarn.app"
+        if FileManager.default.fileExists(atPath: app) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: app))
+        }
+        NSApp.terminate(nil)
     }
 
     @objc private func beginInstall() {

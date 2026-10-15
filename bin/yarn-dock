@@ -61,57 +61,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Draw the mark at its real shape onto a white square. sips -z would
-# stretch the wide logo to fill the tile, which is the squashed icon.
-ICONSET="$(mktemp -d)/Yarn.iconset"
-mkdir -p "$ICONSET"
-MASTER="$(mktemp -d)/master.png"
-swiftc -o "$(dirname "$MASTER")/make-icon" -framework AppKit - <<'SWIFT'
-import AppKit
-let mark = NSImage(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))!
-let side = 1024
-let rep = NSBitmapImageRep(
-    bitmapDataPlanes: nil,
-    pixelsWide: side,
-    pixelsHigh: side,
-    bitsPerSample: 8,
-    samplesPerPixel: 4,
-    hasAlpha: true,
-    isPlanar: false,
-    colorSpaceName: .deviceRGB,
-    bytesPerRow: 0,
-    bitsPerPixel: 0
-)!
-NSGraphicsContext.saveGraphicsState()
-NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-NSColor.white.setFill()
-NSRect(x: 0, y: 0, width: side, height: side).fill()
-let aspect = mark.size.width / max(mark.size.height, 1)
-let width = CGFloat(side) * 0.88
-let height = width / aspect
-mark.draw(
-    in: NSRect(x: (CGFloat(side) - width) / 2, y: (CGFloat(side) - height) / 2, width: width, height: height),
-    from: .zero,
-    operation: .sourceOver,
-    fraction: 1
-)
-NSGraphicsContext.restoreGraphicsState()
-let png = rep.representation(using: .png, properties: [:])!
-try! png.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
-SWIFT
-"$(dirname "$MASTER")/make-icon" "$MARK" "$MASTER"
-sips -z 16 16 "$MASTER" --out "$ICONSET/icon_16x16.png" >/dev/null
-sips -z 32 32 "$MASTER" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
-sips -z 32 32 "$MASTER" --out "$ICONSET/icon_32x32.png" >/dev/null
-sips -z 64 64 "$MASTER" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
-sips -z 128 128 "$MASTER" --out "$ICONSET/icon_128x128.png" >/dev/null
-sips -z 256 256 "$MASTER" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
-sips -z 256 256 "$MASTER" --out "$ICONSET/icon_256x256.png" >/dev/null
-sips -z 512 512 "$MASTER" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
-sips -z 512 512 "$MASTER" --out "$ICONSET/icon_512x512.png" >/dev/null
-sips -z 1024 1024 "$MASTER" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
-iconutil -c icns "$ICONSET" -o "$RES/Yarn.icns"
-rm -rf "$ICONSET" "$(dirname "$MASTER")"
+"$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
 
 cp -f "$MARK" "$RES/yarn-mark.png"
 cat > "$RES/paths.plist" <<PLIST

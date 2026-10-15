@@ -43,7 +43,9 @@ build_app() {
 <dict>
   <key>CFBundleIdentifier</key><string>com.meetingarchive.setup</string>
   <key>CFBundleName</key><string>Yarn Setup</string>
+  <key>CFBundleDisplayName</key><string>Setup</string>
   <key>CFBundleExecutable</key><string>YarnSetup</string>
+  <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.2</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -53,6 +55,10 @@ build_app() {
 </dict>
 </plist>
 PLIST
+  mkdir -p "$APP_DIR/Contents/Resources" || return 1
+  cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
+    "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
+  "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" "Setup" || return 1
   swiftc -parse-as-library -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
     -framework AppKit >/dev/null 2>&1 || return 1
   mv -f "$APP_BIN.partial" "$APP_BIN"
