@@ -34,7 +34,6 @@ struct Snapshot {
     var step = ""
     var detail = ""
     var percent: Int?
-    var barIndeterminate = false
     var eta = ""
     var queue: [String] = []
     var waiting = 0
@@ -81,8 +80,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let progressTitle = NSTextField(labelWithString: "")
     let progressStep = NSTextField(wrappingLabelWithString: "")
     let progressDetail = NSTextField(wrappingLabelWithString: "")
-    let bar = NSProgressIndicator()
+    let bar = YarnBar()
     let percentLabel = NSTextField(labelWithString: "")
+    var barMeeting = ""
+    var barFloor = 0
     let etaLabel = NSTextField(wrappingLabelWithString: "")
     let queueLabel = NSTextField(wrappingLabelWithString: "")
     let processButton = NSButton(title: "Process waiting", target: nil, action: nil)
@@ -189,10 +190,6 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         progressStep.maximumNumberOfLines = 2
         progressDetail.maximumNumberOfLines = 4
         queueLabel.maximumNumberOfLines = 5
-        bar.style = .bar
-        bar.isIndeterminate = false
-        bar.minValue = 0
-        bar.maxValue = 100
         bar.isHidden = true
         bar.heightAnchor.constraint(equalToConstant: 8).isActive = true
         style(percentLabel, size: 12, weight: .medium, color: YarnColor.ink, mono: true)
@@ -297,20 +294,12 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         progressStep.isHidden = snap.step.isEmpty
         progressDetail.stringValue = snap.detail
         progressDetail.isHidden = snap.detail.isEmpty
-        if snap.barIndeterminate {
+        if let percent = snap.percent {
             bar.isHidden = false
-            bar.isIndeterminate = true
-            bar.startAnimation(nil)
-            percentLabel.isHidden = true
-        } else if let percent = snap.percent {
-            bar.isIndeterminate = false
-            bar.stopAnimation(nil)
-            bar.isHidden = false
-            bar.doubleValue = Double(percent)
+            bar.fraction = CGFloat(percent) / 100
             percentLabel.stringValue = "\(percent)%"
             percentLabel.isHidden = false
         } else {
-            bar.stopAnimation(nil)
             bar.isHidden = true
             percentLabel.isHidden = true
         }
@@ -396,17 +385,20 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             let expected = integer(status["expected_s"]) ?? 0
             let indeterminate = boolean(status["indeterminate"])
-            if !indeterminate, let percent = integer(status["percent"]) {
-                snap.percent = min(100, max(0, percent))
-            } else if expected > 0 {
-                snap.percent = min(95, elapsed * 100 / expected)
+            let stage = integer(status["percent"]) ?? 0
+            if !indeterminate, expected > 0 {
                 let left = expected - elapsed
                 snap.eta = left > 0 ? "About \(span(left)) left" : "Taking longer than usual"
-            } else {
-                // Voice separation often has no measured fraction. An empty
-                // gap there read as "nothing is happening".
-                snap.barIndeterminate = true
             }
+            let meeting = text(status["meeting_id"])
+            snap.percent = forwardPercent(
+                meeting: meeting,
+                phase: phase,
+                stage: stage,
+                elapsed: elapsed,
+                expected: expected,
+                measured: !indeterminate
+            )
             if snap.eta.isEmpty { snap.eta = text(status["eta"]) }
         } else if snap.paused {
             snap.heading = "Paused"
@@ -502,6 +494,35 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: paths.root + "/transcripts"))
     }
 
+    /// One fill for the whole meeting. A stage with no measured fraction
+    /// creeps forward inside its own slice, and the number never goes back.
+    func forwardPercent(
+        meeting: String,
+        phase: String,
+        stage: Int,
+        elapsed: Int,
+        expected: Int,
+        measured: Bool
+    ) -> Int {
+        if meeting != barMeeting {
+            barMeeting = meeting
+            barFloor = 0
+        }
+        let (start, end) = phaseBand(phase)
+        let span = max(1, end - start)
+        let inner: Double
+        if measured {
+            inner = Double(min(100, max(0, stage))) / 100
+        } else if expected > 0 {
+            inner = min(0.92, Double(elapsed) / Double(expected))
+        } else {
+            inner = min(0.9, Double(elapsed) / 40)
+        }
+        let value = start + Int((Double(span) * inner).rounded())
+        barFloor = max(barFloor, min(end, value))
+        return barFloor
+    }
+
     func note(_ text: String) {
         noteLabel.stringValue = text
         noteLabel.isHidden = text.isEmpty
@@ -522,6 +543,46 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()
+    }
+}
+
+private func phaseBand(_ phase: String) -> (Int, Int) {
+    switch phase {
+    case "Preparing audio": return (2, 8)
+    case "Transcribing": return (8, 62)
+    case "Identifying speakers": return (62, 78)
+    case "Recognising known speakers": return (78, 84)
+    case "Cleaning transcript": return (84, 88)
+    case "Writing summary": return (88, 96)
+    case "Indexing", "Indexing for search": return (96, 99)
+    case "Saving transcript": return (99, 100)
+    default: return (8, 96)
+    }
+}
+
+final class YarnBar: NSView {
+    var fraction: CGFloat = 0 {
+        didSet { needsDisplay = true }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 8)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        let track = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
+        NSColor.white.withAlphaComponent(0.14).setFill()
+        track.fill()
+        let width = bounds.width * min(1, max(0, fraction))
+        guard width > 0.5 else { return }
+        track.addClip()
+        YarnColor.blue.setFill()
+        NSBezierPath(
+            roundedRect: NSRect(x: 0, y: 0, width: width, height: bounds.height),
+            xRadius: radius,
+            yRadius: radius
+        ).fill()
     }
 }
 
