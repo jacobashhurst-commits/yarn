@@ -50,6 +50,7 @@ build_app() {
 <dict>
   <key>CFBundleIdentifier</key><string>com.meetingarchive.speakers</string>
   <key>CFBundleName</key><string>Yarn Speakers</string>
+  <key>CFBundleDisplayName</key><string>Identify</string>
   <key>CFBundleExecutable</key><string>YarnSpeakers</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -62,7 +63,7 @@ PLIST
   mkdir -p "$APP_DIR/Contents/Resources" || return 1
   cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
     "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
-  "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" || return 1
+  "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" "Identify" || return 1
   swiftc -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
     -framework AppKit -framework AVFoundation >/dev/null 2>&1 || return 1
   mv -f "$APP_BIN.partial" "$APP_BIN"
