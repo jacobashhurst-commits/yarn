@@ -687,6 +687,32 @@ def step_ollama(repo: Path) -> None:
             "text": f"Yarn will use {quality_for_model(default).title()} ({default})",
         }
     )
+    _enable_local_search()
+
+
+def _enable_local_search() -> None:
+    """Leave Ask Yarn ready. Claude and ChatGPT stay optional."""
+    from .config import load_config
+    from .connect import install_search_server
+
+    try:
+        install_search_server(load_config())
+    except OSError as exc:
+        emit(
+            {
+                "type": "log",
+                "id": "ollama",
+                "text": f"Search can wait ({exc}). Ask Yarn will try again from the menu.",
+            }
+        )
+        return
+    emit(
+        {
+            "type": "log",
+            "id": "ollama",
+            "text": "Ask Yarn is in the menu. It uses Ollama on this Mac.",
+        }
+    )
 
 
 def step_menubar(repo: Path) -> None:
@@ -809,7 +835,7 @@ def run_setup(repo: Path | None = None) -> int:
         {
             "type": "finish",
             "ok": True,
-            "message": "Yarn is ready. Look for the ⏺ icon in the menu bar.",
+            "message": "Yarn is ready. In the menu bar, choose Ask Yarn. It uses Ollama on this Mac.",
         }
     )
     return 0

@@ -197,7 +197,7 @@ def ollama_problem(cfg: Config) -> str | None:
             check=False,
         )
         if opened.returncode != 0:
-            return "Ollama isn't running. Open it, then click Connect Ollama again."
+            return "Ollama isn't open. Choose Open Ollama in the Yarn menu, then ask again."
         deadline = time.time() + 8
         while time.time() < deadline:
             time.sleep(0.5)
@@ -208,7 +208,7 @@ def ollama_problem(cfg: Config) -> str | None:
             except (OSError, urllib.error.URLError, ValueError, TimeoutError):
                 body = None
         if body is None:
-            return "Ollama isn't running. Open it, then click Connect Ollama again."
+            return "Ollama isn't open. Choose Open Ollama in the Yarn menu, then ask again."
     names = [str(item.get("name", "")) for item in body.get("models", []) if isinstance(item, dict)]
     if not any(name == model or name.startswith(model + ":") for name in names):
         return (
@@ -216,47 +216,6 @@ def ollama_problem(cfg: Config) -> str | None:
             "Pick Fast or Accurate in the Yarn menu after the download finishes."
         )
     return None
-
-
-def open_ollama_chat(script: Path, model: str, servers: Path) -> None:
-    """Open a Terminal window whose local model can call Yarn's server."""
-    if not script.is_file():
-        raise ConnectError(f"Ollama chat launcher is missing at {script}")
-    opened = subprocess.run(
-        [
-            "/usr/bin/osascript",
-            "-e",
-            "on run argv",
-            "-e",
-            "set cmd to quoted form of (item 1 of argv) "
-            '& " " & quoted form of (item 2 of argv) '
-            '& " " & quoted form of (item 3 of argv)',
-            "-e",
-            'tell application "Terminal" to do script cmd',
-            "-e",
-            'tell application "Terminal" to activate',
-            "-e",
-            "end run",
-            "--",
-            str(script),
-            model,
-            str(servers),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-    )
-    if opened.returncode != 0:
-        detail = (opened.stderr or "").strip()
-        raise ConnectError(
-            "Yarn couldn't open the Ollama chat."
-            + (f" {detail}" if detail else "")
-        )
-
-
-def _ollama_script() -> Path:
-    return Path(__file__).resolve().parents[1] / "bin" / "yarn-ollama"
 
 
 def connect_target(cfg: Config, target: str, *, notify=None) -> str:
@@ -282,12 +241,9 @@ def connect_target(cfg: Config, target: str, *, notify=None) -> str:
         problem = ollama_problem(cfg)
         if problem:
             raise ConnectError(problem)
-        written = install_search_server(cfg)
-        servers = next(path for path in written if path.name == "yarn.json")
-        model = cfg.summary.model
-        open_ollama_chat(_ollama_script(), model, servers)
+        install_search_server(cfg)
         return (
-            f"Ollama is opening in Terminal on {model}, with Yarn search connected. "
-            "Ask it about a meeting."
+            "Ask Yarn is in the menu. It uses Ollama on this Mac, "
+            "so you do not need Claude or ChatGPT."
         )
     raise ConnectError(f"unknown connect target {target}")

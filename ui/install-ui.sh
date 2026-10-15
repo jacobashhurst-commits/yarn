@@ -86,6 +86,13 @@ chmod +x "$PLUGIN"
 info "plugin written to $PLUGIN"
 info "Stop/Start invoke: $REC"
 
+# The Dock icon is the place you look. The menu bar stays as the quick control.
+if [[ -x "$REPO_DIR/bin/yarn-dock" ]]; then
+  info "installing the Dock app"
+  MA_BIN="$MA_BIN" YARN_REC="$REC" MA_ROOT="$MA_ROOT" "$REPO_DIR/bin/yarn-dock" --install \
+    || info "Dock app was not installed"
+fi
+
 # Keep a brew-prefix `rec` symlink when `ma` lives there, so an older plugin
 # that still points at /opt/homebrew/bin/rec keeps working after reinstall.
 MA_PREFIX="$(cd "$(dirname "$MA_BIN")" && pwd)"

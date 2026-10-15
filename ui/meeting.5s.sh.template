@@ -346,6 +346,7 @@ fi
 
 echo "---"
 echo "Quick actions | size=12 color=#888888"
+echo "Ask Yarn | bash=\"$MA\" param1=ask terminal=false refresh=true"
 echo "Import recording | bash=\"$(dirname "$REC")/yarn-import\" param1=audio param2=\"$MA\" terminal=false refresh=true"
 echo "Import transcript | bash=\"$(dirname "$REC")/yarn-import\" param1=transcript param2=\"$MA\" terminal=false refresh=true"
 echo "Daily brief | bash=\"$MA\" param1=brief param2=--open param3=--force terminal=false refresh=true"
@@ -444,23 +445,10 @@ if $can_accurate; then
 else
   echo "-- Accurate (9B) needs about 16 GB | disabled=true size=11 color=#617188"
 fi
-# SwiftBar drops a Python entry point often enough that the click looks like
-# it did nothing. A bash script keeps the target in one argument and logs it.
-YARN_CONNECT="$(cd "$(dirname "$MA")/../.." && pwd)/bin/yarn-connect"
-if [[ ! -x "$YARN_CONNECT" ]]; then
-  YARN_CONNECT=""
-fi
-if [[ -n "$YARN_CONNECT" ]]; then
-  echo "Connect Claude | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=claude terminal=false refresh=true"
-  echo "Connect Ollama | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=ollama terminal=false refresh=true"
-  echo "Connect Cursor | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=cursor terminal=false refresh=true"
-  echo "Connect ChatGPT | bash=/bin/bash param1=\"$YARN_CONNECT\" param2=chatgpt terminal=false refresh=true"
-else
-  echo "Connect Claude | bash=\"$MA\" param1=connect param2=claude terminal=false refresh=true"
-  echo "Connect Ollama | bash=\"$MA\" param1=connect param2=ollama terminal=false refresh=true"
-  echo "Connect Cursor | bash=\"$MA\" param1=connect param2=cursor terminal=false refresh=true"
-  echo "Connect ChatGPT | bash=\"$MA\" param1=connect param2=chatgpt terminal=false refresh=true"
-fi
+echo "Also search from another app | size=11 color=#617188"
+echo "-- Claude | bash=\"$MA\" param1=connect param2=claude terminal=false refresh=true"
+echo "-- Cursor | bash=\"$MA\" param1=connect param2=cursor terminal=false refresh=true"
+echo "-- ChatGPT | bash=\"$MA\" param1=connect param2=chatgpt terminal=false refresh=true"
 echo "Diagnostics | bash=\"$MA\" param1=doctor terminal=true"
 echo "Logs | bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 echo "Refresh | refresh=true"

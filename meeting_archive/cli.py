@@ -1039,6 +1039,35 @@ def cmd_brief(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_ask(cfg: Config, args) -> int:
+    """Ask the local model about meetings. No Claude or ChatGPT."""
+    from .ask import AskError, ask, open_answer, request_chat
+    from .summarize import SummaryUnavailable
+
+    question = " ".join(args.question or []).strip()
+    if not question:
+        request_chat(cfg)
+        return 0
+    # The Dock chat calls --text and shows the reply itself. A bare ask still
+    # opens the page. Neither path uses AppleScript, which was launching
+    # Script Editor just to collect one sentence.
+    if not args.text:
+        _tell("Looking through your meetings.")
+    try:
+        result = ask(cfg, question)
+    except (AskError, SummaryUnavailable) as exc:
+        print(exc, file=sys.stderr)
+        if not args.text:
+            _tell(str(exc), alert=True)
+        return 1
+    print(result.answer)
+    if args.text:
+        return 0
+    print(result.path)
+    open_answer(result.path)
+    return 0
+
+
 def cmd_connect(cfg: Config, args) -> int:
     """Point a desktop chat app at the local meeting search index."""
     from .connect import ConnectError, connect_target
@@ -1377,8 +1406,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_brief)
 
     p = sub.add_parser(
+        "ask",
+        help="ask Ollama about meetings on this Mac",
+    )
+    p.add_argument("question", nargs="*", help="question")
+    p.add_argument(
+        "--text",
+        action="store_true",
+        help="print the reply only, for the Yarn chat window",
+    )
+    p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser(
         "connect",
-        help="let Claude, Ollama, Cursor, or ChatGPT search this Mac's meetings",
+        help="let Claude, Cursor, or ChatGPT search this Mac's meetings",
     )
     p.add_argument("target", choices=("claude", "ollama", "cursor", "chatgpt"))
     p.set_defaults(func=cmd_connect)

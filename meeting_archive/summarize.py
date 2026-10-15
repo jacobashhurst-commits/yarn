@@ -201,6 +201,14 @@ class Summarizer:
             return summaries[0]
         return self._run(_combine_prompt(summaries))
 
+    def complete(self, prompt: str) -> str:
+        """One local answer. Does not start Ollama if it is closed."""
+        if not self.is_running():
+            raise SummaryUnavailable(
+                "Ollama isn't open. Choose Open Ollama in the Yarn menu, then ask again."
+            )
+        return self._run(prompt)
+
     def _run(self, prompt: str) -> str:
         # HTTP generate, not `ollama run`. The CLI wraps the same model in an
         # extra process and on an 8 GB machine an 18-minute transcript

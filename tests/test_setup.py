@@ -45,7 +45,7 @@ def test_setup_emits_hello_progress_and_finish(tmp_path, monkeypatch, capsys):
     assert events[-1] == {
         "type": "finish",
         "ok": True,
-        "message": "Yarn is ready. Look for the ⏺ icon in the menu bar.",
+        "message": "Yarn is ready. In the menu bar, choose Ask Yarn. It uses Ollama on this Mac.",
     }
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
-from pathlib import Path
 
 import pytest
 
@@ -229,7 +228,7 @@ def test_claude_connect_writes_after_quit(cfg: Config, tmp_path, monkeypatch):
     assert "Connectors" in text
 
 
-def test_ollama_connect_uses_the_summary_model(cfg: Config, tmp_path, monkeypatch):
+def test_ollama_connect_prepares_local_search(cfg: Config, tmp_path, monkeypatch):
     from meeting_archive.connect import connect_target
 
     cfg.summary.model = "qwen3.5:4b"
@@ -239,22 +238,13 @@ def test_ollama_connect_uses_the_summary_model(cfg: Config, tmp_path, monkeypatc
         "meeting_archive.connect.claude_config_paths",
         lambda: [normal, third],
     )
-    seen: dict[str, str] = {}
-
-    def open_chat(script, model, servers):
-        seen["script"] = str(script)
-        seen["model"] = model
-        seen["servers"] = str(servers)
-
-    monkeypatch.setattr("meeting_archive.connect.open_ollama_chat", open_chat)
     monkeypatch.setattr("meeting_archive.connect.ollama_problem", lambda _cfg: None)
     text = connect_target(cfg, "ollama")
-    saved = json.loads(Path(seen["servers"]).read_text(encoding="utf-8"))
-    assert seen["model"] == "qwen3.5:4b"
-    assert seen["script"].endswith("yarn-ollama")
+    saved = json.loads((cfg.root / "mcp" / "yarn.json").read_text(encoding="utf-8"))
     assert saved["mcpServers"]["yarn"]["command"].endswith("chroma-mcp")
     assert "yarn" in json.loads(third.read_text(encoding="utf-8"))["mcpServers"]
-    assert "qwen3.5:4b" in text
+    assert "Ask Yarn" in text
+    assert "ChatGPT" in text
 
 
 def test_should_hint_after_manual_uses(cfg: Config):
