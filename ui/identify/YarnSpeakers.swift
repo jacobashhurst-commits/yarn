@@ -14,6 +14,72 @@
 import AppKit
 import AVFoundation
 
+func yarn(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
+    NSColor(
+        srgbRed: CGFloat((hex >> 16) & 0xff) / 255,
+        green: CGFloat((hex >> 8) & 0xff) / 255,
+        blue: CGFloat(hex & 0xff) / 255,
+        alpha: alpha
+    )
+}
+
+func yarnAdaptive(light: UInt32, dark: UInt32) -> NSColor {
+    NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? yarn(dark) : yarn(light)
+    }
+}
+
+enum YarnColor {
+    static let navy = yarnAdaptive(light: 0x0D244B, dark: 0xD6E4F5)
+    static let ink = yarnAdaptive(light: 0x19293D, dark: 0xE7EEF6)
+    static let slate = yarnAdaptive(light: 0x617188, dark: 0x9AAFC3)
+    static let blue = yarn(0x167DFF)
+    static let cloud = yarnAdaptive(light: 0xEDF6FF, dark: 0x172433)
+    static let canvas = yarnAdaptive(light: 0xFFFFFF, dark: 0x101820)
+}
+
+func yarnMark(height: CGFloat) -> NSImageView {
+    let view = NSImageView()
+    if let url = Bundle.main.url(forResource: "yarn-mark", withExtension: "png") {
+        view.image = NSImage(contentsOf: url)
+    }
+    view.imageScaling = .scaleProportionallyUpOrDown
+    view.translatesAutoresizingMaskIntoConstraints = false
+    view.widthAnchor.constraint(equalToConstant: height * 2).isActive = true
+    view.heightAnchor.constraint(equalToConstant: height).isActive = true
+    return view
+}
+
+final class YarnButton: NSButton {
+    convenience init(title: String) {
+        self.init(frame: .zero)
+        self.title = title
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        yarn(0x167DFF, isEnabled ? 1 : 0.45).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        let shown = title as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = shown.size(withAttributes: attrs)
+        shown.draw(
+            in: NSRect(
+                x: (bounds.width - size.width) / 2,
+                y: (bounds.height - size.height) / 2 - 1,
+                width: size.width,
+                height: size.height
+            ),
+            withAttributes: attrs
+        )
+    }
+}
+
 struct Clip: Decodable {
     let start: Double
     let duration: Double
@@ -154,10 +220,9 @@ final class CardView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.cornerRadius = 10
-        layer?.borderWidth = 1
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.cornerRadius = 12
+        layer?.borderWidth = 0
+        layer?.backgroundColor = YarnColor.cloud.cgColor
     }
 }
 
@@ -175,18 +240,18 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     var finished = false
 
     let window: NSWindow
-    let dateLabel = WrapLabel(size: 12, color: .secondaryLabelColor)
-    let titleLabel = WrapLabel(size: 17, weight: .semibold)
-    let metaLabel = WrapLabel(size: 12, color: .secondaryLabelColor)
+    let dateLabel = WrapLabel(size: 12, color: YarnColor.slate)
+    let titleLabel = WrapLabel(size: 22, weight: .semibold, color: YarnColor.navy)
+    let metaLabel = WrapLabel(size: 12, color: YarnColor.slate)
     let voiceLabel = NSTextField(labelWithString: "")
     let progressLabel = NSTextField(labelWithString: "")
-    let detailLabel = WrapLabel(size: 12, color: .secondaryLabelColor)
-    let guessLabel = WrapLabel(size: 18, weight: .semibold)
-    let captionLabel = WrapLabel(size: 12, color: .secondaryLabelColor)
-    let matchesLabel = WrapLabel(size: 12, color: .secondaryLabelColor)
-    let savedLabel = WrapLabel(size: 12, color: .secondaryLabelColor)
-    let clipHeader = WrapLabel(size: 12, color: .secondaryLabelColor)
-    let clipText = WrapLabel(size: 15)
+    let detailLabel = WrapLabel(size: 12, color: YarnColor.slate)
+    let guessLabel = WrapLabel(size: 18, weight: .semibold, color: YarnColor.ink)
+    let captionLabel = WrapLabel(size: 12, color: YarnColor.slate)
+    let matchesLabel = WrapLabel(size: 12, color: YarnColor.slate)
+    let savedLabel = WrapLabel(size: 12, color: YarnColor.slate)
+    let clipHeader = WrapLabel(size: 12, color: YarnColor.slate)
+    let clipText = WrapLabel(size: 15, color: YarnColor.ink)
     let statusLabel = NSTextField(labelWithString: "")
     let nameBox = NSComboBox()
     let playButton = NSButton(title: "Play", target: nil, action: nil)
@@ -195,7 +260,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     let backButton = NSButton(title: "Back", target: nil, action: nil)
     let skipButton = NSButton(title: "Skip — don't know", target: nil, action: nil)
     let quitButton = NSButton(title: "Stop asking", target: nil, action: nil)
-    let saveButton = NSButton(title: "Save & next", target: nil, action: nil)
+    let saveButton = YarnButton(title: "Save & next")
     var formViews: [NSView] = []
     var formStack: NSStackView!
     var didFit = false
@@ -211,6 +276,9 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         )
         super.init()
         window.title = "Identify speakers"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = YarnColor.canvas
         window.level = .floating
         window.delegate = self
         window.contentMinSize = NSSize(width: 460, height: 480)
@@ -244,19 +312,20 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         saveButton.keyEquivalent = "\r"
         quitButton.keyEquivalent = "\u{1b}"
 
-        voiceLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+        voiceLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        voiceLabel.textColor = YarnColor.navy
         voiceLabel.lineBreakMode = .byTruncatingTail
         voiceLabel.maximumNumberOfLines = 1
         voiceLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         voiceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         progressLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        progressLabel.textColor = .secondaryLabelColor
+        progressLabel.textColor = YarnColor.slate
         progressLabel.alignment = .right
         progressLabel.setContentHuggingPriority(.required, for: .horizontal)
         progressLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         statusLabel.font = NSFont.systemFont(ofSize: 12)
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = YarnColor.slate
         statusLabel.alignment = .right
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -310,13 +379,18 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
 
         let nameLabel = NSTextField(labelWithString: "Who is this?")
         nameLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        nameLabel.textColor = YarnColor.navy
+        saveButton.translatesAutoresizingMaskIntoConstraints = false
+        saveButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
         let nameStack = NSStackView(views: [nameLabel, nameBox])
         nameStack.orientation = .vertical
         nameStack.alignment = .leading
         nameStack.spacing = 6
 
+        let mark = yarnMark(height: 28)
         let column: [NSView] = [
-            dateLabel, titleLabel, metaLabel, voiceRow, detailLabel,
+            mark, dateLabel, titleLabel, metaLabel, voiceRow, detailLabel,
             prediction, card, playerRow, nameStack,
         ]
         let stack = NSStackView(views: column)
@@ -325,6 +399,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 18, left: pad, bottom: 16, right: pad)
         stack.detachesHiddenViews = true
+        stack.setCustomSpacing(8, after: mark)
         stack.setCustomSpacing(2, after: dateLabel)
         stack.setCustomSpacing(4, after: titleLabel)
         stack.setCustomSpacing(18, after: metaLabel)
@@ -554,11 +629,11 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     func applyPrediction(_ v: Voice) {
         if v.guess.isEmpty {
             guessLabel.font = NSFont.systemFont(ofSize: 15, weight: .medium)
-            guessLabel.textColor = .secondaryLabelColor
+            guessLabel.textColor = YarnColor.slate
             guessLabel.show("No confident match")
         } else {
             guessLabel.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
-            guessLabel.textColor = .labelColor
+            guessLabel.textColor = YarnColor.ink
             guessLabel.show(v.guess, spacing: 0)
         }
         captionLabel.show(caption(for: v), spacing: 1)
@@ -606,7 +681,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
                 string: "\(match.name) \(String(format: "%.2f", match.score))",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 12, weight: leading ? .semibold : .regular),
-                    .foregroundColor: leading ? NSColor.labelColor : NSColor.secondaryLabelColor,
+                    .foregroundColor: leading ? YarnColor.ink : YarnColor.slate,
                     .paragraphStyle: style,
                 ]
             ))
@@ -629,10 +704,10 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         header += clip.exact ? "   ·   only this voice" : "   ·   approximate"
         clipHeader.show(header, spacing: 1)
         if clip.text.isEmpty {
-            clipText.textColor = .secondaryLabelColor
+            clipText.textColor = YarnColor.slate
             clipText.show("No transcript for this stretch. Play it to hear them.")
         } else {
-            clipText.textColor = .labelColor
+            clipText.textColor = YarnColor.ink
             let prefix = clip.exact ? "" : "Roughly: "
             clipText.show("\(prefix)“\(clip.text)”", spacing: 3)
         }
@@ -679,7 +754,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             p.play()
             player = p
             statusLabel.stringValue = "Playing…"
-            statusLabel.textColor = .labelColor
+            statusLabel.textColor = YarnColor.ink
         } catch {
             statusLabel.stringValue = "Could not play clip"
         }
@@ -687,7 +762,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         statusLabel.stringValue = "Finished"
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = YarnColor.slate
     }
 
     @objc func nextClip() {
@@ -704,7 +779,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         if statusLabel.stringValue == "Playing…" || statusLabel.stringValue == "Finished" {
             statusLabel.stringValue = ""
         }
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = YarnColor.slate
     }
 
     func record() {
@@ -748,7 +823,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             statusLabel.stringValue = applied == 1
                 ? "Also named 1 other \(name) voice"
                 : "Also named \(applied) other \(name) voices"
-            statusLabel.textColor = .secondaryLabelColor
+            statusLabel.textColor = YarnColor.slate
         }
     }
 
@@ -789,20 +864,22 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             let (code, out, err) = runMA(self.ma, args)
             DispatchQueue.main.async {
-                let alert = NSAlert()
                 if code == 0 {
-                    alert.messageText = "Speaker names saved"
                     let lines = out.split(separator: "\n").filter {
                         !$0.hasPrefix("ASSUMED") && !$0.hasPrefix("run `ma")
                     }
-                    alert.informativeText = lines.joined(separator: "\n") +
-                        "\n\nThe transcript will be relabelled in the background."
+                    showYarnResult(
+                        title: "Speaker names saved",
+                        body: lines.joined(separator: "\n"),
+                        footer: "The transcript will be relabelled in the background."
+                    )
                 } else {
-                    alert.messageText = "Could not save speaker names"
-                    alert.informativeText = err
+                    showYarnResult(
+                        title: "Could not save speaker names",
+                        body: err,
+                        footer: ""
+                    )
                 }
-                alert.runModal()
-                NSApp.terminate(nil)
             }
         }
     }
@@ -811,6 +888,106 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         if payload != nil && !queue.isEmpty && !finished { record() }
         finish()
     }
+}
+
+final class ResultCloser: NSObject {
+    static let shared = ResultCloser()
+    @objc func close() { NSApp.terminate(nil) }
+}
+
+func showYarnResult(title: String, body: String, footer: String) {
+    for window in NSApp.windows {
+        window.orderOut(nil)
+    }
+    let panel = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    panel.title = title
+    panel.titleVisibility = .hidden
+    panel.titlebarAppearsTransparent = true
+    panel.backgroundColor = YarnColor.canvas
+    panel.isReleasedWhenClosed = false
+
+    let mark = yarnMark(height: 36)
+    let heading = NSTextField(labelWithString: title)
+    heading.font = .systemFont(ofSize: 20, weight: .semibold)
+    heading.textColor = YarnColor.navy
+    heading.translatesAutoresizingMaskIntoConstraints = false
+
+    let header = NSStackView(views: [mark, heading])
+    header.orientation = .horizontal
+    header.alignment = .centerY
+    header.spacing = 12
+    header.translatesAutoresizingMaskIntoConstraints = false
+
+    let list = NSTextField(wrappingLabelWithString: body.isEmpty ? " " : body)
+    list.font = .systemFont(ofSize: 14)
+    list.textColor = YarnColor.ink
+    list.preferredMaxLayoutWidth = 420
+    list.isHidden = body.isEmpty
+    list.translatesAutoresizingMaskIntoConstraints = false
+
+    let lines = max(body.split(separator: "\n").count, body.isEmpty ? 0 : 1)
+    let listHeight = min(340, CGFloat(lines) * 22 + 8)
+
+    let scroller = NSScrollView()
+    scroller.drawsBackground = false
+    scroller.hasVerticalScroller = lines > 14
+    scroller.borderType = .noBorder
+    scroller.documentView = list
+    scroller.translatesAutoresizingMaskIntoConstraints = false
+    scroller.isHidden = body.isEmpty
+
+    let note = NSTextField(wrappingLabelWithString: footer)
+    note.font = .systemFont(ofSize: 13)
+    note.textColor = YarnColor.slate
+    note.preferredMaxLayoutWidth = 420
+    note.isHidden = footer.isEmpty
+    note.translatesAutoresizingMaskIntoConstraints = false
+
+    let ok = YarnButton(title: "OK")
+    ok.target = ResultCloser.shared
+    ok.action = #selector(ResultCloser.close)
+    ok.keyEquivalent = "\r"
+    ok.translatesAutoresizingMaskIntoConstraints = false
+
+    let content = NSView()
+    panel.contentView = content
+    content.addSubview(header)
+    content.addSubview(scroller)
+    content.addSubview(note)
+    content.addSubview(ok)
+    NSLayoutConstraint.activate([
+        list.leadingAnchor.constraint(equalTo: scroller.contentView.leadingAnchor),
+        list.trailingAnchor.constraint(equalTo: scroller.contentView.trailingAnchor),
+        list.topAnchor.constraint(equalTo: scroller.contentView.topAnchor),
+        list.widthAnchor.constraint(equalTo: scroller.widthAnchor),
+
+        header.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+        header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+        header.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -20),
+
+        scroller.topAnchor.constraint(equalTo: header.bottomAnchor, constant: body.isEmpty ? 0 : 16),
+        scroller.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
+        scroller.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
+        scroller.heightAnchor.constraint(equalToConstant: body.isEmpty ? 0 : listHeight),
+
+        note.topAnchor.constraint(equalTo: scroller.bottomAnchor, constant: footer.isEmpty ? 0 : 14),
+        note.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
+        note.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
+
+        ok.topAnchor.constraint(equalTo: note.bottomAnchor, constant: 16),
+        ok.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+        ok.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+        ok.widthAnchor.constraint(equalToConstant: 72),
+        ok.heightAnchor.constraint(equalToConstant: 32),
+    ])
+    panel.center()
+    panel.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -824,10 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             args.removeSubrange(i...(i + 1))
         }
         guard let meetingID = args.first(where: { !$0.hasPrefix("-") }) else {
-            let alert = NSAlert()
-            alert.messageText = "No meeting given"
-            alert.runModal()
-            NSApp.terminate(nil)
+            showYarnResult(title: "No meeting given", body: "", footer: "")
             return
         }
         let c = Controller(ma: ma, meetingID: meetingID)

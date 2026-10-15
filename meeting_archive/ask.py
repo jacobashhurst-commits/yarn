@@ -8,6 +8,7 @@ reply. The chat window is Yarn's; Ollama is only the model.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,26 +46,73 @@ def chat_path(cfg: Config) -> Path:
     return cfg.root / "asks" / "chat.json"
 
 
-def chat_log(cfg: Config) -> list[dict]:
+def _turns(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def load_store(cfg: Config) -> dict:
+    """Chats grouped the way the window lists them. A bare turn list is one chat."""
     path = chat_path(cfg)
     if not path.exists():
-        return []
+        return {"active": "", "chats": []}
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    if not isinstance(loaded, list):
-        return []
-    return [item for item in loaded if isinstance(item, dict)]
+        return {"active": "", "chats": []}
+    if isinstance(loaded, list):
+        return {
+            "active": "legacy",
+            "chats": [{"id": "legacy", "updated": 0, "turns": _turns(loaded)}],
+        }
+    if not isinstance(loaded, dict):
+        return {"active": "", "chats": []}
+    chats = []
+    for item in loaded.get("chats") or []:
+        if not isinstance(item, dict):
+            continue
+        chats.append(
+            {
+                "id": str(item.get("id") or ""),
+                "updated": int(item.get("updated") or 0),
+                "turns": _turns(item.get("turns")),
+            }
+        )
+    active = str(loaded.get("active") or "")
+    if not active and chats:
+        active = str(chats[-1]["id"])
+    return {"active": active, "chats": chats}
+
+
+def save_store(cfg: Config, store: dict) -> None:
+    path = chat_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2) + "\n", encoding="utf-8")
+
+
+def chat_log(cfg: Config) -> list[dict]:
+    store = load_store(cfg)
+    for chat in store["chats"]:
+        if chat["id"] == store["active"]:
+            return chat["turns"]
+    return []
 
 
 def remember_exchange(cfg: Config, question: str, answer: str) -> None:
-    log = chat_log(cfg)
-    log.append({"role": "you", "text": question})
-    log.append({"role": "yarn", "text": answer})
-    path = chat_path(cfg)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(log[-40:], indent=2) + "\n", encoding="utf-8")
+    store = load_store(cfg)
+    now = int(time.time())
+    target = next((chat for chat in store["chats"] if chat["id"] == store["active"]), None)
+    if target is None:
+        target = {"id": "chat", "updated": now, "turns": []}
+        store["chats"].append(target)
+        store["active"] = target["id"]
+    target["turns"] = (
+        target["turns"]
+        + [{"role": "you", "text": question}, {"role": "yarn", "text": answer}]
+    )[-40:]
+    target["updated"] = now
+    save_store(cfg, store)
 
 
 def earlier_chat(cfg: Config) -> str:
@@ -150,7 +198,7 @@ def write_answer(cfg: Config, question: str, answer: str, hits: list[dict]) -> P
     return path
 
 
-def ask(cfg: Config, question: str, *, complete=None) -> AskResult:
+def ask(cfg: Config, question: str, *, complete=None, remember: bool = True) -> AskResult:
     question = question.strip()
     if not question:
         raise AskError("Type a question first.")
@@ -162,7 +210,10 @@ def ask(cfg: Config, question: str, *, complete=None) -> AskResult:
             complete = Summarizer(cfg.summary).complete
         answer = complete(build_prompt(question, hits, earlier=earlier_chat(cfg)))
     path = write_answer(cfg, question, answer, hits)
-    remember_exchange(cfg, question, answer)
+    # The Dock chat stores the thread itself. Remembering here as well
+    # would write the same question twice.
+    if remember:
+        remember_exchange(cfg, question, answer)
     return AskResult(question=question, answer=answer, path=path)
 
 

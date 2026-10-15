@@ -10,6 +10,7 @@ construction rather than by remembering to be careful.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -67,6 +68,14 @@ def launch_speakers(meeting_id: str, profiles=None) -> bool:
 
 
 def _spawn(cmd: list[str], meeting_id: str, what: str) -> bool:
+    # The watcher is a launchd job whose PATH is only the system directories.
+    # `speaker-popup` asks for `ma` and exits before any window if it cannot
+    # find one, which is why the identify dialog never appeared.
+    env = os.environ.copy()
+    ma = Path(sys.executable).with_name("ma")
+    if ma.is_file():
+        env["MA_BIN"] = str(ma)
+        env["PATH"] = str(ma.parent) + os.pathsep + env.get("PATH", "")
     try:
         subprocess.Popen(
             cmd,
@@ -74,6 +83,7 @@ def _spawn(cmd: list[str], meeting_id: str, what: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
         log.info("launched %s for meeting=%s", what, meeting_id)
         return True

@@ -87,7 +87,7 @@ NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 NSColor.white.setFill()
 NSRect(x: 0, y: 0, width: side, height: side).fill()
 let aspect = mark.size.width / max(mark.size.height, 1)
-let width = CGFloat(side) * 0.72
+let width = CGFloat(side) * 0.88
 let height = width / aspect
 mark.draw(
     in: NSRect(x: (CGFloat(side) - width) / 2, y: (CGFloat(side) - height) / 2, width: width, height: height),

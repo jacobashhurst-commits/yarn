@@ -12,6 +12,12 @@ export PATH="__BREW_BIN__:/usr/bin:/bin:/usr/sbin:/sbin"
 MA_ROOT="__MA_ROOT__"
 REC="__REC__"
 MA="__MA_BIN__"
+MARK="__MENU_MARK__"
+# SwiftBar treats image= as base64. A file path draws a blank tile.
+MARK_B64=""
+if [[ -f "$MARK" ]]; then
+  MARK_B64="$(base64 < "$MARK" | tr -d '\n')"
+fi
 # If install baked a stale path (e.g. a brew symlink that was never created),
 # Start/Stop fail silently under SwiftBar (terminal=false). Surface it.
 if [[ ! -x "$REC" ]]; then
@@ -134,7 +140,7 @@ phase_elapsed=0
 (( phase_elapsed < 0 )) && phase_elapsed=0
 live_percent=""
 live_eta=""
-if [[ "$indeterminate" == "true" ]] && (( expected_s >= 30 )); then
+if [[ "$indeterminate" == "true" ]] && (( expected_s >= 1 )); then
   live_percent=$(( phase_elapsed * 100 / expected_s ))
   (( live_percent > 95 )) && live_percent=95
   left=$(( expected_s - phase_elapsed ))
@@ -233,15 +239,18 @@ if $processing && [[ "$proc_remaining" =~ ^[0-9]+$ ]]; then
 fi
 
 # ---- menu bar title ----
-# Recording and processing are independent: a live capture always wins the
-# icon, but processing stays visible in the menu underneath.
-if $recording; then
-  el="$(elapsed)"
-  if [[ "$mode" == "room" ]]; then
-    echo "🔴 room · ${el}"
+# The logo is the menu bar item. A live capture still wins the text beside it,
+# and processing stays visible in the menu underneath.
+menu_title() {
+  local text="${1:-}"
+  if [[ -n "$MARK_B64" ]]; then
+    echo "${text} | templateImage=${MARK_B64}"
   else
-    echo "🔴 ${el}"
+    echo "${text:-Yarn}"
   fi
+}
+if $recording; then
+  menu_title "$(elapsed)"
 elif $processing; then
   frac="$(fraction)"
   stage="$(short_phase)"
@@ -251,13 +260,13 @@ elif $processing; then
   elif [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
     pct=" ${percent}%"
   fi
-  echo "⏳ ${frac:+$frac }${stage}${pct}"
+  menu_title "${frac:+$frac }${stage}${pct}"
 elif $paused; then
-  echo "⏸"
+  menu_title "Paused"
 elif [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
-  echo "⏺ ${queue_remaining}"
+  menu_title "$queue_remaining"
 else
-  echo "⏺"
+  menu_title
 fi
 
 echo "---"
@@ -265,9 +274,9 @@ echo "Recording | size=12 color=#888888"
 if $recording; then
   echo "Recording since ${started_at:-unknown} | size=11 color=#888888"
   echo "Mode: ${mode} | size=11 color=#888888"
-  echo "Stop recording | bash=\"$REC\" param1=stop terminal=false refresh=true"
+  echo "Stop recording | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" stop' terminal=false refresh=true"
 else
-  echo "Start recording — laptop mic | bash=\"$REC\" param1=start param2=room terminal=false refresh=true"
+  echo "Start recording — laptop mic | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start room' terminal=false refresh=true"
 fi
 
 echo "---"

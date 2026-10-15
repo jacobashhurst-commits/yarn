@@ -250,6 +250,10 @@ class Summarizer:
         return text
 
     def _generate(self, url: str, payload: dict) -> str:
+        # Stream so each new token is written while the model is still
+        # talking. The Dock reads that file once a second.
+        payload = dict(payload)
+        payload["stream"] = True
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url,
@@ -257,9 +261,85 @@ class Summarizer:
             method="POST",
             headers={"Content-Type": "application/json"},
         )
+        parts: list[str] = []
+        seen = {"prompt_eval_count": 0, "eval_count": 0}
         with urllib.request.urlopen(request, timeout=self.config.timeout_s) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        return str(data.get("response") or "")
+            try:
+                chunks = iter(response)
+            except TypeError:
+                chunks = [response.read()]
+            for raw in chunks:
+                if isinstance(raw, str):
+                    raw = raw.encode("utf-8")
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    parts.append(str(data.get("response") or ""))
+                    _note_token_delta(data, seen)
+        return "".join(parts)
+
+
+def saved_token_total(root: Path) -> int:
+    path = root / ".tokens-saved.json"
+    if not path.exists():
+        return 0
+    try:
+        total = int(json.loads(path.read_text(encoding="utf-8")).get("total") or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+    return max(0, total)
+
+
+def record_saved_tokens(count: int, *, root: Path) -> None:
+    """Add tokens this Mac's model just used. The Dock calls that 'tokens saved'."""
+    adjust_saved_tokens(count, root=root)
+
+
+def adjust_saved_tokens(delta: int, *, root: Path) -> None:
+    """Move the running total by delta. A negative delta corrects an estimate."""
+    if delta == 0:
+        return
+    path = root / ".tokens-saved.json"
+    total = max(0, saved_token_total(root) + delta)
+    path.write_text(json.dumps({"total": total}) + "\n", encoding="utf-8")
+
+
+def _note_token_delta(data: dict, seen: dict) -> None:
+    """Keep the Dock total moving while the model is still writing.
+
+    Streaming chunks carry the new text and no counts. The real
+    prompt_eval_count and eval_count arrive on the last line and replace
+    the estimate, so the final number is Ollama's, not a guess.
+    """
+    for key in ("prompt_eval_count", "eval_count"):
+        try:
+            value = int(data.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > int(seen.get(key) or 0):
+            seen[key] = value
+    official = int(seen.get("prompt_eval_count") or 0) + int(seen.get("eval_count") or 0)
+    text = str(data.get("response") or "")
+    if official:
+        desired = official
+    elif text and "done" in data:
+        seen["estimate"] = int(seen.get("estimate") or 0) + max(1, (len(text) + 3) // 4)
+        desired = int(seen["estimate"])
+    else:
+        return
+    written = int(seen.get("written") or 0)
+    delta = desired - written
+    if delta == 0:
+        return
+    seen["written"] = desired
+    try:
+        from .config import load_config
+
+        adjust_saved_tokens(delta, root=load_config().root)
+    except (OSError, ValueError, TypeError):
+        log.debug("could not record saved tokens", exc_info=True)
 
 
 def _chunks(lines: list[str], limit: int) -> list[str]:

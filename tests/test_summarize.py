@@ -4,7 +4,13 @@ import pytest
 
 from meeting_archive.config import SummaryConfig
 from meeting_archive.models import ROOM, Turn
-from meeting_archive.summarize import Summarizer, SummaryUnavailable, _chunks
+from meeting_archive.summarize import (
+    Summarizer,
+    SummaryUnavailable,
+    _chunks,
+    record_saved_tokens,
+    saved_token_total,
+)
 
 
 def test_long_transcripts_split_only_between_turns():
@@ -167,3 +173,36 @@ def test_summarizer_uses_local_ollama_http_and_hides_thinking(monkeypatch):
     )
     assert summary == "Useful summary."
     assert calls == [["/usr/local/bin/ollama", "list"]]
+
+
+def test_token_deltas_count_only_new_tokens():
+    from meeting_archive.summarize import _note_token_delta
+
+    seen = {"prompt_eval_count": 0, "eval_count": 0}
+    recorded = []
+
+    def capture(delta, *, root):
+        recorded.append(delta)
+
+    import meeting_archive.summarize as summarize
+
+    original = summarize.adjust_saved_tokens
+    summarize.adjust_saved_tokens = capture
+    try:
+        _note_token_delta({"done": False, "response": "Hi"}, seen)
+        _note_token_delta({"eval_count": 4}, seen)
+        _note_token_delta({"prompt_eval_count": 10, "eval_count": 4}, seen)
+        _note_token_delta({"prompt_eval_count": 10, "eval_count": 9}, seen)
+        _note_token_delta({"prompt_eval_count": 10, "eval_count": 9}, seen)
+    finally:
+        summarize.adjust_saved_tokens = original
+    # "Hi" is an estimate of 1, then Ollama's counts replace it.
+    assert recorded == [1, 3, 10, 5]
+
+
+def test_saved_tokens_add_up(tmp_path):
+    record_saved_tokens(120, root=tmp_path)
+    record_saved_tokens(30, root=tmp_path)
+    assert saved_token_total(tmp_path) == 150
+    record_saved_tokens(0, root=tmp_path)
+    assert saved_token_total(tmp_path) == 150

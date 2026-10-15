@@ -70,6 +70,20 @@ def test_answer_page_names_the_meeting(cfg: Config, monkeypatch):
     )
 
 
+def test_text_chat_does_not_store_a_second_copy(cfg: Config, monkeypatch):
+    hits = [{"document": "Friday is the ship date.", "metadata": {"date_label": "15 Oct"}}]
+    monkeypatch.setattr("meeting_archive.ask.search_meetings", lambda _cfg, _question: hits)
+    ask(cfg, "pricing", complete=lambda _prompt: "We chose Friday.", remember=False)
+    assert chat_log(cfg) == []
+
+
+def test_text_chat_does_not_store_a_second_copy(cfg: Config, monkeypatch):
+    hits = [{"document": "Friday is the ship date.", "metadata": {"date_label": "15 Oct"}}]
+    monkeypatch.setattr("meeting_archive.ask.search_meetings", lambda _cfg, _question: hits)
+    ask(cfg, "pricing", complete=lambda _prompt: "We chose Friday.", remember=False)
+    assert chat_log(cfg) == []
+
+
 def test_followup_sees_the_earlier_chat(cfg: Config, monkeypatch):
     hits = [
         {

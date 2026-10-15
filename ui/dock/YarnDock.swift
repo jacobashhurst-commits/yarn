@@ -30,10 +30,11 @@ struct Snapshot {
     var mode = "room"
     var processing = false
     var paused = false
-    var heading = "Nothing to process"
+    var heading = ""
     var step = ""
     var detail = ""
     var percent: Int?
+    var barIndeterminate = false
     var eta = ""
     var queue: [String] = []
     var waiting = 0
@@ -41,6 +42,7 @@ struct Snapshot {
     var meetings = 0
     var failed = 0
     var model = ""
+    var tokens = 0
     var ollamaDown = false
 }
 
@@ -76,7 +78,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let bigLabel = NSTextField(labelWithString: "")
     let metaLabel = NSTextField(labelWithString: "")
     let recordButton = NSButton(title: "Start", target: nil, action: nil)
-    let progressTitle = NSTextField(labelWithString: "Nothing to process")
+    let progressTitle = NSTextField(labelWithString: "")
     let progressStep = NSTextField(wrappingLabelWithString: "")
     let progressDetail = NSTextField(wrappingLabelWithString: "")
     let bar = NSProgressIndicator()
@@ -89,6 +91,8 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var meetingCount = 0
     var countedAt = Date.distantPast
     var background = false
+    var rootStack: NSStackView?
+    var progressCard: NSView?
 
     override init() {
         window = NSWindow(
@@ -146,7 +150,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mark.heightAnchor.constraint(equalToConstant: 54).isActive = true
 
         let word = label("Yarn", size: 20, weight: .medium, color: YarnColor.navy, mono: true)
-        let sub = label("Meetings stay on this Mac.", size: 13, weight: .regular, color: YarnColor.slate)
+        let sub = label("Everything stays on the Mac", size: 13, weight: .regular, color: YarnColor.slate)
         sub.maximumNumberOfLines = 1
         sub.lineBreakMode = .byTruncatingTail
         sub.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
@@ -169,8 +173,12 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         recordButton.contentTintColor = .white
         recordButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         recordButton.keyEquivalent = "\r"
+        recordButton.setContentHuggingPriority(.required, for: .vertical)
+        recordButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
-        let now = card(stack([statusLabel, bigLabel, metaLabel, recordButton], spacing: 6), owner: self)
+        let recordingStack = stack([statusLabel, bigLabel, metaLabel, recordButton], spacing: 6)
+        recordingStack.detachesHiddenViews = true
+        let now = card(recordingStack, owner: self)
 
         style(progressTitle, size: 15, weight: .semibold, color: YarnColor.ink)
         style(progressStep, size: 13, weight: .regular, color: YarnColor.ink)
@@ -178,12 +186,14 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         style(etaLabel, size: 12, weight: .regular, color: YarnColor.slate)
         style(queueLabel, size: 12, weight: .regular, color: YarnColor.slate)
         progressStep.maximumNumberOfLines = 2
-        progressDetail.maximumNumberOfLines = 3
+        progressDetail.maximumNumberOfLines = 4
         queueLabel.maximumNumberOfLines = 5
+        bar.style = .bar
         bar.isIndeterminate = false
         bar.minValue = 0
         bar.maxValue = 100
         bar.isHidden = true
+        bar.heightAnchor.constraint(equalToConstant: 8).isActive = true
 
         processButton.target = self
         processButton.action = #selector(processWaiting)
@@ -200,6 +210,8 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             progressTitle, progressStep, progressDetail, bar, etaLabel, queueLabel,
             processButton, resumeButton,
         ], spacing: 6), owner: self)
+        progress.isHidden = true
+        progressCard = progress
 
         let actions = stack([
             link("Ask Yarn", #selector(ask), self),
@@ -213,21 +225,38 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         noteLabel.maximumNumberOfLines = 2
         noteLabel.isHidden = true
         style(footer, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
+        footer.preferredMaxLayoutWidth = 340
+        footer.maximumNumberOfLines = 2
 
         let root = stack([header, now, progress, actions, noteLabel, footer], spacing: 14)
+        root.detachesHiddenViews = true
         root.translatesAutoresizingMaskIntoConstraints = false
+        root.setContentHuggingPriority(.required, for: .vertical)
+        rootStack = root
         content.addSubview(root)
         NSLayoutConstraint.activate([
             root.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             root.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             root.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            root.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            root.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -16),
         ])
-        // Hug the content. A fixed tall window was centering this short page
-        // and leaving a band of empty space under the traffic lights.
+        fitWindow()
+    }
+
+    /// The window is only as tall as what is on screen. A fixed height was
+    /// stretching the recording card into a blank band whenever the timer
+    /// was hidden.
+    func fitWindow() {
+        guard let rootStack, let content = window.contentView else { return }
         content.layoutSubtreeIfNeeded()
-        let height = root.fittingSize.height + 24
-        window.setContentSize(NSSize(width: 400, height: max(420, height)))
+        let height = ceil(rootStack.fittingSize.height) + 24
+        let current = window.contentRect(forFrameRect: window.frame).height
+        guard abs(current - height) > 2 else { return }
+        var frame = window.frame
+        let next = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 400, height: height))
+        frame.origin.y += frame.size.height - next.height
+        frame.size = next.size
+        window.setFrame(frame, display: true)
     }
 
     func refresh() {
@@ -260,10 +289,17 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         progressStep.isHidden = snap.step.isEmpty
         progressDetail.stringValue = snap.detail
         progressDetail.isHidden = snap.detail.isEmpty
-        if let percent = snap.percent {
+        if snap.barIndeterminate {
+            bar.isHidden = false
+            bar.isIndeterminate = true
+            bar.startAnimation(nil)
+        } else if let percent = snap.percent {
+            bar.isIndeterminate = false
+            bar.stopAnimation(nil)
             bar.isHidden = false
             bar.doubleValue = Double(percent)
         } else {
+            bar.stopAnimation(nil)
             bar.isHidden = true
         }
         etaLabel.stringValue = snap.eta
@@ -272,12 +308,18 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         queueLabel.isHidden = snap.queue.isEmpty
         processButton.isHidden = !snap.canProcess
         resumeButton.isHidden = !snap.paused
+        let showProgress = snap.processing || snap.paused || snap.waiting > 0
+        progressCard?.isHidden = !showProgress
+        progressTitle.isHidden = snap.heading.isEmpty
 
         var foot = "\(snap.meetings) meeting\(snap.meetings == 1 ? "" : "s")"
+        let tokens = NumberFormatter.localizedString(from: NSNumber(value: snap.tokens), number: .decimal)
+        foot += "  ·  \(tokens) tokens saved"
         if !snap.model.isEmpty { foot += "  ·  \(snap.model)" }
         if snap.failed > 0 { foot += "  ·  \(snap.failed) kept their audio" }
         footer.stringValue = foot
         footer.textColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
+        fitWindow()
         if snap.ollamaDown && noteLabel.stringValue.isEmpty {
             noteLabel.stringValue = "Summaries need Ollama. Open it from the menu bar if a summary is waiting."
             noteLabel.isHidden = false
@@ -331,31 +373,31 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let started = integer(status["phase_started_epoch"]) ?? 0
             let elapsed = started > 0 ? max(0, now - started) : 0
             snap.step = step.isEmpty ? "" : "\(step) — \(span(elapsed))"
-            snap.detail = text(status["detail"])
+            let hint = phaseHint(phase)
+            let written = text(status["detail"])
+            if hint.isEmpty {
+                snap.detail = written
+            } else if written.isEmpty {
+                snap.detail = hint
+            } else {
+                snap.detail = hint + "\n" + written
+            }
             let expected = integer(status["expected_s"]) ?? 0
             let indeterminate = boolean(status["indeterminate"])
-            if indeterminate && expected >= 30 {
+            if !indeterminate, let percent = integer(status["percent"]) {
+                snap.percent = min(100, max(0, percent))
+            } else if expected > 0 {
                 snap.percent = min(95, elapsed * 100 / expected)
                 let left = expected - elapsed
                 snap.eta = left > 0 ? "About \(span(left)) left" : "Taking longer than usual"
-            } else if let percent = integer(status["percent"]), !indeterminate {
-                snap.percent = min(100, max(0, percent))
+            } else {
+                // Voice separation often has no measured fraction. An empty
+                // gap there read as "nothing is happening".
+                snap.barIndeterminate = true
             }
             if snap.eta.isEmpty { snap.eta = text(status["eta"]) }
         } else if snap.paused {
             snap.heading = "Paused"
-        } else {
-            var idle = "Nothing to process"
-            let last = text(queue["last_id"])
-            if !last.isEmpty {
-                idle += " — last finished \(shortID(last))"
-                if let done = integer(queue["last_finished_epoch"]), done > 0 {
-                    let formatter = DateFormatter()
-                    formatter.dateFormat = "HH:mm"
-                    idle += " at \(formatter.string(from: Date(timeIntervalSince1970: TimeInterval(done))))"
-                }
-            }
-            snap.heading = idle
         }
 
         if let lines = try? String(contentsOfFile: root + "/.queue-lines.txt", encoding: .utf8) {
@@ -367,7 +409,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var note = "\(snap.waiting) waiting"
             if when == "evening" { note += " until evening" }
             if when == "manual" { note += " until you process" }
-            if snap.queue.isEmpty { snap.queue = [note] }
+            if snap.heading.isEmpty { snap.heading = note }
         }
 
         if countedAt.timeIntervalSinceNow < -30 || meetingCount == 0 {
@@ -377,11 +419,8 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         snap.meetings = meetingCount
         snap.failed = countFiles(root + "/recordings/failed", suffix: ".json")
         let model = text(json(root + "/.yarn-settings.json")["summary_model"])
-        if model.contains("4b") {
-            snap.model = "Fast"
-        } else if model.contains("9b") {
-            snap.model = "Accurate"
-        }
+        snap.model = model
+        snap.tokens = integer(json(root + "/.tokens-saved.json")["total"]) ?? 0
         let summaries = integer(queue["summaries_pending"]) ?? 0
         let ollama = NSWorkspace.shared.runningApplications.contains {
             ($0.localizedName ?? "").localizedCaseInsensitiveContains("Ollama")
@@ -474,6 +513,25 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+private func phaseHint(_ phase: String) -> String {
+    switch phase {
+    case "Transcribing":
+        return "Listening through the recording and writing down what was said."
+    case "Identifying speakers":
+        return "Separating the voices, so each person can be named afterwards."
+    case "Recognising known speakers":
+        return "Comparing these voices with people Yarn already knows."
+    case "Cleaning transcript":
+        return "Tidying the words before the transcript is saved."
+    case "Indexing", "Indexing for search":
+        return "Filing this meeting so Ask Yarn can search it."
+    case "Writing summary":
+        return "Writing the summary on this Mac."
+    default:
+        return ""
+    }
+}
+
 private func stack(_ views: [NSView], spacing: CGFloat, horizontal: Bool = false) -> NSStackView {
     let view = NSStackView(views: views)
     view.orientation = horizontal ? .horizontal : .vertical
@@ -500,6 +558,9 @@ final class CardView: NSView {
 private func card(_ content: NSView, owner: AnyObject) -> NSView {
     let box = CardView()
     box.wantsLayer = true
+    box.setContentHuggingPriority(.required, for: .vertical)
+    box.setContentCompressionResistancePriority(.required, for: .vertical)
+    content.setContentHuggingPriority(.required, for: .vertical)
     content.translatesAutoresizingMaskIntoConstraints = false
     box.addSubview(content)
     NSLayoutConstraint.activate([
@@ -530,12 +591,70 @@ private func style(_ field: NSTextField, size: CGFloat, weight: NSFont.Weight, c
 }
 
 private func link(_ title: String, _ action: Selector, _ target: AnyObject) -> NSButton {
-    let button = NSButton(title: title, target: target, action: action)
-    button.isBordered = false
-    button.alignment = .left
+    let button = HoverLink(title: title, target: target, action: action)
     button.font = NSFont.systemFont(ofSize: 15, weight: .medium)
-    button.contentTintColor = YarnColor.navy
+    button.heightAnchor.constraint(equalToConstant: 30).isActive = true
     return button
+}
+
+final class HoverLink: NSButton {
+    private var hovering = false
+
+    init(title: String, target: AnyObject, action: Selector) {
+        super.init(frame: .zero)
+        self.title = title
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 6
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect, .cursorUpdate],
+            owner: self
+        ))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering {
+            yarn(0x167DFF, 0.16).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 1), xRadius: 6, yRadius: 6).fill()
+        }
+        let shown = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: font ?? NSFont.systemFont(ofSize: 15, weight: .medium),
+                .foregroundColor: YarnColor.navy,
+            ]
+        )
+        let size = shown.size()
+        shown.draw(in: NSRect(x: 8, y: (bounds.height - size.height) / 2, width: bounds.width - 16, height: size.height))
+    }
 }
 
 private func json(_ path: String) -> [String: Any] {

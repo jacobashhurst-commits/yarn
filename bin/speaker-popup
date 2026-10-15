@@ -58,13 +58,18 @@ build_app() {
 </dict>
 </plist>
 PLIST
+  mkdir -p "$APP_DIR/Contents/Resources" || return 1
+  cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
+    "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
   swiftc -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
     -framework AppKit -framework AVFoundation >/dev/null 2>&1 || return 1
   mv -f "$APP_BIN.partial" "$APP_BIN"
 }
 
 if [[ -f "$SWIFT_SRC" ]]; then
-  if [[ ! -x "$APP_BIN" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+  # A binary without Info.plist is not an app. `open` then says the
+  # executable is missing and the identify window never appears.
+  if [[ ! -x "$APP_BIN" || ! -f "$APP_DIR/Contents/Info.plist" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
     build_app || echo "speaker-popup: could not build identify window, using dialogs" >&2
   fi
   if [[ -x "$APP_BIN" ]]; then

@@ -1054,7 +1054,7 @@ def cmd_ask(cfg: Config, args) -> int:
     if not args.text:
         _tell("Looking through your meetings.")
     try:
-        result = ask(cfg, question)
+        result = ask(cfg, question, remember=not args.text)
     except (AskError, SummaryUnavailable) as exc:
         print(exc, file=sys.stderr)
         if not args.text:

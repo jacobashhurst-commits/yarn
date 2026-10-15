@@ -70,9 +70,18 @@ else
   esac
 fi
 
+# SwiftBar's own menu-bar item is a question mark beside Yarn. The plugin is
+# the icon, so the host's mark stays hidden.
+if [[ -d /Applications/SwiftBar.app ]]; then
+  defaults write com.ameba.SwiftBar HideSwiftBarIcon -bool true
+fi
+
 PLUGIN_DIR="${SWIFTBAR_PLUGIN_DIR:-$HOME/.swiftbar-plugins}"
 mkdir -p "$PLUGIN_DIR"
 PLUGIN="$PLUGIN_DIR/meeting.5s.sh"
+# Outside the plugin folder. SwiftBar executes every file it finds there, and
+# it marks them executable, so a png next to the script becomes a second item.
+MENU_MARK="${YARN_SUPPORT:-$HOME/Library/Application Support/Yarn}/menu-mark.png"
 
 # Paths are baked in at install time so the plugin stays pure shell. It runs
 # every 5 seconds; starting a Python interpreter that often just to draw an
@@ -81,8 +90,95 @@ sed -e "s|__MA_ROOT__|$MA_ROOT|g" \
     -e "s|__REC__|$REC|g" \
     -e "s|__MA_BIN__|$MA_BIN|g" \
     -e "s|__BREW_BIN__|$BREW_BIN|g" \
+    -e "s|__MENU_MARK__|$MENU_MARK|g" \
     "$REPO_DIR/ui/meeting.5s.sh.template" > "$PLUGIN"
 chmod +x "$PLUGIN"
+# Menu bar icon. SwiftBar tints a black template and draws it at pixel
+# size, so this is the white toolbar mark at the same height as the other
+# menu-bar icons (14px), with
+# the black around the yarn left transparent.
+swiftc -o "$PLUGIN_DIR/.menu-mark" -framework AppKit - <<'SWIFT' || true
+import AppKit
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+let mark = NSImage(contentsOf: url)!
+guard let fileRep = NSBitmapImageRep(data: try! Data(contentsOf: url)) else {
+    fputs("could not read the toolbar mark\n", stderr)
+    exit(1)
+}
+let srcW = fileRep.pixelsWide
+let srcH = fileRep.pixelsHigh
+func bitmap(_ w: Int, _ h: Int) -> NSBitmapImageRep {
+    NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+    )!
+}
+let probe = bitmap(srcW, srcH)
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: probe)
+NSColor.black.setFill()
+NSRect(x: 0, y: 0, width: srcW, height: srcH).fill()
+mark.draw(in: NSRect(x: 0, y: 0, width: srcW, height: srcH), from: .zero, operation: .sourceOver, fraction: 1)
+NSGraphicsContext.restoreGraphicsState()
+guard let pp = probe.bitmapData else { exit(1) }
+let prow = probe.bytesPerRow
+var minX = srcW, minY = srcH, maxX = 0, maxY = 0
+for y in 0..<srcH {
+    for x in 0..<srcW {
+        let i = y * prow + x * 4
+        let lum = 0.2126 * Double(pp[i]) + 0.7152 * Double(pp[i+1]) + 0.0722 * Double(pp[i+2])
+        if lum > 30 {
+            minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y)
+        }
+    }
+}
+let contentW = maxX - minX + 1
+let contentH = maxY - minY + 1
+let crop = bitmap(contentW, contentH)
+guard let cp = crop.bitmapData else { exit(1) }
+let crow = crop.bytesPerRow
+for y in 0..<contentH {
+    for x in 0..<contentW {
+        let s = (minY + y) * prow + (minX + x) * 4
+        let d = y * crow + x * 4
+        cp[d] = pp[s]; cp[d+1] = pp[s+1]; cp[d+2] = pp[s+2]; cp[d+3] = 255
+    }
+}
+let targetH = 14
+let targetW = max(1, Int((Double(contentW) / Double(contentH) * Double(targetH)).rounded()))
+let out = bitmap(targetW, targetH)
+NSGraphicsContext.saveGraphicsState()
+let ctx = NSGraphicsContext(bitmapImageRep: out)!
+ctx.imageInterpolation = .high
+NSGraphicsContext.current = ctx
+NSColor.clear.setFill()
+NSRect(x: 0, y: 0, width: targetW, height: targetH).fill()
+let cropped = NSImage(size: NSSize(width: contentW, height: contentH))
+cropped.addRepresentation(crop)
+cropped.draw(in: NSRect(x: 0, y: 0, width: targetW, height: targetH), from: .zero, operation: .sourceOver, fraction: 1)
+NSGraphicsContext.restoreGraphicsState()
+guard let dest = out.bitmapData else { exit(1) }
+let drow = out.bytesPerRow
+for y in 0..<targetH {
+    for x in 0..<targetW {
+        let i = y * drow + x * 4
+        let lum = min(1, (0.2126 * Double(dest[i]) + 0.7152 * Double(dest[i+1]) + 0.0722 * Double(dest[i+2])) / 255)
+        let ink = lum < 0.18 ? 0 : min(1, (lum - 0.18) / 0.45)
+        dest[i] = 0
+        dest[i + 1] = 0
+        dest[i + 2] = 0
+        dest[i + 3] = UInt8(ink * 255)
+    }
+}
+try! out.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
+SWIFT
+mkdir -p "$(dirname "$MENU_MARK")"
+if [[ -x "$PLUGIN_DIR/.menu-mark" ]]; then
+  "$PLUGIN_DIR/.menu-mark" "$REPO_DIR/meeting_archive/assets/yarn-toolbar.png" "$MENU_MARK"
+  rm -f "$PLUGIN_DIR/.menu-mark"
+fi
+rm -f "$PLUGIN_DIR/yarn-mark.png"
 info "plugin written to $PLUGIN"
 info "Stop/Start invoke: $REC"
 
