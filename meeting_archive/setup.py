@@ -488,18 +488,40 @@ when = "after_meeting"
     )
 
 
+def faster_whisper_repo(model: str) -> str:
+    """Hugging Face id faster-whisper loads for a short model name."""
+    if "/" in model:
+        return model
+    return f"Systran/faster-whisper-{model}"
+
+
+def _prefetch_faster_whisper(repo: Path, model: str) -> None:
+    """Put the speech weights on disk before the first meeting.
+
+    Config sets local_files_only, so a meeting will not download them later.
+    A Mac without Homebrew never gets whisper-cli, and this is the engine
+    that install then selects.
+    """
+    repo_id = faster_whisper_repo(model)
+    emit({"type": "log", "id": "whisper", "text": f"Downloading speech model {repo_id}"})
+    py = venv_python(repo)
+    code = (
+        "from huggingface_hub import snapshot_download\n"
+        f"print(snapshot_download({repo_id!r}))\n"
+    )
+    proc = run([str(py), "-c", code], timeout=3600)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "speech model download failed")[-2000:]
+        raise RuntimeError(detail)
+    emit({"type": "log", "id": "whisper", "text": "Speech model is on this Mac"})
+
+
 def step_whisper(repo: Path) -> None:
     from .config import load_config
 
     cfg = load_config()
     if cfg.whisper.engine != "whisper_cpp":
-        emit(
-            {
-                "type": "log",
-                "id": "whisper",
-                "text": "faster-whisper will fetch weights on first meeting.",
-            }
-        )
+        _prefetch_faster_whisper(repo, cfg.whisper.model)
         return
     path = Path(cfg.whisper.model_path).expanduser()
     if path.is_file() and path.stat().st_size > 100_000_000:
@@ -687,10 +709,10 @@ def step_ollama(repo: Path) -> None:
             "text": f"Yarn will use {quality_for_model(default).title()} ({default})",
         }
     )
-    _enable_local_search()
+    _enable_local_search(repo)
 
 
-def _enable_local_search() -> None:
+def _enable_local_search(repo: Path) -> None:
     """Leave Ask Yarn ready. Claude and ChatGPT stay optional."""
     from .config import load_config
     from .connect import install_search_server
@@ -706,13 +728,34 @@ def _enable_local_search() -> None:
             }
         )
         return
+    _prefetch_search_embedder(repo)
     emit(
         {
             "type": "log",
             "id": "ollama",
-            "text": "Ask Yarn is in the menu. It uses Ollama on this Mac.",
+            "text": "Ask Yarn is ready. It uses Ollama on this Mac.",
         }
     )
+
+
+def _prefetch_search_embedder(repo: Path) -> None:
+    """Cache Chroma's local embedder so the first question is not a download."""
+    py = venv_python(repo)
+    code = (
+        "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction\n"
+        "DefaultEmbeddingFunction()(['ready'])\n"
+    )
+    proc = run([str(py), "-c", code], timeout=600)
+    if proc.returncode != 0:
+        emit(
+            {
+                "type": "log",
+                "id": "ollama",
+                "text": "Search can wait until the first meeting is indexed.",
+            }
+        )
+        return
+    emit({"type": "log", "id": "ollama", "text": "Search is ready on this Mac"})
 
 
 def step_menubar(repo: Path) -> None:
@@ -741,6 +784,20 @@ def step_menubar(repo: Path) -> None:
         detail = (proc.stderr or proc.stdout or "install-ui.sh failed")[-2000:]
         raise RuntimeError(detail)
     emit({"type": "log", "id": "menubar", "text": "LaunchAgents loaded"})
+    dock = Path.home() / "Applications" / "Yarn.app"
+    if (dock / "Contents" / "MacOS" / "Yarn").is_file():
+        emit({"type": "log", "id": "menubar", "text": f"Yarn is in the Dock ({dock})"})
+    else:
+        emit(
+            {
+                "type": "log",
+                "id": "menubar",
+                "text": (
+                    "The Dock app was not built. The menu bar still works. "
+                    "Install Xcode Command Line Tools, then run Yarn Setup again."
+                ),
+            }
+        )
     # Touch the microphone so macOS asks now, not mid-meeting.
     probe = run(
         [
@@ -835,7 +892,11 @@ def run_setup(repo: Path | None = None) -> int:
         {
             "type": "finish",
             "ok": True,
-            "message": "Yarn is ready. In the menu bar, choose Ask Yarn. It uses Ollama on this Mac.",
+            "message": (
+                "Yarn is in the Dock. Click it to record, watch progress, "
+                "name voices, or ask about your meetings. The menu bar has "
+                "the same controls. Everything stays on this Mac."
+            ),
         }
     )
     return 0

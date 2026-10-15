@@ -66,10 +66,16 @@ You only do this once. Yarn stays on this Mac. Nothing is uploaded.
 
 5. After that
 
-   Look in the menu bar (top of the screen) for a ⏺ dot.
-   Click it  →  Start recording.
+   Yarn is in the Dock — the row of icons along the bottom of the screen.
+   Click it to start a recording, watch it process, name the voices,
+   open the daily brief, or ask about your meetings.
 
-   If the dot is missing, open SwiftBar once from Applications,
+   There is also a small Yarn icon in the menu bar (top of the screen)
+   for the same controls.
+
+   If the Dock icon is missing, open Yarn from your Applications folder
+   (the one inside your home folder).
+   If the menu-bar icon is missing, open SwiftBar once from Applications,
    then look again.
 
 

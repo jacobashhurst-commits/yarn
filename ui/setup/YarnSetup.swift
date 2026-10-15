@@ -78,12 +78,14 @@ final class Controller: NSObject, NSWindowDelegate {
         welcome.stringValue = """
         Yarn records meetings you start, on this Mac only. Nothing is uploaded.
 
-        To get started it will install two free, open-source apps if they are not already here:
+        When this finishes, Yarn is in the Dock. Click it to record, watch a meeting process, name the voices, read the daily brief, or ask about your meetings. A small menu-bar icon does the same things.
 
-        • SwiftBar — the record button in your menu bar
-        • Ollama — written summaries, still on this computer
+        It will install two free, open-source apps if they are not already here:
 
-        macOS may ask for your password or microphone permission. That’s normal. Then click Get started and wait — the long steps are downloads, not homework.
+        • SwiftBar — the menu-bar icon
+        • Ollama — summaries and Ask Yarn, still on this computer
+
+        macOS may ask for your password or microphone permission. That’s normal. Click Get started and wait — the long steps are downloads, not homework.
         """
         let ram = memoryGB()
         let neo = ram > 0 && ram <= 10

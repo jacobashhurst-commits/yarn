@@ -67,7 +67,9 @@ Open the Yarn folder and double-click **Yarn Setup**. Read **Start here.txt**
 if the Mac refuses to open it (unsigned download). Setup copies Yarn out of
 Downloads into `~/Library/Application Support/Yarn` so the recorder can run
 as a background job — macOS blocks LaunchAgents from reading Downloads.
-Developers can still run `bin/yarn-setup --cli`.
+When it finishes, Yarn is in the Dock: record, watch progress, name voices,
+read the daily brief, and ask about meetings on this Mac. A menu-bar icon
+does the same things. Developers can still run `bin/yarn-setup --cli`.
 
 ### 1. Install (developers)
 
@@ -174,11 +176,12 @@ bin/install-diarization-models
 ui/install-ui.sh
 ```
 
-This is what removes the terminal from daily use. It installs four things:
+This is what removes the terminal from daily use. It installs:
 
-- a **SwiftBar menu bar item** — click it, pick "Video call" or "In the room",
-  and it records. Turns red with a running timer, and the same menu stops it.
-  While processing, it shows a progress bar and the active phase:
+- a **Dock app** — record, watch progress, name voices, open the daily brief,
+  and ask about meetings
+- a **SwiftBar menu bar item** — the same controls, including the running
+  timer. While processing, it shows a progress bar and the active phase:
   transcription, speaker identification, summary, or search indexing.
 - a **recorder LaunchAgent**, idle until you start a recording, which is what
   actually captures the audio (see below)

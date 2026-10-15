@@ -93,9 +93,8 @@ sed -e "s|__MA_ROOT__|$MA_ROOT|g" \
     -e "s|__MENU_MARK__|$MENU_MARK|g" \
     "$REPO_DIR/ui/meeting.5s.sh.template" > "$PLUGIN"
 chmod +x "$PLUGIN"
-# Menu bar icon. SwiftBar tints a black template and draws it at pixel
-# size, so this is the white toolbar mark at the same height as the other
-# menu-bar icons (14px), with
+# Menu bar icon. SwiftBar tints a black template. The bitmap is 3x the
+# 14-point menu-bar height so the yarn stays sharp, with
 # the black around the yarn left transparent.
 swiftc -o "$PLUGIN_DIR/.menu-mark" -framework AppKit - <<'SWIFT' || true
 import AppKit
@@ -145,7 +144,12 @@ for y in 0..<contentH {
         cp[d] = pp[s]; cp[d+1] = pp[s+1]; cp[d+2] = pp[s+2]; cp[d+3] = 255
     }
 }
-let targetH = 14
+// 14 points tall, drawn at 3x. SwiftBar uses the image's point size, so the
+// icon stays the same size in the menu bar and the extra pixels keep the
+// yarn edges smooth on a Retina display.
+let pointH = 14.0
+let scale = 3
+let targetH = Int(pointH) * scale
 let targetW = max(1, Int((Double(contentW) / Double(contentH) * Double(targetH)).rounded()))
 let out = bitmap(targetW, targetH)
 NSGraphicsContext.saveGraphicsState()
@@ -164,13 +168,14 @@ for y in 0..<targetH {
     for x in 0..<targetW {
         let i = y * drow + x * 4
         let lum = min(1, (0.2126 * Double(dest[i]) + 0.7152 * Double(dest[i+1]) + 0.0722 * Double(dest[i+2])) / 255)
-        let ink = lum < 0.18 ? 0 : min(1, (lum - 0.18) / 0.45)
+        let ink = lum < 0.02 ? 0.0 : min(1, (lum - 0.02) / 0.55)
         dest[i] = 0
         dest[i + 1] = 0
         dest[i + 2] = 0
         dest[i + 3] = UInt8(ink * 255)
     }
 }
+out.size = NSSize(width: Double(targetW) / Double(scale), height: pointH)
 try! out.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
 SWIFT
 mkdir -p "$(dirname "$MENU_MARK")"
@@ -183,10 +188,14 @@ info "plugin written to $PLUGIN"
 info "Stop/Start invoke: $REC"
 
 # The Dock icon is the place you look. The menu bar stays as the quick control.
+DOCK_OK=0
 if [[ -x "$REPO_DIR/bin/yarn-dock" ]]; then
   info "installing the Dock app"
-  MA_BIN="$MA_BIN" YARN_REC="$REC" MA_ROOT="$MA_ROOT" "$REPO_DIR/bin/yarn-dock" --install \
-    || info "Dock app was not installed"
+  if MA_BIN="$MA_BIN" YARN_REC="$REC" MA_ROOT="$MA_ROOT" "$REPO_DIR/bin/yarn-dock" --install; then
+    DOCK_OK=1
+  else
+    info "Dock app was not installed"
+  fi
 fi
 
 # Keep a brew-prefix `rec` symlink when `ma` lives there, so an older plugin
@@ -327,13 +336,25 @@ info "prune scheduled daily at 09:00"
 
 # ---------------------------------------------------------------------------
 say "Done"
-cat <<EOF
-  Open SwiftBar. If it asks for a plugin folder, choose:
-      $PLUGIN_DIR
+if [[ "$DOCK_OK" == "1" ]]; then
+  cat <<EOF
+  Yarn is in the Dock. Click it to record, watch progress, name voices,
+  open the daily brief, or ask about your meetings.
 
-  A ⏺ icon appears in your menu bar. Click it to start a recording and pick
-  which kind of meeting it is. It turns red with a running timer while
-  recording, and the same menu stops it.
+  The same controls are in the menu bar. Open SwiftBar if that icon is
+  missing and it asks for a plugin folder:
+      $PLUGIN_DIR
+EOF
+else
+  cat <<EOF
+  The Dock app was not built. Use the menu bar until Xcode Command Line
+  Tools are installed, then run this installer again.
+
+  Open SwiftBar if the menu-bar icon is missing and it asks for a plugin folder:
+      $PLUGIN_DIR
+EOF
+fi
+cat <<EOF
 
   The first recording will ask for microphone permission. Allow it once and
   it is remembered; the request comes from the recorder, not from SwiftBar.

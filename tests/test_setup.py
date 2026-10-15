@@ -45,7 +45,11 @@ def test_setup_emits_hello_progress_and_finish(tmp_path, monkeypatch, capsys):
     assert events[-1] == {
         "type": "finish",
         "ok": True,
-        "message": "Yarn is ready. In the menu bar, choose Ask Yarn. It uses Ollama on this Mac.",
+        "message": (
+            "Yarn is in the Dock. Click it to record, watch progress, "
+            "name voices, or ask about your meetings. The menu bar has "
+            "the same controls. Everything stays on this Mac."
+        ),
     }
 
 
@@ -184,6 +188,49 @@ def test_write_summary_model_appends_and_replaces(tmp_path):
     assert text.count("[summary]") == 1
     assert 'model = "qwen3.5:9b"' in text
     assert 'model = "qwen3.5:4b"' not in text
+
+
+def test_faster_whisper_repo_names_the_huggingface_id():
+    assert (
+        yarn_setup.faster_whisper_repo("large-v3-turbo")
+        == "Systran/faster-whisper-large-v3-turbo"
+    )
+    assert yarn_setup.faster_whisper_repo("org/custom") == "org/custom"
+
+
+def test_step_whisper_prefetches_faster_whisper_when_there_is_no_cli(
+    tmp_path, monkeypatch
+):
+    class Whisper:
+        engine = "faster_whisper"
+        model = "large-v3-turbo"
+        model_path = "/tmp/unused"
+
+    class Cfg:
+        whisper = Whisper()
+
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "/cache/model"
+        stderr = ""
+
+    monkeypatch.setattr("meeting_archive.config.load_config", lambda: Cfg())
+    monkeypatch.setattr(
+        yarn_setup,
+        "run",
+        lambda argv, **_k: calls.append(list(argv)) or Result(),
+    )
+    monkeypatch.setattr(
+        yarn_setup, "venv_python", lambda repo: Path("/venv/bin/python")
+    )
+
+    yarn_setup.step_whisper(tmp_path)
+    assert calls
+    assert calls[0][0] == "/venv/bin/python"
+    assert "snapshot_download" in calls[0][-1]
+    assert "Systran/faster-whisper-large-v3-turbo" in calls[0][-1]
 
 
 def test_flatten_nested_speaker_model(tmp_path):
