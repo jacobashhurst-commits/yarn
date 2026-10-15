@@ -148,6 +148,9 @@ recognise="$(json_raw "$SETTINGS" recognise_known)"
 engine="$(json_raw "$SETTINGS" speaker_engine)"
 retention="$(json_raw "$SETTINGS" audio_retention)"
 summarize_when="$(json_raw "$SETTINGS" summarize_when)"
+brief_on_login="$(json_raw "$SETTINGS" brief_on_login)"
+brief_manual_count="$(json_raw "$SETTINGS" brief_manual_count)"
+[[ "$brief_manual_count" =~ ^[0-9]+$ ]] || brief_manual_count=0
 [[ -n "$engine" ]] || engine="sherpa"
 [[ -n "$retention" ]] || retention="1_week"
 [[ -n "$summarize_when" ]] || summarize_when="after_meeting"
@@ -332,6 +335,10 @@ echo "---"
 echo "Quick actions | size=12 color=#888888"
 echo "Import recording | bash=\"$(dirname "$REC")/yarn-import\" param1=audio param2=\"$MA\" terminal=false refresh=true"
 echo "Import transcript | bash=\"$(dirname "$REC")/yarn-import\" param1=transcript param2=\"$MA\" terminal=false refresh=true"
+echo "Daily brief | bash=/bin/bash param1=-lc param2='$MA brief --open --force' terminal=false refresh=true"
+if [[ -f "$MA_ROOT/briefs/latest.html" ]]; then
+  echo "Open last brief | bash=/usr/bin/open param1=\"$MA_ROOT/briefs/latest.html\" terminal=false"
+fi
 echo "Open library | bash=/bin/bash param1=-lc param2='$MA library --html >/dev/null; open \"$MA_ROOT/library.html\"' terminal=false refresh=true"
 echo "Known speakers | bash=/bin/bash param1=-lc param2='$MA voices --html >/dev/null; open \"$MA_ROOT/speakers/library.html\"' terminal=false refresh=true"
 echo "Open transcripts folder | bash=/usr/bin/open param1=\"$TRANSCRIPTS\" terminal=false"
@@ -382,6 +389,14 @@ echo "Process when: ${summarize_label} | size=11 color=#888888"
 echo "-- After each meeting | bash=\"$MA\" param1=setting param2=summarize_when param3=after_meeting terminal=false refresh=true"
 echo "-- Evening (when the laptop is free) | bash=\"$MA\" param1=setting param2=summarize_when param3=evening terminal=false refresh=true"
 echo "-- Manual only | bash=\"$MA\" param1=setting param2=summarize_when param3=manual terminal=false refresh=true"
+if [[ "$brief_on_login" == "true" || "$brief_on_login" == "1" ]]; then
+  echo "Open brief at login: On | bash=\"$MA\" param1=setting param2=brief_on_login param3=off terminal=false refresh=true"
+else
+  echo "Open brief at login: Off | bash=\"$MA\" param1=setting param2=brief_on_login param3=on terminal=false refresh=true"
+  if (( brief_manual_count >= 3 )); then
+    echo "Tip: try Open brief at login after a few mornings | size=11 color=#888888"
+  fi
+fi
 echo "Diagnostics | bash=\"$MA\" param1=doctor terminal=true"
 echo "Logs | bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 echo "Refresh | refresh=true"

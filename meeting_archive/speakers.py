@@ -932,6 +932,10 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
         guess, reason = dialog_prediction(ranked, conversation)
         index = models.speaker_index(profile.speaker) or 0
+        # Tiny crumbs (a cough, a "yeah") are still in the transcript as
+        # Speaker N, but asking Jacob to name them is noise. The identify
+        # window skips them unless they are the only voices left.
+        crumb = float(profile.speaking_s or 0.0) < 4.0 and int(profile.turns or 0) <= 1
         voices.append(
             {
                 "key": profile.speaker,
@@ -945,6 +949,9 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
                 "named": roster.get(profile.speaker, ""),
                 "guess": guess,
                 "reason": reason,
+                "speaking_s": round(float(profile.speaking_s or 0.0), 3),
+                "turns": int(profile.turns or 0),
+                "crumb": crumb,
                 "matches": [{"name": n, "score": round(s, 3)} for n, s in ranked],
                 "clips": [
                     {**c.to_dict(), "at": models.format_timestamp(c.start)} for c in clips

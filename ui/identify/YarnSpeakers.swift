@@ -34,8 +34,13 @@ struct Voice: Decodable {
     let named: String
     let guess: String
     let reason: String
+    let speaking_s: Double?
+    let turns: Int?
+    let crumb: Bool?
     let matches: [Match]
     let clips: [Clip]
+
+    var isCrumb: Bool { crumb ?? false }
 }
 
 struct Payload: Decodable {
@@ -440,10 +445,15 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         applyBanner(payload.banner)
         nameBox.removeAllItems()
         nameBox.addItems(withObjectValues: payload.names)
-        queue = payload.voices.filter { $0.named.isEmpty }
+        // Prefer meaningful unnamed voices. Crumbs (a cough / "yeah") stay as
+        // Speaker N in the transcript without a naming dialog.
+        let unnamed = payload.voices.filter { $0.named.isEmpty }
+        let meaningful = unnamed.filter { !$0.isCrumb }
+        queue = meaningful.isEmpty ? unnamed : meaningful
         if queue.isEmpty {
             reviewMode = true
-            queue = payload.voices
+            queue = payload.voices.filter { !$0.isCrumb }
+            if queue.isEmpty { queue = payload.voices }
         }
         if queue.isEmpty {
             fail("No separate voices were detected in this meeting.")
@@ -704,6 +714,9 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
 
     @objc func save() {
         record()
+        // One confirmation covers every other voice that already guessed the
+        // same person — diarize often splits Charles into Charles×4.
+        propagateSameName()
         advance()
     }
 
@@ -717,9 +730,35 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         if position > 0 { show(position - 1) }
     }
 
+    func propagateSameName() {
+        let name = (answers[voice.key] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        var applied = 0
+        for v in queue where v.key != voice.key {
+            if answers[v.key] != nil { continue }
+            let guess = v.guess.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !guess.isEmpty else { continue }
+            if guess.caseInsensitiveCompare(name) == .orderedSame {
+                answers[v.key] = name
+                applied += 1
+            }
+        }
+        if applied > 0 {
+            statusLabel.stringValue = applied == 1
+                ? "Also named 1 other \(name) voice"
+                : "Also named \(applied) other \(name) voices"
+            statusLabel.textColor = .secondaryLabelColor
+        }
+    }
+
     func advance() {
-        if position + 1 < queue.count {
-            show(position + 1)
+        var next = position + 1
+        while next < queue.count, answers[queue[next].key] != nil {
+            next += 1
+        }
+        if next < queue.count {
+            show(next)
         } else {
             finish()
         }

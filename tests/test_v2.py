@@ -150,9 +150,60 @@ def test_failed_process_marks_job_failed(cfg):
 def test_recover_stale_requeues_a_running_job(cfg):
     job = jobs.enqueue(cfg, "2026-09-17T13-00-00")
     jobs.begin_stage(cfg, job, "transcribe")
+    job = jobs.load(cfg, "2026-09-17T13-00-00")
+    assert job is not None
+    # Simulate the watcher dying after begin_stage stamped its pid.
+    job.worker_pid = 2_000_000_001  # not a live process
+    jobs.save(cfg, job)
     assert jobs.recover_stale(cfg) == 1
     loaded = jobs.load(cfg, "2026-09-17T13-00-00")
     assert loaded.state == jobs.QUEUED
+    assert loaded.worker_pid == 0
+
+
+def test_recover_stale_leaves_a_live_worker_alone(cfg):
+    job = jobs.enqueue(cfg, "2026-09-17T13-30-00")
+    jobs.begin_stage(cfg, job, "diarize")
+    assert jobs.recover_stale(cfg) == 0
+    loaded = jobs.load(cfg, "2026-09-17T13-30-00")
+    assert loaded.state == jobs.RUNNING
+
+
+def test_recover_stale_reclaims_processing_and_keeps_whisper_checkpoint(cfg):
+    meeting_id = "2026-09-17T13-45-00"
+    room = cfg.processing_dir / f"{meeting_id}__room.wav"
+    room.write_bytes(b"RIFF")
+    Manifest(
+        meeting_id=meeting_id,
+        channels={ROOM: room.name},
+        started_at="2026-09-17T13:45:00",
+        ended_at="2026-09-17T14:00:00",
+        duration_s=900.0,
+    ).write(cfg.processing_dir / f"{meeting_id}.json")
+    job = jobs.enqueue(cfg, meeting_id, duration_s=900.0)
+    jobs.begin_stage(cfg, job, "transcribe")
+    jobs.finish_stage(cfg, job, "transcribe")
+    pipeline._write_whisper_checkpoint(
+        cfg,
+        meeting_id,
+        [Segment(ROOM, 0.0, 1.0, "hello")],
+        model="tiny",
+        engine="test",
+    )
+    jobs.begin_stage(cfg, job, "diarize")
+    job = jobs.load(cfg, meeting_id)
+    job.worker_pid = 2_000_000_002
+    jobs.save(cfg, job)
+
+    assert jobs.recover_stale(cfg) >= 1
+    loaded = jobs.load(cfg, meeting_id)
+    assert loaded.state == jobs.QUEUED
+    assert loaded.stage_done("transcribe")
+    assert loaded.stages["diarize"].status == jobs.PENDING
+    assert (cfg.inbox_dir / f"{meeting_id}.json").exists()
+    assert (cfg.inbox_dir / room.name).exists()
+    assert not (cfg.processing_dir / f"{meeting_id}.json").exists()
+    assert jobs.whisper_checkpoint_path(cfg, meeting_id).exists()
 
 
 def test_recover_stale_completes_a_queued_job_that_already_has_a_transcript(cfg):

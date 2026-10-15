@@ -19,6 +19,7 @@
     ma ingest <id>            reindex one meeting from its transcript
     ma rebuild                reindex every transcript on disk
     ma summarize [--today]    fill in deferred summaries once Ollama is open
+    ma brief [--open]         write a local daily HTML brief from recent meetings
     ma prune                  delete archived audio past the retention window
     ma search <query>         sanity-check search without going through MCP
     ma names <id>             show detected names and the evidence for each
@@ -908,7 +909,12 @@ def cmd_delete_audio(cfg: Config, args) -> int:
 def cmd_setting(cfg: Config, args) -> int:
     raw = args.value.strip()
     lowered = raw.lower()
-    if args.key in {"recognise_known", "cleanup_enabled", "pause_on_pressure"}:
+    if args.key in {
+        "recognise_known",
+        "cleanup_enabled",
+        "pause_on_pressure",
+        "brief_on_login",
+    }:
         if lowered not in {"on", "off", "true", "false", "1", "0"}:
             print("value must be on or off", file=sys.stderr)
             return 1
@@ -924,7 +930,45 @@ def cmd_setting(cfg: Config, args) -> int:
     else:
         value = raw
     write_setting(cfg, args.key, value)
+    if args.key == "brief_on_login":
+        from . import brief as brief_mod
+
+        ma_bin = shutil.which("ma") or "/opt/homebrew/bin/ma"
+        if value:
+            path = brief_mod.install_login_agent(cfg, ma_bin)
+            print(f"login brief enabled ({path})")
+        else:
+            brief_mod.uninstall_login_agent()
+            print("login brief disabled")
     print(f"{args.key} = {value}")
+    return 0
+
+
+def cmd_brief(cfg: Config, args) -> int:
+    """Write a read-only daily HTML brief from recent meetings."""
+    from . import brief as brief_mod
+    from .summarize import SummaryUnavailable
+
+    try:
+        result = brief_mod.generate_brief(
+            cfg,
+            open_after=bool(args.open),
+            login=bool(args.login),
+            force=bool(args.force),
+        )
+    except SummaryUnavailable as exc:
+        if args.login and "on login is off" in str(exc).lower():
+            return 0
+        print(exc, file=sys.stderr)
+        return 1
+    if result.path is None:
+        return 0
+    if result.overview == "already written":
+        print(f"brief already exists: {result.path}")
+        if args.open:
+            brief_mod._open_path(result.path)  # noqa: SLF001
+        return 0
+    print(f"wrote {result.path}")
     return 0
 
 
@@ -1222,10 +1266,32 @@ def build_parser() -> argparse.ArgumentParser:
             "cleanup_enabled",
             "pause_on_pressure",
             "summarize_when",
+            "brief_on_login",
         ),
     )
     p.add_argument("value")
     p.set_defaults(func=cmd_setting)
+
+    p = sub.add_parser(
+        "brief",
+        help="write a read-only daily HTML brief from recent meetings",
+    )
+    p.add_argument(
+        "--open",
+        action="store_true",
+        help="open the brief in the browser when done",
+    )
+    p.add_argument(
+        "--login",
+        action="store_true",
+        help="login-agent mode: no-op unless brief_on_login is on",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="rewrite today's brief even if it already exists",
+    )
+    p.set_defaults(func=cmd_brief)
 
     sub.add_parser(
         "benchmark", help="time local benchmark_audio/ files if present"

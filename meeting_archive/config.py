@@ -236,6 +236,10 @@ class Config:
     def processing_status(self) -> Path:
         return self.root / ".processing-status.json"
 
+    @property
+    def briefs_dir(self) -> Path:
+        return self.root / "briefs"
+
     def all_dirs(self) -> list[Path]:
         return [
             self.in_progress_dir,
@@ -247,6 +251,7 @@ class Config:
             self.notes_dir,
             self.chroma_dir,
             self.logs_dir,
+            self.briefs_dir,
             self.jobs_dir,
         ]
 

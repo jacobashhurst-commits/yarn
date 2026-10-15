@@ -21,8 +21,10 @@ model change, only cost a reindex rather than a re-transcription.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -81,13 +83,19 @@ def _processing_status(
     audio_position_s: float | None = None,
     audio_duration_s: float | None = None,
     indeterminate: bool = False,
+    steal: bool = True,
 ) -> None:
     """Publish a tiny atomic status file for the SwiftBar menu.
 
     `percent` is stage-local and only meaningful when we have a real signal.
     Indeterminate stages still send 0 rather than inventing 65 or 82.
+    Pass steal=False for short side work (summaries) so a longer stage keeps
+    the menu bar.
     """
     from . import queue as queue_mod
+
+    if not steal and _status_owned_by_other(cfg, meeting_id):
+        return
 
     batch = queue_mod.begin_work(cfg, meeting_id)
     now = int(datetime.now().timestamp())
@@ -229,6 +237,26 @@ def _clear_processing_status(cfg: Config, meeting_id: str) -> None:
             queue_mod.end_work(cfg, meeting_id)
     except OSError:
         pass
+
+
+def _status_owned_by_other(cfg: Config, meeting_id: str) -> bool:
+    """True when another meeting still owns the menu-bar status file.
+
+    Summaries and one-shot `ma process` runs must not wipe the in-flight
+    diarize status of a longer job — that is what made the bar go idle while
+    voice separation was still running after the lid opened.
+    """
+    current = records.read_notes(cfg.processing_status)
+    owner = str(current.get("meeting_id") or "")
+    if not owner or owner == meeting_id:
+        return False
+    try:
+        stale_after = int(current.get("stale_after_epoch") or 0)
+    except (TypeError, ValueError):
+        stale_after = 0
+    if stale_after and int(datetime.now().timestamp()) >= stale_after:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +504,12 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     md_path = cfg.transcript_md(meeting_id)
     records.write_text_atomic(
         md_path,
-        records.render_markdown(transcript, labeller, notes),
+        records.render_markdown(
+            transcript,
+            labeller,
+            notes,
+            processing=records.processing_from_job(jobs.load(cfg, meeting_id)),
+        ),
     )
     if previous_md != md_path and previous_md.exists():
         previous_md.unlink()
@@ -512,8 +545,14 @@ def apply_summary(
     from . import queue as queue_mod
 
     queue_mod.refresh(cfg, exclude=meeting_id)
+    owned_status = not _status_owned_by_other(cfg, meeting_id)
     _processing_status(
-        cfg, meeting_id, "Writing summary", 0, indeterminate=True
+        cfg,
+        meeting_id,
+        "Writing summary",
+        0,
+        indeterminate=True,
+        steal=False,
     )
     try:
         transcript.summary = summarizer.summarize(
@@ -532,7 +571,10 @@ def apply_summary(
         transcript.write(path)
         raise
     finally:
-        _clear_processing_status(cfg, meeting_id)
+        # Only clear when this call owned the status file — never erase an
+        # in-flight Separate-voices card belonging to another meeting.
+        if owned_status:
+            _clear_processing_status(cfg, meeting_id)
         queue_mod.refresh(cfg)
 
 
@@ -756,12 +798,20 @@ def process(
         if not manifest.channels:
             raise ValueError(f"manifest for {meeting_id} lists no channels")
 
-        skip_whisper = job.stage_done("transcribe") and cfg.transcript_json(
-            meeting_id
-        ).exists()
+        checkpoint_path = jobs.whisper_checkpoint_path(cfg, meeting_id)
+        skip_whisper = job.stage_done("transcribe") and (
+            checkpoint_path.exists() or cfg.transcript_json(meeting_id).exists()
+        )
         if skip_whisper:
-            existing = Transcript.read(cfg.transcript_json(meeting_id))
-            segments = list(existing.segments)
+            segments = _load_whisper_segments(cfg, meeting_id, checkpoint_path)
+            if not segments:
+                skip_whisper = False
+        if skip_whisper:
+            log.info(
+                "resuming meeting=%s from Whisper checkpoint (%d segments)",
+                meeting_id,
+                len(segments),
+            )
         else:
             jobs.begin_stage(cfg, job, "transcribe")
             transcribe_started = time.perf_counter()
@@ -807,6 +857,15 @@ def process(
                     )
                 )
             jobs.finish_stage(cfg, job, "transcribe")
+            # Persist before the long diarize stage so a reboot / kill can
+            # skip Whisper and pick up at Separate voices.
+            _write_whisper_checkpoint(
+                cfg,
+                meeting_id,
+                segments,
+                model=cfg.whisper.model,
+                engine=_whisper_engine(transcriber),
+            )
             metrics.record(
                 cfg,
                 meeting_id=meeting_id,
@@ -828,7 +887,13 @@ def process(
             indeterminate=True,
         )
         diarize_started = time.perf_counter()
-        spans, diarize_error = _diarize_channels(cfg, manifest, segments, diarizer)
+        spans, diarize_error = _diarize_channels(
+            cfg,
+            manifest,
+            segments,
+            diarizer,
+            status_meeting_id=meeting_id,
+        )
         jobs.finish_stage(
             cfg,
             job,
@@ -1000,6 +1065,7 @@ def process(
             raw_turns=raw_turns,
         )
         transcript.write(cfg.transcript_json(meeting_id))
+        checkpoint_path.unlink(missing_ok=True)
 
         jobs.begin_stage(cfg, job, "index")
         _processing_status(
@@ -1049,11 +1115,52 @@ def process(
         raise
 
 
+def _write_whisper_checkpoint(
+    cfg: Config,
+    meeting_id: str,
+    segments: list[Segment],
+    *,
+    model: str,
+    engine: str,
+) -> Path:
+    """Save Whisper output before diarize so sleep/reboot can skip re-ASR."""
+    path = jobs.whisper_checkpoint_path(cfg, meeting_id)
+    payload = {
+        "meeting_id": meeting_id,
+        "model": model,
+        "whisper_engine": engine,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "segments": [segment.to_dict() for segment in segments],
+    }
+    records.write_json_atomic(path, payload)
+    return path
+
+
+def _load_whisper_segments(
+    cfg: Config, meeting_id: str, checkpoint_path: Path
+) -> list[Segment]:
+    if checkpoint_path.exists():
+        try:
+            data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            return [Segment.from_dict(item) for item in data.get("segments") or []]
+        except (OSError, ValueError, KeyError, TypeError):
+            log.exception("could not read Whisper checkpoint for %s", meeting_id)
+    transcript_path = cfg.transcript_json(meeting_id)
+    if transcript_path.exists():
+        try:
+            return list(Transcript.read(transcript_path).segments)
+        except (OSError, ValueError):
+            log.exception("could not read transcript segments for %s", meeting_id)
+    return []
+
+
 def _diarize_channels(
     cfg: Config,
     manifest: Manifest,
     segments: list[Segment],
     diarizer: "Diarizer | None",
+    *,
+    status_meeting_id: str = "",
 ) -> tuple[list[SpeakerSpan], str]:
     """Diarize the multi-person channels and attribute segments, in place.
 
@@ -1092,6 +1199,23 @@ def _diarize_channels(
             manifest.meeting_id,
         )
 
+    stop_heartbeat = threading.Event()
+    owner = status_meeting_id or manifest.meeting_id
+
+    def _beat() -> None:
+        while not stop_heartbeat.wait(60.0):
+            _processing_status(
+                cfg,
+                owner,
+                "Identifying speakers",
+                0,
+                "Analysing speaker segments",
+                indeterminate=True,
+            )
+
+    heartbeat = threading.Thread(target=_beat, name="diarize-heartbeat", daemon=True)
+    heartbeat.start()
+
     spans: list[SpeakerSpan] = []
     try:
         for channel, filename in targets:
@@ -1108,6 +1232,9 @@ def _diarize_channels(
     except Exception as exc:
         log.exception("diarization failed, continuing without speakers")
         return [], f"diarization failed: {exc}"
+    finally:
+        stop_heartbeat.set()
+        heartbeat.join(timeout=1.0)
 
     assigned = assign_speakers(segments, spans)
     log.info(

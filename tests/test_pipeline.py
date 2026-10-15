@@ -275,6 +275,52 @@ def test_markdown_explains_an_empty_transcript(cfg):
     assert "No speech was recognised" in markdown
 
 
+def test_markdown_collapses_duplicate_names_and_coalesces_turns(cfg):
+    """Display polish only: one Charles in Voices, joined consecutive turns."""
+    from meeting_archive.models import SpeakerProfile
+
+    transcript = Transcript(
+        meeting_id="2026-09-11T16-00-00",
+        segments=[],
+        turns=[
+            Turn(ROOM, 0.0, 2.0, "hello there", speaker="room-1"),
+            Turn(ROOM, 2.5, 4.0, "more from me", speaker="room-1"),
+            Turn(ROOM, 5.0, 6.0, "other person", speaker="room-2"),
+        ],
+        duration_s=60.0,
+        model="large-v3-turbo",
+        title="Demo",
+        speaker_profiles=[
+            SpeakerProfile(
+                speaker="room-1", channel=ROOM, turns=10, speaking_s=40.0, quip="hello"
+            ),
+            SpeakerProfile(
+                speaker="room-3", channel=ROOM, turns=4, speaking_s=12.0, quip="again"
+            ),
+            SpeakerProfile(
+                speaker="room-2", channel=ROOM, turns=3, speaking_s=8.0, quip="other"
+            ),
+        ],
+    )
+    roster = {"room-1": "Charles", "room-3": "Charles"}
+    notes = {"speakers": roster}
+    markdown = records.render_markdown(
+        transcript,
+        cfg.turn_labeller(roster),
+        notes=notes,
+        processing={"transcribe": "1m 00s", "diarize": "2m 00s", "total": "3m 00s"},
+    )
+    assert markdown.startswith("# Demo\n")
+    assert "**Duration:**" in markdown
+    assert "**Model:** large-v3-turbo" in markdown
+    assert "**Processing:**" in markdown and "Transcribe 1m 00s" in markdown
+    assert "## Transcript" in markdown
+    assert markdown.count("- **Charles**") == 2  # one row per track
+    assert "**Charles:** 52s across 14 turns (2 tracks)" in markdown
+    assert "hello there more from me" in markdown
+    assert "**[0:00:00–0:00:04] Charles**" in markdown
+
+
 @needs_ffmpeg
 def test_peak_dbfs_separates_digital_silence_from_signal(tmp_path):
     loud = make_wav(tmp_path / "loud.wav", [True])

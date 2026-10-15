@@ -326,16 +326,27 @@ def name_speakers_in_text(text: str, transcript: "Transcript", roster: dict) -> 
     return _SPEAKER_MENTION.sub(swap, text)
 
 
+# Display-only: join consecutive same-speaker turns when the gap is short.
+# Does not change the JSON transcript used for search / diarize / reindex.
+_DISPLAY_COALESCE_GAP_S = 45.0
+
+
 def render_markdown(
     transcript: Transcript,
     label_fn,
     notes: dict | None = None,
+    *,
+    processing: dict | None = None,
 ) -> str:
     """Human-readable transcript. Written for Jacob's eyes, not for embedding.
 
     `label_fn` takes a Turn, not a channel, so a diarized recording can label
     each voice separately. A plain channel labeller is still accepted for
     callers that predate diarization.
+
+    Formatting here is display-only. Search still indexes the JSON turns.
+    `processing` is optional stage timings from the job record
+    (e.g. {"transcribe": "4m 37s", "diarize": "1h 06m", "total": "1h 12m"}).
     """
     notes = notes or {}
     roster = speaker_roster(notes)
@@ -344,25 +355,49 @@ def render_markdown(
     label_turn = _turn_labeller(label_fn)
 
     heading = transcript.title.strip() if transcript.title else "Meeting"
-    lines = [f"# {heading} — {date_label(transcript.meeting_id)}", ""]
-    lines.append(f"- Duration: {minutes}m {seconds:02d}s")
+    lines = [f"# {heading}", ""]
+    lines.append(f"*{date_label(transcript.meeting_id)}*")
+    lines.append("")
+
+    # Same facts as before — labeled, just easier to scan.
+    lines.append(f"- **Duration:** {minutes}m {seconds:02d}s")
     if notes.get("attendees"):
-        lines.append(f"- Attendees: {notes['attendees']}")
+        lines.append(f"- **Attendees:** {notes['attendees']}")
     suggested = ", ".join(
         c.name for c in transcript.detected_names if c.attributed_to == "other"
     )
     if suggested:
-        lines.append(f"- Names heard in conversation: {suggested}")
+        lines.append(f"- **Names heard in conversation:** {suggested}")
     if notes.get("notes"):
-        lines.append(f"- Jacob's notes: {notes['notes']}")
-    lines.append(f"- Model: {transcript.model}")
+        lines.append(f"- **Notes:** {notes['notes']}")
+    if transcript.model:
+        engine = f" ({transcript.whisper_engine})" if transcript.whisper_engine else ""
+        lines.append(f"- **Model:** {transcript.model}{engine}")
     if transcript.diarize_model:
         voices = len(transcript.speaker_profiles)
-        lines.append(f"- Diarization: {transcript.diarize_model} ({voices} voices)")
+        lines.append(
+            f"- **Diarization:** {transcript.diarize_model} ({voices} voices)"
+        )
     if transcript.diarize_error:
         # Surfaced in the transcript, not just the log, because the absence of
         # speaker labels is otherwise indistinguishable from a one-person call.
-        lines.append(f"- Diarization unavailable: {transcript.diarize_error}")
+        lines.append(f"- **Diarization unavailable:** {transcript.diarize_error}")
+    if processing:
+        parts = []
+        if processing.get("transcribe"):
+            parts.append(f"Transcribe {processing['transcribe']}")
+        if processing.get("diarize"):
+            parts.append(f"Separate voices {processing['diarize']}")
+        if processing.get("recognise"):
+            parts.append(f"Match voices {processing['recognise']}")
+        if processing.get("summarize"):
+            parts.append(f"Summary {processing['summarize']}")
+        if processing.get("index"):
+            parts.append(f"Index {processing['index']}")
+        if processing.get("total"):
+            parts.append(f"Total {processing['total']}")
+        if parts:
+            lines.append(f"- **Processing:** {' · '.join(parts)}")
     lines.append("")
 
     lines.append("## Summary")
@@ -377,24 +412,47 @@ def render_markdown(
         lines.append("_No speech was available to summarize._")
     lines.append("")
 
-    # A short who-was-who block, so the numbered labels below are decodable
-    # without scrolling and without opening the JSON.
+    # Who-was-who: every diarize track, with speaking time. Same name on several
+    # tracks is kept as separate rows so you can see each track's share, then a
+    # totals line when names repeat.
     if transcript.speaker_profiles:
         lines.append("## Voices")
         lines.append("")
+        name_totals: dict[str, list[float | int]] = {}
         for profile in transcript.speaker_profiles:
             name = str(roster.get(profile.speaker, "")).strip()
-            shown = name or f"Speaker {profile.speaker.rsplit('-', 1)[-1]}"
+            index = profile.speaker.rsplit("-", 1)[-1]
+            shown = name or f"Speaker {index}"
             detail = f"{format_duration(profile.speaking_s)} across {profile.turns} turns"
             if not name:
                 detail += " — not yet identified"
+            elif name:
+                detail = f"track {index} · {detail}"
             line = f"- **{shown}** ({detail})"
             if profile.quip:
                 line += f' — said: "{profile.quip}"'
             lines.append(line)
+            if name:
+                key = name.casefold()
+                bucket = name_totals.setdefault(key, [name, 0.0, 0, 0])
+                bucket[1] = float(bucket[1]) + float(profile.speaking_s or 0.0)
+                bucket[2] = int(bucket[2]) + int(profile.turns or 0)
+                bucket[3] = int(bucket[3]) + 1
+        # Totals only when diarize split one person across multiple tracks.
+        if any(int(bucket[3]) > 1 for bucket in name_totals.values()):
+            lines.append("")
+            lines.append("**Totals**")
+            lines.append("")
+            for shown, speaking_s, turns, tracks in name_totals.values():
+                if int(tracks) <= 1:
+                    continue
+                lines.append(
+                    f"- **{shown}:** {format_duration(float(speaking_s))} "
+                    f"across {int(turns)} turns ({int(tracks)} tracks)"
+                )
         lines.append("")
 
-    lines.append("---")
+    lines.append("## Transcript")
     lines.append("")
 
     # An empty transcript and a transcript that failed to render look the same
@@ -406,13 +464,86 @@ def render_markdown(
             "microphone that was muted, unplugged, or not permitted._"
         )
         lines.append("")
-
-    for turn in transcript.turns:
-        stamp = format_timestamp(turn.start)
-        lines.append(f"**[{stamp}] {label_turn(turn)}:** {turn.text}")
-        lines.append("")
+    else:
+        # Formatting only: join consecutive same-speaker turns so the page
+        # breathes. JSON / search still use the original turn list.
+        for speaker, start, end, text in _coalesce_turns_for_display(
+            transcript.turns, label_turn
+        ):
+            start_stamp = format_timestamp(start)
+            if end - start >= 1.0:
+                stamp = f"{start_stamp}–{format_timestamp(end)}"
+            else:
+                stamp = start_stamp
+            lines.append(f"**[{stamp}] {speaker}**")
+            lines.append("")
+            lines.append(text)
+            lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_processing_span(seconds: float) -> str:
+    """Like format_duration, but uses hours once a stage runs past an hour."""
+    total = max(0, int(seconds))
+    if total < 3600:
+        return format_duration(total)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    return f"{hours}h {minutes:02d}m"
+
+
+def processing_from_job(job) -> dict[str, str]:
+    """Human stage timings for the markdown header, from a jobs.Job-like object."""
+    if job is None:
+        return {}
+    stages = getattr(job, "stages", None) or {}
+    out: dict[str, str] = {}
+    total = 0.0
+    for name in ("transcribe", "diarize", "recognise", "summarize", "index"):
+        stage = stages.get(name) if isinstance(stages, dict) else None
+        if stage is None:
+            continue
+        status = getattr(stage, "status", "") or (
+            stage.get("status") if isinstance(stage, dict) else ""
+        )
+        duration = getattr(stage, "duration_s", None)
+        if duration is None and isinstance(stage, dict):
+            duration = stage.get("duration_s")
+        try:
+            duration_s = float(duration or 0.0)
+        except (TypeError, ValueError):
+            duration_s = 0.0
+        if status in ("done", "skipped") and duration_s > 0:
+            out[name] = _format_processing_span(duration_s)
+            total += duration_s
+    if total > 0:
+        out["total"] = _format_processing_span(total)
+    return out
+
+
+def _coalesce_turns_for_display(
+    turns: list,
+    label_turn,
+    gap_s: float = _DISPLAY_COALESCE_GAP_S,
+) -> list[tuple[str, float, float, str]]:
+    """Join consecutive same-speaker turns for readable Markdown only."""
+    blocks: list[tuple[str, float, float, str]] = []
+    for turn in turns:
+        speaker = label_turn(turn)
+        text = (turn.text or "").strip()
+        if not text:
+            continue
+        if (
+            blocks
+            and blocks[-1][0] == speaker
+            and turn.start - blocks[-1][2] <= gap_s
+        ):
+            prev_speaker, start, _, prev_text = blocks[-1]
+            blocks[-1] = (prev_speaker, start, turn.end, f"{prev_text} {text}".strip())
+        else:
+            blocks.append((speaker, turn.start, turn.end, text))
+    return blocks
 
 
 def _turn_labeller(label_fn):
