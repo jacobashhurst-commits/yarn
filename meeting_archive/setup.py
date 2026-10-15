@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -707,12 +708,59 @@ def ollama_model_names(list_output: str) -> set[str]:
 
 
 def _percent_in(line: str) -> int | None:
-    import re
-
     match = re.search(r"(\d{1,3})\s*%", line)
     if not match:
         return None
     return min(100, int(match.group(1)))
+
+
+# Ollama redraws one status line with cursor codes. Shown raw, a dropped
+# download looks like "[?2026h[?25l[1Gpulling manifest".
+_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_CONTROL = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b.")
+
+# A dropped connection. `ollama pull` keeps the layers it already wrote.
+_TRANSIENT_DOWNLOAD = (
+    "unexpected eof",
+    "connection reset",
+    "broken pipe",
+    "i/o timeout",
+    "timeout",
+    "temporarily unavailable",
+    "tls handshake",
+    "connection refused",
+    "network is unreachable",
+    "stream error",
+)
+PULL_ATTEMPTS = 4
+
+
+def _take_status(pending: str) -> tuple[list[str], str]:
+    """Split a chunk of Ollama's redrawn status. Keep a cut-off escape."""
+    hold = ""
+    cut = pending.rfind("\x1b")
+    if cut != -1:
+        tail = pending[cut:]
+        unfinished = tail == "\x1b" or (
+            tail.startswith("\x1b[") and _CSI.match(tail) is None
+        )
+        if unfinished:
+            hold = tail
+            pending = pending[:cut]
+    cleaned = _CONTROL.sub("\n", pending.replace("\r", "\n"))
+    parts = [part.strip() for part in cleaned.split("\n")]
+    rest = parts.pop() if parts else ""
+    # A following escape means the text before it was one finished redraw.
+    if hold:
+        if rest:
+            parts.append(rest)
+        rest = hold
+    return [part for part in parts if part], rest
+
+
+def _transient_download(detail: str) -> bool:
+    text = detail.lower()
+    return any(needle in text for needle in _TRANSIENT_DOWNLOAD)
 
 
 def ensure_ollama_ready(binary: str) -> str:
@@ -744,6 +792,29 @@ def pull_ollama_model(binary: str, model: str, label: str) -> None:
             "note": LONG_DOWNLOAD_NOTE,
         }
     )
+    last_error = ""
+    for attempt in range(1, PULL_ATTEMPTS + 1):
+        if attempt > 1:
+            emit(
+                {
+                    "type": "log",
+                    "id": "ollama",
+                    "text": "The download dropped. Trying again. What already arrived is kept.",
+                    "note": LONG_DOWNLOAD_NOTE,
+                }
+            )
+            time.sleep(min(8, 2 * attempt))
+        try:
+            _pull_ollama_once(binary, model, label)
+            return
+        except RuntimeError as exc:
+            last_error = str(exc)
+            if attempt == PULL_ATTEMPTS or not _transient_download(last_error):
+                raise
+    raise RuntimeError(last_error)
+
+
+def _pull_ollama_once(binary: str, model: str, label: str) -> None:
     proc = subprocess.Popen(
         [binary, "pull", model],
         stdout=subprocess.PIPE,
@@ -754,25 +825,22 @@ def pull_ollama_model(binary: str, model: str, label: str) -> None:
     last = -1
     tail: list[str] = []
     stream = proc.stdout
+    pending = ""
     if stream is not None:
-        pending = ""
         while True:
             chunk = stream.read(256)
             if not chunk:
                 break
-            pending += chunk.replace("\r", "\n")
-            lines = pending.split("\n")
-            pending = lines.pop() if lines else ""
-            for raw in lines:
-                clean = raw.strip()
-                if not clean:
-                    continue
+            lines, pending = _take_status(pending + chunk)
+            for clean in lines:
                 tail.append(clean)
                 tail[:] = tail[-8:]
                 percent = _percent_in(clean)
                 if percent is not None and percent != last:
                     last = percent
                     emit({"type": "progress", "id": "ollama", "percent": min(percent, 99)})
+    if pending.strip():
+        tail.append(pending.strip())
     code = proc.wait(timeout=3600)
     if code != 0:
         detail = " ".join(tail)[-400:]

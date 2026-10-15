@@ -224,6 +224,97 @@ def test_pull_progress_reads_a_percent():
     assert yarn_setup._percent_in("pulling manifest") is None
 
 
+def test_ollama_status_hides_cursor_codes():
+    raw = (
+        "\x1b[?2026h\x1b[?25l\x1b[1Gpulling manifest "
+        "\x1b[?2026h\x1b[?25l\x1b[1GError: unexpected EOF"
+    )
+    lines, rest = yarn_setup._take_status(raw)
+    assert lines == ["pulling manifest"]
+    assert rest == "Error: unexpected EOF"
+    assert "\x1b" not in " ".join(lines)
+    assert "[?2026h" not in " ".join(lines)
+
+
+def test_ollama_pull_retries_a_dropped_download(monkeypatch):
+    class Stream:
+        def __init__(self, text: str):
+            self.text = text
+            self.sent = False
+
+        def read(self, _n: int) -> str:
+            if self.sent:
+                return ""
+            self.sent = True
+            return self.text
+
+    class Proc:
+        def __init__(self, text: str, code: int):
+            self.stdout = Stream(text)
+            self.code = code
+
+        def wait(self, timeout: int = 0) -> int:
+            return self.code
+
+    scripts = [
+        ("\x1b[?25l\x1b[1GError: unexpected EOF\n", 1),
+        ("pulling qwen 100%\n", 0),
+    ]
+    made: list[list[str]] = []
+
+    def popen(argv, **_kwargs):
+        made.append(list(argv))
+        text, code = scripts.pop(0)
+        return Proc(text, code)
+
+    monkeypatch.setattr(yarn_setup.subprocess, "Popen", popen)
+    monkeypatch.setattr(yarn_setup.time, "sleep", lambda _s: None)
+    notes: list[str] = []
+    monkeypatch.setattr(
+        yarn_setup,
+        "emit",
+        lambda payload: notes.append(str(payload.get("text") or "")),
+    )
+
+    yarn_setup.pull_ollama_model("ollama", "qwen3.5:4b", "Fast")
+
+    assert made == [["ollama", "pull", "qwen3.5:4b"], ["ollama", "pull", "qwen3.5:4b"]]
+    assert any("Trying again" in note for note in notes)
+    assert not any("[?25l" in note or "\x1b" in note for note in notes)
+
+
+def test_ollama_pull_does_not_retry_a_real_refusal(monkeypatch):
+    class Stream:
+        def __init__(self):
+            self.sent = False
+
+        def read(self, _n: int) -> str:
+            if self.sent:
+                return ""
+            self.sent = True
+            return "Error: model 'nope' not found\n"
+
+    class Proc:
+        def __init__(self):
+            self.stdout = Stream()
+
+        def wait(self, timeout: int = 0) -> int:
+            return 1
+
+    calls = {"n": 0}
+
+    def popen(argv, **_kwargs):
+        calls["n"] += 1
+        return Proc()
+
+    monkeypatch.setattr(yarn_setup.subprocess, "Popen", popen)
+    monkeypatch.setattr(yarn_setup, "emit", lambda _payload: None)
+
+    with pytest.raises(RuntimeError, match="not found"):
+        yarn_setup.pull_ollama_model("ollama", "nope", "Fast")
+    assert calls["n"] == 1
+
+
 def test_faster_whisper_repo_names_the_huggingface_id():
     assert (
         yarn_setup.faster_whisper_repo("large-v3-turbo")
