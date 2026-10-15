@@ -190,6 +190,25 @@ def test_write_summary_model_appends_and_replaces(tmp_path):
     assert 'model = "qwen3.5:4b"' not in text
 
 
+def test_sherpa_runtime_is_linked_beside_the_extension(tmp_path):
+    site = tmp_path
+    sherpa_lib = site / "sherpa_onnx" / "lib"
+    capi = site / "onnxruntime" / "capi"
+    sherpa_lib.mkdir(parents=True)
+    capi.mkdir(parents=True)
+    real = capi / "libonnxruntime.1.30.0.dylib"
+    real.write_bytes(b"dylib")
+
+    yarn_setup.link_sherpa_runtime(site)
+
+    for name in ("libonnxruntime.dylib", "libonnxruntime.1.dylib"):
+        link = sherpa_lib / name
+        assert link.is_symlink()
+        assert link.resolve() == real.resolve()
+    yarn_setup.link_sherpa_runtime(site)
+    assert (sherpa_lib / "libonnxruntime.dylib").resolve() == real.resolve()
+
+
 def test_ollama_list_names_match_what_summaries_check():
     listing = (
         "NAME          ID    SIZE    MODIFIED\n"

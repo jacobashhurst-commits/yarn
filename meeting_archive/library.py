@@ -138,7 +138,7 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
             f"<td>{title}</td>"
             f"<td>{_esc(row.state)}</td>"
             f"<td>{mins}m {secs:02d}s</td>"
-            f"<td>{row.confirmed}/{row.speakers or '-'}</td>"
+            f"<td>{row.confirmed}/{row.speakers}</td>"
             f"<td>{summary}</td>"
             f"<td>{audio}</td>"
             "</tr>"

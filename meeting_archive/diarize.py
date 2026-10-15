@@ -104,7 +104,7 @@ class Diarizer:
         try:
             import sherpa_onnx
         except ImportError as exc:
-            self._unavailable = "sherpa-onnx is not installed. Run: pip install -e ."
+            self._unavailable = f"sherpa-onnx could not load: {exc}"
             raise DiarizationUnavailable(self._unavailable) from exc
 
         segmentation = Path(self.config.segmentation_model).expanduser()

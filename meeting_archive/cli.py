@@ -241,8 +241,8 @@ def cmd_doctor(cfg: Config, args) -> int:
                     f"{', '.join(missing)}. Without them every voice on a call "
                     f"stays '{cfg.other_label}' and a room stays '{cfg.room_label}'."
                 )
-        except ImportError:
-            print("[warn] diarization -- sherpa-onnx not installed; pip install -e .")
+        except ImportError as exc:
+            print(f"[warn] diarization -- sherpa-onnx could not load: {exc}")
 
     if cfg.summary.enabled:
         command = Path(cfg.summary.command).expanduser()

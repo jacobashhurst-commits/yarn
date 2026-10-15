@@ -348,7 +348,64 @@ def step_deps(repo: Path) -> None:
     ma = repo / ".venv" / "bin" / "ma"
     if not ma.is_file():
         raise RuntimeError("Yarn installed but the `ma` command is missing.")
+    link_sherpa_runtime(site_packages(repo))
+    verify_runtime_imports(repo)
     emit({"type": "log", "id": "deps", "text": f"ma is at {ma}"})
+    emit({"type": "log", "id": "deps", "text": "Speaker identification can load"})
+
+
+def site_packages(repo: Path) -> Path:
+    py = venv_python(repo)
+    proc = run(
+        [str(py), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        timeout=30,
+    )
+    path = Path((proc.stdout or "").strip())
+    if proc.returncode != 0 or not path.is_dir():
+        raise RuntimeError("Could not find the Python environment.")
+    return path
+
+
+def link_sherpa_runtime(site: Path) -> None:
+    """Put onnxruntime where the sherpa-onnx Mac wheel actually looks.
+
+    The wheel links @rpath/libonnxruntime.dylib and does not ship that file.
+    The installed onnxruntime library then asks for @rpath/libonnxruntime.1.dylib.
+    Both names have to sit beside the sherpa extension, or every meeting is
+    labelled with no speakers and the library says sherpa-onnx is not installed.
+    """
+    sherpa_lib = site / "sherpa_onnx" / "lib"
+    dylibs = sorted((site / "onnxruntime" / "capi").glob("libonnxruntime*.dylib"))
+    if not sherpa_lib.is_dir():
+        raise RuntimeError("sherpa-onnx is missing from the install.")
+    if not dylibs:
+        raise RuntimeError(
+            "onnxruntime is missing, so speaker identification cannot start."
+        )
+    real = dylibs[-1]
+    for name in ("libonnxruntime.dylib", "libonnxruntime.1.dylib"):
+        dest = sherpa_lib / name
+        if dest.is_symlink() or dest.exists():
+            if dest.is_symlink() and dest.resolve() == real.resolve():
+                continue
+            dest.unlink()
+        dest.symlink_to(real)
+
+
+def verify_runtime_imports(repo: Path) -> None:
+    py = venv_python(repo)
+    proc = run(
+        [
+            str(py),
+            "-c",
+            "import faster_whisper, sounddevice, chromadb, sherpa_onnx\n"
+            "print('runtime imports ok')\n",
+        ],
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "import failed").strip()[-1500:]
+        raise RuntimeError(f"Speaker identification could not start.\n{detail}")
 
 
 def _brew_install(formula: str, cask: bool = False, step_id: str = "tools") -> bool:
