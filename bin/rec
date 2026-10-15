@@ -265,17 +265,31 @@ do_stop() {
     expected_duration=0
   fi
 
-  # SIGINT, not SIGKILL: ffmpeg needs to write the wav header on the way out.
+  # SIGINT, not SIGKILL: the capture process finishes the wav header on the
+  # way out. Prefer launchctl when the job is launchd-managed — plain kill
+  # usually works, but abort_failed_start already uses this path for the
+  # same reason, and Stop should match.
   if kill -0 "$pid" 2>/dev/null; then
-    kill -INT "$pid" 2>/dev/null || true
+    if recorder_agent_installed; then
+      launchctl kill SIGINT "gui/$(id -u)/$RECORDER_LABEL" 2>/dev/null \
+        || kill -INT "$pid" 2>/dev/null || true
+    else
+      kill -INT "$pid" 2>/dev/null || true
+    fi
     local waited=0
     while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 20 ]]; do
       sleep 0.5
       waited=$((waited + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
-      echo "rec: ffmpeg did not exit cleanly, forcing" >&2
-      kill -9 "$pid" 2>/dev/null || true
+      echo "rec: capture did not exit cleanly, forcing" >&2
+      log_line "capture pid $pid ignored SIGINT; sending SIGKILL"
+      if recorder_agent_installed; then
+        launchctl kill SIGKILL "gui/$(id -u)/$RECORDER_LABEL" 2>/dev/null \
+          || kill -9 "$pid" 2>/dev/null || true
+      else
+        kill -9 "$pid" 2>/dev/null || true
+      fi
       sleep 1
     fi
   fi

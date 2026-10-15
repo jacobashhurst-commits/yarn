@@ -70,6 +70,17 @@ sed -e "s|__MA_ROOT__|$MA_ROOT|g" \
     "$REPO_DIR/ui/meeting.5s.sh.template" > "$PLUGIN"
 chmod +x "$PLUGIN"
 info "plugin written to $PLUGIN"
+info "Stop/Start invoke: $REC"
+
+# Keep a brew-prefix `rec` symlink when `ma` lives there, so an older plugin
+# that still points at /opt/homebrew/bin/rec keeps working after reinstall.
+MA_PREFIX="$(cd "$(dirname "$MA_BIN")" && pwd)"
+if [[ -w "$MA_PREFIX" && ! -e "$MA_PREFIX/rec" ]]; then
+  ln -sf "$REC" "$MA_PREFIX/rec"
+  info "symlinked $MA_PREFIX/rec -> $REC"
+elif [[ -L "$MA_PREFIX/rec" ]]; then
+  ln -sf "$REC" "$MA_PREFIX/rec"
+fi
 
 # ---------------------------------------------------------------------------
 say "2/4  Recorder (LaunchAgent)"

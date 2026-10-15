@@ -12,6 +12,15 @@ export PATH="__BREW_BIN__:/usr/bin:/bin:/usr/sbin:/sbin"
 MA_ROOT="__MA_ROOT__"
 REC="__REC__"
 MA="__MA_BIN__"
+# If install baked a stale path (e.g. a brew symlink that was never created),
+# Start/Stop fail silently under SwiftBar (terminal=false). Surface it.
+if [[ ! -x "$REC" ]]; then
+  echo "Yarn ⚠"
+  echo "---"
+  echo "rec missing at $REC | color=red"
+  echo "Fix: re-run ui/install-ui.sh from the yarn repo | color=#888888"
+  exit 0
+fi
 STATE_FILE="$MA_ROOT/.recording"
 TRANSCRIPTS="$MA_ROOT/transcripts"
 INBOX="$MA_ROOT/recordings/inbox"
