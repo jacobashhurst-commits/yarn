@@ -273,14 +273,19 @@ def test_ollama_pull_retries_a_dropped_download(monkeypatch):
     monkeypatch.setattr(
         yarn_setup,
         "emit",
-        lambda payload: notes.append(str(payload.get("text") or "")),
+        lambda payload: notes.append(
+            str(payload.get("text") or "") + "\n" + str(payload.get("note") or "")
+        ),
     )
 
     yarn_setup.pull_ollama_model("ollama", "qwen3.5:4b", "Fast")
 
     assert made == [["ollama", "pull", "qwen3.5:4b"], ["ollama", "pull", "qwen3.5:4b"]]
-    assert any("Trying again" in note for note in notes)
-    assert not any("[?25l" in note or "\x1b" in note for note in notes)
+    joined = "\n".join(notes)
+    assert "Continuing from what already arrived" in joined
+    assert "Downloading Fast" in joined
+    assert "dropped" not in joined.lower()
+    assert "[?25l" not in joined and "\x1b" not in joined
 
 
 def test_ollama_pull_does_not_retry_a_real_refusal(monkeypatch):

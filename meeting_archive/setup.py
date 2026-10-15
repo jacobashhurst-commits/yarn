@@ -795,12 +795,16 @@ def pull_ollama_model(binary: str, model: str, label: str) -> None:
     last_error = ""
     for attempt in range(1, PULL_ATTEMPTS + 1):
         if attempt > 1:
+            # The first connection often closes before any bytes land. The
+            # next pull continues, so the window should keep saying that it
+            # is downloading. "Dropped" sat on screen for the whole retry
+            # and looked like the install had stopped.
             emit(
                 {
                     "type": "log",
                     "id": "ollama",
-                    "text": "The download dropped. Trying again. What already arrived is kept.",
-                    "note": LONG_DOWNLOAD_NOTE,
+                    "text": f"Downloading {label} ({model})",
+                    "note": "The connection blinked. Continuing from what already arrived.",
                 }
             )
             time.sleep(min(8, 2 * attempt))
