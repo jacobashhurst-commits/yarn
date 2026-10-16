@@ -32,6 +32,7 @@ from .models import (
     Turn,
     format_duration,
     format_timestamp,
+    speaker_display_indices,
     speaker_index,
 )
 
@@ -312,9 +313,10 @@ def name_speakers_in_text(text: str, transcript: "Transcript", roster: dict) -> 
     """
     if not text or not roster:
         return text
+    display = speaker_display_indices(transcript.speaker_profiles)
     by_index: dict[int, str | None] = {}
     for profile in transcript.speaker_profiles:
-        index = speaker_index(profile.speaker)
+        index = display.get(profile.speaker)
         if index is None:
             continue
         name = str(roster.get(profile.speaker) or "").strip()
@@ -412,44 +414,48 @@ def render_markdown(
         lines.append("_No speech was available to summarize._")
     lines.append("")
 
-    # Who-was-who: every diarize track, with speaking time. Same name on several
-    # tracks is kept as separate rows so you can see each track's share, then a
-    # totals line when names repeat.
+    # One row per person. A clear voice that diarization split into several
+    # tracks is still one person once they share a name.
     if transcript.speaker_profiles:
         lines.append("## Voices")
         lines.append("")
-        name_totals: dict[str, list[float | int]] = {}
+        named: dict[str, dict] = {}
+        unnamed: list = []
         for profile in transcript.speaker_profiles:
             name = str(roster.get(profile.speaker, "")).strip()
-            index = profile.speaker.rsplit("-", 1)[-1]
-            shown = name or f"Speaker {index}"
-            detail = f"{format_duration(profile.speaking_s)} across {profile.turns} turns"
             if not name:
-                detail += ", not yet identified"
-            elif name:
-                detail = f"track {index} · {detail}"
-            line = f"- **{shown}** ({detail})"
+                unnamed.append(profile)
+                continue
+            key = name.casefold()
+            bucket = named.setdefault(
+                key,
+                {"name": name, "speaking_s": 0.0, "turns": 0, "quip": "", "quip_s": -1.0},
+            )
+            speaking = float(profile.speaking_s or 0.0)
+            bucket["speaking_s"] += speaking
+            bucket["turns"] += int(profile.turns or 0)
+            if profile.quip and speaking >= float(bucket["quip_s"]):
+                bucket["quip"] = profile.quip
+                bucket["quip_s"] = speaking
+        for bucket in named.values():
+            detail = (
+                f"{format_duration(bucket['speaking_s'])} across {bucket['turns']} turns"
+            )
+            line = f"- **{bucket['name']}** ({detail})"
+            if bucket["quip"]:
+                line += f' said: "{bucket["quip"]}"'
+            lines.append(line)
+        display = speaker_display_indices(transcript.speaker_profiles)
+        for profile in unnamed:
+            index = display.get(profile.speaker) or speaker_index(profile.speaker) or "?"
+            detail = (
+                f"{format_duration(profile.speaking_s)} across {profile.turns} turns, "
+                "not yet identified"
+            )
+            line = f"- **Speaker {index}** ({detail})"
             if profile.quip:
                 line += f' said: "{profile.quip}"'
             lines.append(line)
-            if name:
-                key = name.casefold()
-                bucket = name_totals.setdefault(key, [name, 0.0, 0, 0])
-                bucket[1] = float(bucket[1]) + float(profile.speaking_s or 0.0)
-                bucket[2] = int(bucket[2]) + int(profile.turns or 0)
-                bucket[3] = int(bucket[3]) + 1
-        # Totals only when diarize split one person across multiple tracks.
-        if any(int(bucket[3]) > 1 for bucket in name_totals.values()):
-            lines.append("")
-            lines.append("**Totals**")
-            lines.append("")
-            for shown, speaking_s, turns, tracks in name_totals.values():
-                if int(tracks) <= 1:
-                    continue
-                lines.append(
-                    f"- **{shown}:** {format_duration(float(speaking_s))} "
-                    f"across {int(turns)} turns ({int(tracks)} tracks)"
-                )
         lines.append("")
 
     lines.append("## Transcript")

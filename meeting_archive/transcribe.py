@@ -107,6 +107,7 @@ class Transcriber:
             else None
         )
 
+        prompt = (self.config.initial_prompt or "").strip() or None
         segments_iter, info = self.model.transcribe(
             str(path),
             language=self.config.language,
@@ -114,6 +115,7 @@ class Transcriber:
             vad_filter=self.config.vad_filter,
             vad_parameters=vad_parameters,
             condition_on_previous_text=self.config.condition_on_previous_text,
+            initial_prompt=prompt,
         )
 
         segments: list[Segment] = []
@@ -206,6 +208,9 @@ class Transcriber:
                 "-oj",
                 "-of", str(output_base),
             ]
+            prompt = (self.config.initial_prompt or "").strip()
+            if prompt:
+                cmd.extend(["--prompt", prompt])
             stderr_path = tmp_dir / "stderr.log"
             with stderr_path.open("w", encoding="utf-8") as stderr:
                 proc = subprocess.Popen(

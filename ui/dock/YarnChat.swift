@@ -131,10 +131,11 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         history.alignment = .leading
         history.spacing = 2
         history.translatesAutoresizingMaskIntoConstraints = false
-        let historyDoc = NSView()
+        let historyDoc = FlippedView()
         historyDoc.translatesAutoresizingMaskIntoConstraints = false
         historyDoc.addSubview(history)
         historyScroll.translatesAutoresizingMaskIntoConstraints = false
+        historyScroll.contentView = FlippedClipView()
         historyScroll.hasVerticalScroller = true
         historyScroll.drawsBackground = false
         historyScroll.borderType = .noBorder
@@ -486,8 +487,8 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         style.lineSpacing = 3
         style.paragraphSpacing = 8
         let color = YarnColor.ink
-        let base = NSFont.systemFont(ofSize: 15)
-        let bold = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        let base = Self.chatFont(weight: .regular)
+        let bold = Self.chatFont(weight: .semibold)
         let result = NSMutableAttributedString()
         var rest = bulleted[...]
         func append(_ part: Substring, font: NSFont) {
@@ -517,13 +518,10 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func bubble(_ text: String, mine: Bool) -> NSView {
         let available = max(scroller.contentView.bounds.width, 640)
         let textWidth = mine ? min(520, available * 0.72) : available * 0.92
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.maximumNumberOfLines = 0
-        label.lineBreakMode = .byWordWrapping
-        label.preferredMaxLayoutWidth = textWidth
-        label.attributedStringValue = mine
-            ? plain(text, size: 15, color: .white)
+        let attributed = mine
+            ? plain(text, size: Self.chatSize, color: .white)
             : yarnText(text)
+        let label = BubbleTextView(attributed: attributed, wrapWidth: textWidth)
         label.translatesAutoresizingMaskIntoConstraints = false
 
         let chip = BubbleBackdrop(mine: mine)
@@ -534,6 +532,7 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             label.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -10),
             label.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 14),
             label.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -14),
+            label.widthAnchor.constraint(equalToConstant: textWidth),
             chip.widthAnchor.constraint(lessThanOrEqualToConstant: textWidth + 28),
         ])
 
@@ -562,12 +561,26 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         scroller.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroller.reflectScrolledClipView(scroller.contentView)
     }
+
+    private static let chatSize: CGFloat = 13
+
+    private static func chatFont(weight: NSFont.Weight = .regular) -> NSFont {
+        .systemFont(ofSize: chatSize, weight: weight)
+    }
 }
 
 private struct Thread {
     var id: String
     var updated: TimeInterval
     var turns: [(role: String, text: String)]
+}
+
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
 }
 
 private final class HistoryRow: NSButton {
@@ -651,6 +664,46 @@ private final class AskButton: NSButton {
             ),
             withAttributes: attrs
         )
+    }
+}
+
+/// Rich chat text you can select and copy. ``NSTextField`` drops bold and
+/// bullets when the field editor opens on click; a read-only text view keeps them.
+private final class BubbleTextView: NSTextView {
+    private let wrapWidth: CGFloat
+
+    init(attributed: NSAttributedString, wrapWidth: CGFloat) {
+        self.wrapWidth = wrapWidth
+        let container = NSTextContainer(size: NSSize(width: wrapWidth, height: 1.0e7))
+        container.widthTracksTextView = false
+        container.lineFragmentPadding = 0
+        let layout = NSLayoutManager()
+        let storage = NSTextStorage()
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        super.init(frame: .zero, textContainer: container)
+        storage.setAttributedString(attributed)
+        isEditable = false
+        isSelectable = true
+        isRichText = true
+        drawsBackground = false
+        backgroundColor = .clear
+        isVerticallyResizable = true
+        isHorizontallyResizable = false
+        textContainerInset = .zero
+        maxSize = NSSize(width: wrapWidth, height: 1.0e7)
+        minSize = NSSize(width: wrapWidth, height: 0)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        guard let layout = layoutManager, let container = textContainer else {
+            return NSSize(width: wrapWidth, height: 1)
+        }
+        layout.ensureLayout(for: container)
+        let used = layout.usedRect(for: container)
+        return NSSize(width: wrapWidth, height: max(1, ceil(used.height)))
     }
 }
 

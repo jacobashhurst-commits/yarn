@@ -20,6 +20,48 @@ def cfg(tmp_path) -> Config:
     return config
 
 
+def test_draft_prompt_writes_the_email_from_the_passages():
+    prompt = build_prompt(
+        "Write me a summary email for my last meeting",
+        [{"document": "We agreed Friday.", "metadata": {"date_label": "16 Oct"}}],
+    )
+    assert "Compose it yourself" in prompt
+    assert "Subject line" in prompt
+    assert "could not find an email" in prompt
+    assert "We agreed Friday." in prompt
+
+
+def test_last_meeting_uses_that_transcript_not_a_keyword_search(cfg: Config, monkeypatch):
+    from meeting_archive.models import Turn
+    from meeting_archive.records import Transcript
+
+    meeting_id = "2026-10-16T09-30-43"
+    transcript = Transcript(
+        meeting_id=meeting_id,
+        summary="Jacob and Mariko planned the discovery call.",
+        turns=[Turn("room", 0.0, 5.0, "ask about revenue at the end", speaker="room-1")],
+        title="Heidi Health prep",
+    )
+    path = cfg.transcript_json(meeting_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write(path)
+    called: list[str] = []
+    monkeypatch.setattr(
+        "meeting_archive.ask.search_meetings",
+        lambda *_args, **_kwargs: called.append("search") or [],
+    )
+    seen: list[str] = []
+
+    def complete(prompt: str) -> str:
+        seen.append(prompt)
+        return "Draft."
+
+    ask(cfg, "Write me a summary email for my last meeting", complete=complete, remember=False)
+    assert called == []
+    assert "Mariko" in seen[0]
+    assert "Compose it yourself" in seen[0]
+
+
 def test_prompt_stays_inside_the_passages():
     prompt = build_prompt(
         "what did we decide",
@@ -103,6 +145,68 @@ def test_followup_sees_the_earlier_chat(cfg: Config, monkeypatch):
     assert "Earlier in this chat" in seen[0]
     assert "pricing" in seen[0]
     assert [item["role"] for item in chat_log(cfg)] == ["you", "yarn", "you", "yarn"]
+
+
+def test_follow_up_email_uses_the_meeting_named_earlier(cfg: Config, monkeypatch):
+    from meeting_archive.ask import save_store
+    from meeting_archive.models import Turn
+    from meeting_archive.records import Transcript, write_notes
+
+    heidi = "2026-10-16T09-30-43"
+    other = "2026-10-15T12-03-49"
+    for meeting_id, title, summary in (
+        (heidi, "Heidi Health prep", "Mariko will lead the discovery call."),
+        (other, "MYOB", "MYOB wants an implementation plan."),
+    ):
+        transcript = Transcript(
+            meeting_id=meeting_id,
+            summary=summary,
+            turns=[Turn("room", 0.0, 5.0, summary, speaker="room-1")],
+            title=title,
+        )
+        path = cfg.transcript_json(meeting_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write(path)
+    write_notes(
+        cfg.notes_json(heidi),
+        heidi,
+        notes="Heidi Health prep for first validate call",
+        attendees="Mariko, Jacob",
+    )
+    write_notes(cfg.notes_json(other), other, notes="MYOB next steps", attendees="Charles")
+    save_store(
+        cfg,
+        {
+            "active": "email",
+            "chats": [
+                {
+                    "id": "email",
+                    "updated": 1,
+                    "turns": [
+                        {
+                            "role": "you",
+                            "text": "the meeting from heidi health from today",
+                        },
+                        {"role": "yarn", "text": "I could not find it in the meetings."},
+                    ],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "meeting_archive.ask.search_meetings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("searched")),
+    )
+    seen: list[str] = []
+
+    def complete(prompt: str) -> str:
+        seen.append(prompt)
+        return "Subject: Heidi Health\n\nThanks for the call."
+
+    ask(cfg, "I want you to write me the email", complete=complete, remember=False)
+    assert "Mariko will lead" in seen[0]
+    assert "MYOB" not in seen[0]
+    assert "Subject line" in seen[0]
 
 
 def test_request_chat_leaves_a_flag_and_does_not_script(cfg: Config, monkeypatch):

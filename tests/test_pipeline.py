@@ -325,8 +325,9 @@ def test_markdown_collapses_duplicate_names_and_coalesces_turns(cfg):
     assert "**Model:** large-v3-turbo" in markdown
     assert "**Processing:**" in markdown and "Transcribe 1m 00s" in markdown
     assert "## Transcript" in markdown
-    assert markdown.count("- **Charles**") == 2  # one row per track
-    assert "**Charles:** 52s across 14 turns (2 tracks)" in markdown
+    assert markdown.count("- **Charles**") == 1
+    assert "52s across 14 turns" in markdown
+    assert "tracks)" not in markdown
     assert "hello there more from me" in markdown
     assert "**[0:00:00–0:00:04] Charles**" in markdown
 

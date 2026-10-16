@@ -798,6 +798,30 @@ private func countFiles(_ dir: String, suffix: String) -> Int {
     return count
 }
 
+/// Cmd-C and Cmd-V only fire when the app has an Edit menu. Without it,
+/// the chat field and the answer text cannot copy or paste.
+private func editMenu() -> NSMenu {
+    let main = NSMenu()
+    let editItem = NSMenuItem()
+    editItem.title = "Edit"
+    let edit = NSMenu(title: "Edit")
+    func item(_ title: String, _ action: Selector, _ key: String, shift: Bool = false) -> NSMenuItem {
+        let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        entry.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]
+        return entry
+    }
+    edit.addItem(item("Undo", Selector(("undo:")), "z"))
+    edit.addItem(item("Redo", Selector(("redo:")), "Z", shift: true))
+    edit.addItem(.separator())
+    edit.addItem(item("Cut", #selector(NSText.cut(_:)), "x"))
+    edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c"))
+    edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v"))
+    edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a"))
+    editItem.submenu = edit
+    main.addItem(editItem)
+    return main
+}
+
 private func markImage() -> NSImage? {
     guard let url = Bundle.main.url(forResource: "yarn-mark", withExtension: "png") else { return nil }
     return NSImage(contentsOf: url)
@@ -810,6 +834,7 @@ enum YarnDock {
         let delegate = Panel()
         app.delegate = delegate
         app.setActivationPolicy(.regular)
+        app.mainMenu = editMenu()
         app.run()
     }
 }
