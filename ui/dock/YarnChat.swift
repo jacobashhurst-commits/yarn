@@ -518,18 +518,10 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func bubble(_ text: String, mine: Bool) -> NSView {
         let available = max(scroller.contentView.bounds.width, 640)
         let textWidth = mine ? min(520, available * 0.72) : available * 0.92
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.maximumNumberOfLines = 0
-        label.lineBreakMode = .byWordWrapping
-        label.preferredMaxLayoutWidth = textWidth
-        label.font = Self.chatFont()
-        label.isEditable = false
-        label.isSelectable = true
-        label.refusesFirstResponder = false
-        label.allowsEditingTextAttributes = false
-        label.attributedStringValue = mine
+        let attributed = mine
             ? plain(text, size: Self.chatSize, color: .white)
             : yarnText(text)
+        let label = BubbleTextView(attributed: attributed, wrapWidth: textWidth)
         label.translatesAutoresizingMaskIntoConstraints = false
 
         let chip = BubbleBackdrop(mine: mine)
@@ -540,6 +532,7 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             label.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -10),
             label.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 14),
             label.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -14),
+            label.widthAnchor.constraint(equalToConstant: textWidth),
             chip.widthAnchor.constraint(lessThanOrEqualToConstant: textWidth + 28),
         ])
 
@@ -671,6 +664,46 @@ private final class AskButton: NSButton {
             ),
             withAttributes: attrs
         )
+    }
+}
+
+/// Rich chat text you can select and copy. ``NSTextField`` drops bold and
+/// bullets when the field editor opens on click; a read-only text view keeps them.
+private final class BubbleTextView: NSTextView {
+    private let wrapWidth: CGFloat
+
+    init(attributed: NSAttributedString, wrapWidth: CGFloat) {
+        self.wrapWidth = wrapWidth
+        let container = NSTextContainer(size: NSSize(width: wrapWidth, height: 1.0e7))
+        container.widthTracksTextView = false
+        container.lineFragmentPadding = 0
+        let layout = NSLayoutManager()
+        let storage = NSTextStorage()
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        super.init(frame: .zero, textContainer: container)
+        storage.setAttributedString(attributed)
+        isEditable = false
+        isSelectable = true
+        isRichText = true
+        drawsBackground = false
+        backgroundColor = .clear
+        isVerticallyResizable = true
+        isHorizontallyResizable = false
+        textContainerInset = .zero
+        maxSize = NSSize(width: wrapWidth, height: 1.0e7)
+        minSize = NSSize(width: wrapWidth, height: 0)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        guard let layout = layoutManager, let container = textContainer else {
+            return NSSize(width: wrapWidth, height: 1)
+        }
+        layout.ensureLayout(for: container)
+        let used = layout.usedRect(for: container)
+        return NSSize(width: wrapWidth, height: max(1, ceil(used.height)))
     }
 }
 
