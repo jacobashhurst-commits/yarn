@@ -131,10 +131,11 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         history.alignment = .leading
         history.spacing = 2
         history.translatesAutoresizingMaskIntoConstraints = false
-        let historyDoc = NSView()
+        let historyDoc = FlippedView()
         historyDoc.translatesAutoresizingMaskIntoConstraints = false
         historyDoc.addSubview(history)
         historyScroll.translatesAutoresizingMaskIntoConstraints = false
+        historyScroll.contentView = FlippedClipView()
         historyScroll.hasVerticalScroller = true
         historyScroll.drawsBackground = false
         historyScroll.borderType = .noBorder
@@ -486,8 +487,8 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         style.lineSpacing = 3
         style.paragraphSpacing = 8
         let color = YarnColor.ink
-        let base = NSFont.systemFont(ofSize: 15)
-        let bold = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        let base = Self.chatFont(weight: .regular)
+        let bold = Self.chatFont(weight: .semibold)
         let result = NSMutableAttributedString()
         var rest = bulleted[...]
         func append(_ part: Substring, font: NSFont) {
@@ -521,8 +522,13 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         label.maximumNumberOfLines = 0
         label.lineBreakMode = .byWordWrapping
         label.preferredMaxLayoutWidth = textWidth
+        label.font = Self.chatFont()
+        label.isEditable = false
+        label.isSelectable = true
+        label.refusesFirstResponder = false
+        label.allowsEditingTextAttributes = false
         label.attributedStringValue = mine
-            ? plain(text, size: 15, color: .white)
+            ? plain(text, size: Self.chatSize, color: .white)
             : yarnText(text)
         label.translatesAutoresizingMaskIntoConstraints = false
 
@@ -562,12 +568,26 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         scroller.contentView.scroll(to: NSPoint(x: 0, y: y))
         scroller.reflectScrolledClipView(scroller.contentView)
     }
+
+    private static let chatSize: CGFloat = 13
+
+    private static func chatFont(weight: NSFont.Weight = .regular) -> NSFont {
+        .systemFont(ofSize: chatSize, weight: weight)
+    }
 }
 
 private struct Thread {
     var id: String
     var updated: TimeInterval
     var turns: [(role: String, text: String)]
+}
+
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
 }
 
 private final class HistoryRow: NSButton {

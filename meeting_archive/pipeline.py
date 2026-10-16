@@ -626,11 +626,7 @@ def rediarize(
         meeting_id,
         "Identifying speakers",
         0,
-        (
-            f"using {expected_speakers} listed voices"
-            if expected_speakers
-            else "automatic speaker count"
-        ),
+        "automatic speaker count",
         indeterminate=True,
     )
     try:
@@ -737,6 +733,108 @@ def rediarize(
         return Transcript.read(transcript_path)
     finally:
         _clear_processing_status(cfg, meeting_id)
+
+
+def consolidate_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
+    """Merge diarized tracks that are the same person, without re-segmenting.
+
+    A long call can leave one clear voice as several tracks. The names already
+    confirmed stay on the track we keep. Returns how many tracks were absorbed.
+    """
+    from .diarize import (
+        SAME_VOICE_COSINE,
+        _cosine,
+        _embed_samples,
+        _speaker_waveform,
+        group_same_voices,
+    )
+    from .models import SpeakerSpan
+    import wave
+
+    import numpy as np
+
+    transcript_path = cfg.transcript_json(meeting_id)
+    transcript = Transcript.read(transcript_path)
+    if not transcript.speaker_spans:
+        return 0
+    by_channel: dict[str, list] = {}
+    for span in transcript.speaker_spans:
+        by_channel.setdefault(span.channel, []).append(span)
+
+    mapping: dict[str, str] = {}
+    for channel, spans in by_channel.items():
+        wav_path = cfg.audio_archive_dir / f"{meeting_id}__{channel}.wav"
+        if not wav_path.exists():
+            continue
+        with wave.open(str(wav_path), "rb") as wav:
+            frames = wav.readframes(wav.getnframes())
+            sample_rate = wav.getframerate()
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        durations: dict[str, float] = {}
+        for span in spans:
+            durations[span.speaker] = durations.get(span.speaker, 0.0) + span.duration
+        speakers = [speaker for speaker, total in durations.items() if total >= 1.5]
+        vectors: dict[str, list[float]] = {}
+        for speaker in speakers:
+            clip = _speaker_waveform(samples, sample_rate, spans, speaker, max_s=8.0)
+            if clip is None:
+                continue
+            vector = _embed_samples(cfg.diarize, clip, sample_rate)
+            if vector:
+                vectors[speaker] = vector
+        if len(vectors) < 2:
+            continue
+
+        def cosine(left: str, right: str, _vectors=vectors) -> float:
+            return _cosine(_vectors[left], _vectors[right])
+
+        mapping.update(
+            group_same_voices(list(vectors), cosine, durations, SAME_VOICE_COSINE)
+        )
+
+    absorbed = sum(1 for speaker, root in mapping.items() if speaker != root)
+    if absorbed == 0:
+        return 0
+
+    def canon(speaker: str | None) -> str | None:
+        if not speaker:
+            return speaker
+        return mapping.get(speaker, speaker)
+
+    transcript.speaker_spans = [
+        SpeakerSpan(
+            channel=span.channel,
+            start=span.start,
+            end=span.end,
+            speaker=canon(span.speaker) or span.speaker,
+        )
+        for span in transcript.speaker_spans
+    ]
+    for segment in transcript.segments:
+        segment.speaker = canon(segment.speaker)
+    turns = merge_segments(
+        transcript.segments,
+        coalesce_gap_s=cfg.chunk.coalesce_gap_s,
+        max_turn_s=cfg.chunk.max_turn_s,
+    )
+    transcript.turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
+    from .quips import profile_speakers
+
+    transcript.speaker_profiles = profile_speakers(transcript.turns)
+    notes_path = cfg.notes_json(meeting_id)
+    notes = records.read_notes(notes_path)
+    roster = dict(notes.get("speakers") or {})
+    kept: dict[str, str] = {}
+    for speaker, name in roster.items():
+        root = mapping.get(speaker, speaker)
+        if name and root not in kept:
+            kept[root] = name
+    notes["speakers"] = kept
+    records.write_json_atomic(notes_path, notes)
+    transcript.write(transcript_path)
+    ingest(cfg, meeting_id, store)
+    log.info("consolidated %d extra voice track(s) in %s", absorbed, meeting_id)
+    return absorbed
 
 
 # ---------------------------------------------------------------------------
@@ -1199,9 +1297,9 @@ def _diarize_channels(
     )
     if expected_speakers:
         log.info(
-            "using %d listed speaker(s) to constrain diarization for meeting=%s",
-            expected_speakers,
+            "meeting=%s lists %d speaker(s); clustering stays automatic",
             manifest.meeting_id,
+            expected_speakers,
         )
 
     stop_heartbeat = threading.Event()

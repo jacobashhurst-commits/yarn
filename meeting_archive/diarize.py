@@ -46,6 +46,13 @@ log = logging.getLogger(__name__)
 # 0.6s; 4-way clustering produced 264s, 287s, 30s, 0.6s and recovered Leanne.
 MIN_SUBSTANTIVE_SPEAKER_S = 2.0
 
+# Same person, split into several clusters, scores about 0.45-0.7 with this
+# embedding model. Different people on the same call sit around 0.1-0.35.
+# 0.58 is the high end of "same voice" so a chain of merely-similar tracks
+# cannot pull a whole meeting into one speaker. Matches also have to be
+# mutual: A’s closest voice is B and B’s closest voice is A.
+SAME_VOICE_COSINE = 0.58
+
 
 class DiarizationUnavailable(RuntimeError):
     """Diarization cannot run at all: missing package or model files."""
@@ -168,7 +175,7 @@ class Diarizer:
                 )
             sample_rate = wav.getframerate()
             frames = wav.readframes(wav.getnframes())
-        pipeline = self._pipeline_for(expected_speakers)
+        pipeline = self._pipeline_for(None)
         if sample_rate != pipeline.sample_rate:
             raise DiarizationUnavailable(
                 f"{path.name} is {sample_rate}Hz; diarizer expects "
@@ -178,43 +185,26 @@ class Diarizer:
         import numpy as np
 
         samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        # Attendee count is not a cluster count. Asking sherpa for exactly N
+        # speakers merges people the model can already tell apart — a Japanese
+        # speaker of English and the local voice became one cluster — and it
+        # does nothing to stop one clear voice being cut into many tracks.
         result = pipeline.process(samples)
         raw = [
             (float(segment.start), float(segment.end), str(segment.speaker))
             for segment in result.sort_by_start_time()
         ]
         spans = to_spans(raw, channel, min_span_s=self.config.min_span_s)
-
-        # Hierarchical clustering can spend one of the requested clusters on a
-        # sub-second outlier and merge two actual people to compensate. Retry
-        # with one spare cluster; when that isolates one tiny artifact and
-        # leaves the requested number of substantive voices, keep those voices.
-        if (
-            expected_speakers
-            and len({s.speaker for s in spans}) == expected_speakers
-            and _smallest_speaker_duration(spans) < MIN_SUBSTANTIVE_SPEAKER_S
-        ):
-            retry = self._pipeline_for(expected_speakers + 1).process(samples)
-            retry_raw = [
-                (float(segment.start), float(segment.end), str(segment.speaker))
-                for segment in retry.sort_by_start_time()
-            ]
-            retry_spans = to_spans(
-                retry_raw, channel, min_span_s=self.config.min_span_s
+        before = len({span.speaker for span in spans})
+        spans = merge_same_voices(spans, samples, sample_rate, self.config)
+        after = len({span.speaker for span in spans})
+        if after < before:
+            log.info(
+                "merged same-voice clusters %d -> %d on channel=%s",
+                before,
+                after,
+                channel,
             )
-            cleaned = drop_tiny_extra_cluster(
-                retry_spans,
-                expected_speakers=expected_speakers,
-                min_speaking_s=MIN_SUBSTANTIVE_SPEAKER_S,
-            )
-            if cleaned is not None:
-                log.info(
-                    "discarded a %.1fs clustering artifact after retrying "
-                    "with %d clusters",
-                    _smallest_speaker_duration(retry_spans),
-                    expected_speakers + 1,
-                )
-                spans = cleaned
 
         log.info(
             "channel=%s speakers=%d spans=%d",
@@ -262,6 +252,150 @@ def drop_tiny_extra_cluster(
         [(span.start, span.end, span.speaker) for span in kept],
         kept[0].channel,
     )
+
+
+def group_same_voices(
+    speakers: list[str],
+    cosine,
+    durations: dict[str, float],
+    threshold: float = SAME_VOICE_COSINE,
+) -> dict[str, str]:
+    """Map every speaker to the longer member of a mutual voice match.
+
+    ``cosine(a, b)`` is similarity in ``[0, 1]``. Only pairs who are each
+    other's closest voice, and only when that score clears ``threshold``, are
+    combined. A chain of moderate scores must not collapse a meeting.
+    """
+    parent = {speaker: speaker for speaker in speakers}
+
+    def find(speaker: str) -> str:
+        while parent[speaker] != speaker:
+            parent[speaker] = parent[parent[speaker]]
+            speaker = parent[speaker]
+        return speaker
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root == right_root:
+            return
+        if durations.get(left_root, 0.0) < durations.get(right_root, 0.0):
+            parent[left_root] = right_root
+        else:
+            parent[right_root] = left_root
+
+    closest: dict[str, str] = {}
+    for left in speakers:
+        ranked = sorted(
+            ((cosine(left, right), right) for right in speakers if right != left),
+            reverse=True,
+        )
+        if not ranked or ranked[0][0] < threshold:
+            continue
+        closest[left] = ranked[0][1]
+    for left, right in closest.items():
+        if closest.get(right) == left:
+            union(left, right)
+    return {speaker: find(speaker) for speaker in speakers}
+
+
+def merge_same_voices(
+    spans: list[SpeakerSpan],
+    samples,
+    sample_rate: int,
+    config: DiarizeConfig,
+) -> list[SpeakerSpan]:
+    """Collapse clusters that are the same person, keeping their speaker key.
+
+    Speaker keys are not renumbered, so a name already stored against a track
+    still points at that voice. Embedding failure leaves the spans unchanged.
+    """
+    durations = _speaker_durations(spans)
+    speakers = [speaker for speaker, total in durations.items() if total >= 1.5]
+    if len(speakers) < 2:
+        return spans
+    vectors: dict[str, list[float]] = {}
+    for speaker in speakers:
+        clip = _speaker_waveform(samples, sample_rate, spans, speaker, max_s=8.0)
+        if clip is None or len(clip) < int(sample_rate * 0.8):
+            continue
+        vector = _embed_samples(config, clip, sample_rate)
+        if vector:
+            vectors[speaker] = vector
+    if len(vectors) < 2:
+        return spans
+
+    def cosine(left: str, right: str) -> float:
+        return _cosine(vectors[left], vectors[right])
+
+    mapping = group_same_voices(list(vectors), cosine, durations)
+    if all(speaker == root for speaker, root in mapping.items()):
+        return spans
+    merged: list[SpeakerSpan] = []
+    for span in spans:
+        merged.append(
+            SpeakerSpan(
+                channel=span.channel,
+                start=span.start,
+                end=span.end,
+                speaker=mapping.get(span.speaker, span.speaker),
+            )
+        )
+    return merged
+
+
+def _speaker_waveform(samples, sample_rate: int, spans: list[SpeakerSpan], speaker: str, max_s: float):
+    import numpy as np
+
+    pieces = []
+    remaining = int(max_s * sample_rate)
+    ordered = sorted(
+        (span for span in spans if span.speaker == speaker),
+        key=lambda span: span.duration,
+        reverse=True,
+    )
+    for span in ordered:
+        if remaining <= 0:
+            break
+        start = max(0, int(span.start * sample_rate))
+        end = min(len(samples), int(span.end * sample_rate))
+        if end <= start:
+            continue
+        piece = samples[start:end][:remaining]
+        pieces.append(piece)
+        remaining -= len(piece)
+    if not pieces:
+        return None
+    return np.concatenate(pieces)
+
+
+def _embed_samples(config: DiarizeConfig, samples, sample_rate: int) -> list[float]:
+    model = Path(config.embedding_model).expanduser()
+    if not model.is_file():
+        return []
+    try:
+        extractor = _embedding_extractor(config, model)
+        stream = extractor.create_stream()
+        _feed_embedding_stream(stream, sample_rate, samples)
+        if hasattr(extractor, "is_ready") and not extractor.is_ready(stream):
+            return []
+        vector = extractor.compute(stream)
+    except Exception as exc:
+        log.warning("could not embed a diarized voice: %s", exc)
+        return []
+    return [float(x) for x in vector]
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = norm_l = norm_r = 0.0
+    for a, b in zip(left, right):
+        dot += a * b
+        norm_l += a * a
+        norm_r += b * b
+    if norm_l <= 0 or norm_r <= 0:
+        return 0.0
+    return dot / ((norm_l ** 0.5) * (norm_r ** 0.5))
 
 
 def to_spans(

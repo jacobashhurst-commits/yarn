@@ -96,7 +96,13 @@ chmod +x "$PLUGIN"
 # Menu bar icon. SwiftBar tints a black template. The bitmap is 3x the
 # 14-point menu-bar height so the yarn stays sharp, with
 # the black around the yarn left transparent.
-swiftc -o "$PLUGIN_DIR/.menu-mark" -framework AppKit - <<'SWIFT' || true
+#
+# Never compile or run the helper inside $PLUGIN_DIR. On managed / locked-down
+# Macs (and some personal ones with stricter Gatekeeper), unsigned binaries
+# in ~/.swiftbar-plugins are rejected (SIGKILL / spctl "rejected"). Build in
+# a temp dir and write the PNG into Application Support instead.
+MENU_MARK_WORK="$(mktemp -d "${TMPDIR:-/tmp}/yarn-menu-mark.XXXXXX")"
+swiftc -o "$MENU_MARK_WORK/menu-mark" -framework AppKit - <<'SWIFT' || true
 import AppKit
 let url = URL(fileURLWithPath: CommandLine.arguments[1])
 let mark = NSImage(contentsOf: url)!
@@ -179,11 +185,18 @@ out.size = NSSize(width: Double(targetW) / Double(scale), height: pointH)
 try! out.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
 SWIFT
 mkdir -p "$(dirname "$MENU_MARK")"
-if [[ -x "$PLUGIN_DIR/.menu-mark" ]]; then
-  "$PLUGIN_DIR/.menu-mark" "$REPO_DIR/meeting_archive/assets/yarn-toolbar.png" "$MENU_MARK"
-  rm -f "$PLUGIN_DIR/.menu-mark"
+if [[ -x "$MENU_MARK_WORK/menu-mark" ]]; then
+  if ! "$MENU_MARK_WORK/menu-mark" \
+      "$REPO_DIR/meeting_archive/assets/yarn-toolbar.png" "$MENU_MARK"; then
+    info "menu-bar mark was skipped (helper exited); icon will use the default"
+  else
+    info "menu-bar mark written to $MENU_MARK"
+  fi
+else
+  info "menu-bar mark was skipped (swiftc unavailable); icon will use the default"
 fi
-rm -f "$PLUGIN_DIR/yarn-mark.png"
+rm -rf "$MENU_MARK_WORK"
+rm -f "$PLUGIN_DIR/.menu-mark" "$PLUGIN_DIR/yarn-mark.png"
 info "plugin written to $PLUGIN"
 info "Stop/Start invoke: $REC"
 

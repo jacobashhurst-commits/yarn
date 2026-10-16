@@ -33,6 +33,7 @@ from meeting_archive.diarize import (
     DiarizationUnavailable,
     assign_speakers,
     drop_tiny_extra_cluster,
+    group_same_voices,
     speaker_keys,
     to_spans,
 )
@@ -112,6 +113,27 @@ def test_short_spans_are_dropped_before_numbering():
 def test_to_spans_empty_and_all_dropped():
     assert to_spans([], ROOM) == []
     assert to_spans([(0.0, 0.1, "A")], ROOM, min_span_s=0.5) == []
+
+
+def test_same_voice_groups_only_mutual_best_matches():
+    speakers = ["room-4", "room-11", "room-13", "room-1"]
+    durations = {"room-4": 180.0, "room-11": 200.0, "room-13": 20.0, "room-1": 120.0}
+    scores = {
+        frozenset(("room-4", "room-11")): 0.70,
+        frozenset(("room-11", "room-13")): 0.61,
+        frozenset(("room-4", "room-13")): 0.41,
+        frozenset(("room-4", "room-1")): 0.02,
+        frozenset(("room-11", "room-1")): 0.06,
+        frozenset(("room-13", "room-1")): 0.11,
+    }
+
+    def cosine(left, right):
+        return scores.get(frozenset((left, right)), 0.0)
+
+    groups = group_same_voices(speakers, cosine, durations)
+    assert groups["room-4"] == groups["room-11"]
+    assert groups["room-13"] == "room-13"
+    assert groups["room-1"] == "room-1"
 
 
 def test_one_tiny_overclustered_artifact_is_dropped_and_voices_renumbered():
