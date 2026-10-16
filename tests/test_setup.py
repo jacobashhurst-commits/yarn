@@ -372,6 +372,88 @@ def test_flatten_nested_speaker_model(tmp_path):
     assert dest.read_bytes() == b"onnx"
 
 
+def test_host_python_skips_the_old_system_python(monkeypatch):
+    monkeypatch.setattr(yarn_setup.sys, "version_info", (3, 9, 6, "final", 0))
+
+    def which(name):
+        return {
+            "python3": "/usr/bin/python3",
+            "python3.12": "/opt/homebrew/bin/python3.12",
+        }.get(name)
+
+    monkeypatch.setattr(yarn_setup, "which", which)
+    monkeypatch.setattr(
+        yarn_setup,
+        "python_supports_yarn",
+        lambda path: path.endswith("python3.12"),
+    )
+    monkeypatch.setattr(yarn_setup, "uv_python_find", lambda: None)
+    assert yarn_setup.host_python() == "/opt/homebrew/bin/python3.12"
+
+
+def test_host_python_explains_python39_without_the_import_error(monkeypatch):
+    monkeypatch.setattr(yarn_setup.sys, "version_info", (3, 9, 6, "final", 0))
+    monkeypatch.setattr(
+        yarn_setup,
+        "which",
+        lambda name: "/usr/bin/python3" if name == "python3" else None,
+    )
+    monkeypatch.setattr(yarn_setup, "python_supports_yarn", lambda _path: False)
+    monkeypatch.setattr(yarn_setup, "uv_python_find", lambda: None)
+    with pytest.raises(RuntimeError, match="Python 3.11") as caught:
+        yarn_setup.host_python()
+    assert "tomllib" not in str(caught.value)
+    assert "3.9" in str(caught.value)
+
+
+def test_install_host_python_asks_uv_for_312(tmp_path, monkeypatch):
+    import subprocess
+
+    uv = tmp_path / "uv"
+    monkeypatch.setattr(yarn_setup, "which", lambda _name: None)
+    monkeypatch.setattr(yarn_setup, "support_bin", lambda: tmp_path)
+
+    def install_uv():
+        uv.write_text("uv", encoding="utf-8")
+
+    monkeypatch.setattr(yarn_setup, "_install_uv", install_uv)
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[1:3] == ["python", "find"]:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=str(tmp_path / "python3.12") + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(yarn_setup, "run", fake_run)
+    monkeypatch.setattr(
+        yarn_setup,
+        "python_supports_yarn",
+        lambda path: str(path).endswith("python3.12"),
+    )
+    assert yarn_setup.install_host_python() == str(tmp_path / "python3.12")
+    assert calls[0][1:3] == ["python", "install"]
+    assert calls[0][3] == "3.12"
+
+
+def test_uv_binary_is_taken_from_the_tarball(tmp_path):
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        payload = b"#!/bin/sh\necho uv\n"
+        info = tarfile.TarInfo("uv-aarch64-apple-darwin/uv")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    dest = tmp_path / "uv"
+    yarn_setup._extract_uv(buf.getvalue(), dest)
+    assert dest.read_bytes().startswith(b"#!/bin/sh")
+    assert dest.stat().st_mode & 0o111
+
+
 def test_guess_mic_uses_the_real_device_name(monkeypatch):
     listing = (
         "[AVFoundation indev @ 0x123] AVFoundation video devices:\n"

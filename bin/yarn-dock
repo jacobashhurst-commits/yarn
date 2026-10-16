@@ -77,7 +77,8 @@ cat > "$RES/paths.plist" <<PLIST
 PLIST
 
 swiftc -parse-as-library -O -o "$APP_BIN.partial" \
-  "$SWIFT_SRC" "$(dirname "$SWIFT_SRC")/YarnChat.swift" -framework AppKit
+  "$SWIFT_SRC" "$(dirname "$SWIFT_SRC")/YarnChat.swift" \
+  "$REPO_DIR/ui/welcome/YarnWelcome.swift" -framework AppKit
 mv -f "$APP_BIN.partial" "$APP_BIN"
 
 if [[ "${1:-}" == "--install" ]]; then

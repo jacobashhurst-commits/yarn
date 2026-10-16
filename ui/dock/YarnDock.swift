@@ -134,10 +134,28 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         false
     }
 
+    private var offeredWelcome = false
+    private var welcomeController: YarnWelcomeWindow?
+
     func show() {
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        offerWelcome()
+    }
+
+    private func offerWelcome() {
+        if offeredWelcome { return }
+        offeredWelcome = true
+        let path = paths.root + "/.yarn-settings.json"
+        if YarnWelcomeSettings.consumeHandoff(path) { return }
+        if YarnWelcomeSettings.isHidden(path) { return }
+        let controller = YarnWelcomeWindow(settingsPath: path) { [weak self] in
+            self?.welcomeController?.close()
+            self?.welcomeController = nil
+        }
+        welcomeController = controller
+        controller.showWindow(nil)
     }
 
     private func build() {

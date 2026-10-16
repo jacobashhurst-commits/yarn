@@ -36,6 +36,13 @@ FFMPEG_STATIC = (
     "b6.1.1/ffmpeg-darwin-arm64"
 )
 OLLAMA_ZIP = "https://ollama.com/download/Ollama-darwin.zip"
+# macOS /usr/bin/python3 is still 3.9. It has no tomllib, and Setup used to
+# stop on the first step with that raw import error. uv installs a current
+# CPython into this user's Library, with no admin password.
+UV_ARM64 = (
+    "https://github.com/astral-sh/uv/releases/latest/download/"
+    "uv-aarch64-apple-darwin.tar.gz"
+)
 SWIFTBAR_ZIP = (
     "https://github.com/swiftbar/SwiftBar/releases/download/"
     "v2.1.1/SwiftBar.v2.1.1.b597.zip"
@@ -261,12 +268,148 @@ def download(url: str, dest: Path, step_id: str, *, long: bool = False) -> None:
     emit({"type": "progress", "id": step_id, "percent": 100})
 
 
-def host_python() -> str:
+def python_supports_yarn(path: str) -> bool:
+    if not path or not Path(path).is_file():
+        return False
+    proc = run(
+        [
+            path,
+            "-c",
+            "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)",
+        ],
+        timeout=20,
+    )
+    return proc.returncode == 0
+
+
+def uv_binary() -> str | None:
+    found = which("uv")
+    if found:
+        return found
+    bundled = support_bin() / "uv"
+    if bundled.is_file():
+        return str(bundled)
+    return None
+
+
+def uv_python_find() -> str | None:
+    uv = uv_binary()
+    if not uv:
+        return None
+    proc = run([uv, "python", "find", "3.12"], timeout=30)
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    path = lines[-1] if lines else ""
+    if proc.returncode == 0 and python_supports_yarn(path):
+        return path
+    return None
+
+
+def find_existing_python() -> str | None:
+    # The interpreter already running Setup is the one the venv should copy.
+    # Searching PATH first used to pick /usr/bin/python3, which is 3.9.
+    if sys.version_info >= (3, 11) and Path(sys.executable).is_file():
+        return sys.executable
     for name in ("python3.12", "python3.13", "python3.11", "python3"):
         path = which(name)
-        if path:
+        if path and python_supports_yarn(path):
             return path
-    raise RuntimeError("Python 3.11+ was not found on this Mac.")
+    return uv_python_find()
+
+
+def _extract_uv(payload: bytes, dest: Path) -> None:
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+        member = next(
+            (
+                item
+                for item in tar.getmembers()
+                if Path(item.name).name == "uv" and item.isfile()
+            ),
+            None,
+        )
+        extracted = tar.extractfile(member) if member is not None else None
+        if extracted is None:
+            raise RuntimeError("The Python installer download did not contain uv.")
+        data = extracted.read()
+    dest.write_bytes(data)
+    dest.chmod(0o755)
+
+
+def _install_uv() -> None:
+    if platform.machine() != "arm64":
+        raise RuntimeError(
+            "Yarn Setup is Apple Silicon only. Intel Macs are not supported."
+        )
+    archive = cache_dir() / "uv-aarch64-apple-darwin.tar.gz"
+    download(UV_ARM64, archive, "prereqs", long=True)
+    _extract_uv(archive.read_bytes(), support_bin() / "uv")
+
+
+def install_host_python() -> str:
+    """Install CPython 3.12 for this user when the Mac only has an older one."""
+    uv = uv_binary()
+    if not uv:
+        _install_uv()
+        uv = str(support_bin() / "uv")
+    proc = run([uv, "python", "install", "3.12"], timeout=900)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "uv could not install Python").strip()
+        raise RuntimeError(
+            "Yarn needs Python 3.11 or newer. Installing Python 3.12 did not work.\n"
+            + detail[-1500:]
+        )
+    found = uv_python_find()
+    if not found:
+        raise RuntimeError("Python 3.12 installed, but Yarn could not find it.")
+    return found
+
+
+def host_python() -> str:
+    found = find_existing_python()
+    if found:
+        return found
+    current = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    raise RuntimeError(
+        f"This Mac has Python {current}. Yarn needs Python 3.11 or newer."
+    )
+
+
+def adopt_python311() -> None:
+    """Replace this process with Python 3.11+ before anything imports tomllib."""
+    if sys.version_info >= (3, 11):
+        return
+    current = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    emit(
+        {
+            "type": "log",
+            "text": (
+                f"This Mac has Python {current}. Yarn needs 3.11 or newer. "
+                "Installing Python 3.12."
+            ),
+        }
+    )
+    found = find_existing_python()
+    if not found:
+        try:
+            found = install_host_python()
+        except RuntimeError as exc:
+            emit({"type": "finish", "ok": False, "message": str(exc)})
+            raise SystemExit(1) from exc
+    if not found or os.path.realpath(found) == os.path.realpath(sys.executable):
+        emit(
+            {
+                "type": "finish",
+                "ok": False,
+                "message": (
+                    f"This Mac has Python {current}. Yarn needs Python 3.11 "
+                    "or newer, and installing it did not work."
+                ),
+            }
+        )
+        raise SystemExit(1)
+    os.execv(found, [found, *sys.argv])
 
 
 def step_prereqs(repo: Path) -> None:
@@ -285,7 +428,15 @@ def step_prereqs(repo: Path) -> None:
         )
     py = host_python()
     emit({"type": "log", "id": "prereqs", "text": f"Using {py}"})
-    from .resources import summary_model_choice, unified_memory_gb
+    try:
+        from .resources import summary_model_choice, unified_memory_gb
+    except ModuleNotFoundError as exc:
+        if exc.name == "tomllib":
+            current = f"{sys.version_info[0]}.{sys.version_info[1]}"
+            raise RuntimeError(
+                f"This Mac has Python {current}. Yarn needs Python 3.11 or newer."
+            ) from exc
+        raise
 
     ram_gb = unified_memory_gb()
     if ram_gb:
@@ -1138,6 +1289,8 @@ def main(argv: list[str] | None = None) -> int:
         i = args.index("--pull")
         _PULL = [part.strip().lower() for part in args[i + 1].split(",") if part.strip()]
         del args[i : i + 2]
+    os.environ["PATH"] = f"{support_bin()}:{os.environ.get('PATH', '')}"
+    adopt_python311()
     return run_setup(repo)
 
 
