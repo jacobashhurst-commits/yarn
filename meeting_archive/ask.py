@@ -269,7 +269,10 @@ def passages_for_meeting(cfg: Config, meeting_id: str, *, limit_chars: int = 200
     transcript = Transcript.read(path)
     notes = read_notes(cfg.notes_json(meeting_id))
     roster = speaker_roster(notes)
-    label = cfg.turn_labeller(roster)
+    from .models import speaker_display_indices
+
+    display = speaker_display_indices(transcript.speaker_profiles)
+    label = cfg.turn_labeller(roster, display)
     lines = []
     for turn in transcript.turns:
         lines.append(f"[{format_timestamp(turn.start)}] {label(turn)}: {turn.text}")

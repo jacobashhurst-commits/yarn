@@ -653,11 +653,12 @@ def cmd_speakers(cfg: Config, args) -> int:
             print("no diarized voices in this meeting")
         return 0
 
+    display = models.speaker_display_indices(transcript.speaker_profiles)
     if args.pending_tsv:
         # Machine-readable, for bin/speaker-popup. Tabs are safe: quips are
         # whitespace-collapsed when they are built.
         for profile in transcript.unnamed_speakers(roster):
-            index = models.speaker_index(profile.speaker) or 0
+            index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
             detail = (
                 f"spoke {models.format_duration(profile.speaking_s)} "
                 f"across {profile.turns} turn(s), from "
@@ -687,7 +688,7 @@ def cmd_speakers(cfg: Config, args) -> int:
         print(f"known speakers: {known}")
     print(f"{len(profiles)} voice(s) in {args.meeting_id}:")
     for profile in profiles:
-        index = models.speaker_index(profile.speaker) or 0
+        index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
         named = roster.get(profile.speaker, "")
         who = named or f"Speaker {index} (unidentified)"
         print(

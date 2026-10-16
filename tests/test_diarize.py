@@ -43,8 +43,10 @@ from meeting_archive.models import (
     ROOM,
     SYS,
     Segment,
+    SpeakerProfile,
     SpeakerSpan,
     Turn,
+    speaker_display_indices,
     speaker_index,
     speaker_key,
 )
@@ -63,6 +65,19 @@ def test_speaker_key_roundtrip():
     assert speaker_index("room") is None
     assert speaker_index("") is None
     assert speaker_index("mic-notanumber") is None
+
+
+def test_speaker_display_indices_renumber_by_first_appearance():
+    profiles = [
+        SpeakerProfile("room-1", "room", first_at=0.0),
+        SpeakerProfile("room-8", "room", first_at=12.0),
+    ]
+    assert speaker_display_indices(profiles) == {"room-1": 1, "room-8": 2}
+
+
+def test_speaker_label_uses_display_map_over_key_suffix(cfg):
+    display = {"room-8": 5}
+    assert cfg.speaker_label(ROOM, "room-8", {}, display=display) == "Speaker 5"
 
 
 # ---------------------------------------------------------------------------

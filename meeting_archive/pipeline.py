@@ -429,6 +429,10 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
         )
 
     transcript = Transcript.read(transcript_path)
+    from .glossary import apply_glossary_to_transcript
+
+    if apply_glossary_to_transcript(transcript, cfg.glossary.replacements):
+        transcript.write(transcript_path)
     notes = records.read_notes(cfg.notes_json(meeting_id))
     previous_md = cfg.transcript_md(meeting_id)
     transcript.title = records.meeting_title(notes, transcript)
@@ -439,7 +443,10 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     # Names Jacob has confirmed for diarized voices. Read at index time rather
     # than baked into the transcript, so naming a voice later is a reindex.
     roster = records.speaker_roster(notes)
-    labeller = cfg.turn_labeller(roster)
+    from .models import speaker_display_indices
+
+    display = speaker_display_indices(transcript.speaker_profiles)
+    labeller = cfg.turn_labeller(roster, display)
 
     detected = attendee_suggestion(transcript.detected_names)
     header = ""
@@ -555,8 +562,16 @@ def apply_summary(
         steal=False,
     )
     try:
-        transcript.summary = summarizer.summarize(
-            transcript.turns, cfg.turn_labeller(roster)
+        from .glossary import apply_glossary
+
+        from .models import speaker_display_indices
+
+        display = speaker_display_indices(transcript.speaker_profiles)
+        transcript.summary = apply_glossary(
+            summarizer.summarize(
+                transcript.turns, cfg.turn_labeller(roster, display)
+            ),
+            cfg.glossary.replacements,
         )
         transcript.summary_model = cfg.summary.model
         transcript.summary_error = ""
@@ -713,9 +728,12 @@ def rediarize(
                 cfg, meeting_id, "Writing summary", 0, indeterminate=True
             )
             roster = records.speaker_roster(notes)
+            from .models import speaker_display_indices
+
+            display = speaker_display_indices(transcript.speaker_profiles)
             try:
                 transcript.summary = summarizer.summarize(
-                    transcript.turns, cfg.turn_labeller(roster)
+                    transcript.turns, cfg.turn_labeller(roster, display)
                 )
                 transcript.summary_model = cfg.summary.model
                 transcript.summary_error = ""
@@ -1145,6 +1163,13 @@ def process(
             jobs.finish_stage(cfg, job, "summarize", status=jobs.SKIPPED)
 
         _processing_status(cfg, meeting_id, "Saving transcript", 0, indeterminate=True)
+        from .glossary import apply_glossary
+
+        for segment in segments:
+            segment.text = apply_glossary(segment.text, cfg.glossary.replacements)
+        for turn in turns:
+            turn.text = apply_glossary(turn.text, cfg.glossary.replacements)
+
         transcript = Transcript(
             meeting_id=meeting_id,
             segments=segments,

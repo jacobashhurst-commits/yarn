@@ -54,6 +54,23 @@ def speaker_index(key: str) -> int | None:
     return int(match.group("index")) if match else None
 
 
+def speaker_display_indices(profiles: list) -> dict[str, int]:
+    """Human-facing Speaker 1..N by first appearance in the meeting.
+
+    Diarizer keys keep their internal suffix (``room-8``) after same-voice
+    merges absorb other clusters. The identify window and transcript must not
+    show that raw suffix when only five distinct voices remain.
+    """
+    ordered = sorted(
+        profiles,
+        key=lambda profile: (
+            float(getattr(profile, "first_at", 0.0) or 0.0),
+            str(getattr(profile, "speaker", "")),
+        ),
+    )
+    return {profile.speaker: index for index, profile in enumerate(ordered, start=1)}
+
+
 @dataclass
 class SpeakerSpan:
     """A stretch of one channel's audio attributed to one distinguished voice."""

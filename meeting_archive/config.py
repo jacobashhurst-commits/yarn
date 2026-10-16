@@ -14,6 +14,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .glossary import GlossaryConfig
 from .models import speaker_index
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "meeting-archive" / "config.toml"
@@ -59,6 +60,8 @@ class WhisperConfig:
     vad_min_silence_ms: int = 700
     # Suppresses the repeat-loop failure mode on sparse channels.
     condition_on_previous_text: bool = False
+    # Biases whisper.cpp toward product and company names you say often.
+    initial_prompt: str = ""
 
 
 @dataclass
@@ -191,6 +194,7 @@ class Config:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     speakers_memory: SpeakersMemoryConfig = field(default_factory=SpeakersMemoryConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
+    glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
 
     # --- derived paths ---
     @property
@@ -267,7 +271,13 @@ class Config:
             "room": self.room_label,
         }.get(channel, channel)
 
-    def speaker_label(self, channel: str, speaker: str | None, roster: dict | None = None) -> str:
+    def speaker_label(
+        self,
+        channel: str,
+        speaker: str | None,
+        roster: dict | None = None,
+        display: dict[str, int] | None = None,
+    ) -> str:
         """Human-facing label for one turn.
 
         This is where "never label speech with a speaker you can't identify"
@@ -287,7 +297,9 @@ class Config:
             named = (roster or {}).get(speaker)
             if named and str(named).strip():
                 return str(named).strip()
-            index = speaker_index(speaker)
+            index = (display or {}).get(speaker)
+            if index is None:
+                index = speaker_index(speaker)
             if index is not None:
                 # The mic is one person, so a numbered mic voice would be a
                 # bug upstream. Fall back to his name rather than "Speaker 1".
@@ -296,10 +308,16 @@ class Config:
                 return f"Speaker {index}"
         return self.label(channel)
 
-    def turn_labeller(self, roster: dict | None = None):
+    def turn_labeller(
+        self,
+        roster: dict | None = None,
+        display: dict[str, int] | None = None,
+    ):
         """A one-argument labeller for a Turn, for chunking and rendering."""
         def label_turn(turn) -> str:
-            return self.speaker_label(turn.channel, turn.speaker, roster)
+            return self.speaker_label(
+                turn.channel, turn.speaker, roster, display=display
+            )
 
         # Distinguishes this from the channel-only `label`, which takes a str.
         label_turn.takes_turn = True
@@ -394,6 +412,7 @@ def load_config(path: Path | None = None) -> Config:
         "vad_filter",
         "vad_min_silence_ms",
         "condition_on_previous_text",
+        "initial_prompt",
     ):
         if key in w:
             setattr(cfg.whisper, key, w[key])
@@ -462,6 +481,16 @@ def load_config(path: Path | None = None) -> Config:
     p = data.get("processing", {})
     if "pause_on_pressure" in p:
         cfg.processing.pause_on_pressure = bool(p["pause_on_pressure"])
+
+    g = data.get("glossary", {})
+    if isinstance(g, dict):
+        reps = {
+            str(key): str(value)
+            for key, value in g.items()
+            if str(key).strip() and str(value).strip()
+        }
+        if reps:
+            cfg.glossary.replacements = reps
 
     _apply_settings_overlay(cfg)
     return cfg

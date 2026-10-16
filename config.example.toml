@@ -74,6 +74,13 @@ beam_size = 5
 vad_filter = true
 vad_min_silence_ms = 700
 condition_on_previous_text = false
+# Optional hint for whisper.cpp / faster-whisper (company and product names).
+initial_prompt = "Zuora, subscription billing, revenue recognition."
+
+[glossary]
+# Whole-word fixes after Whisper, before markdown and search. Keys are what
+# Whisper often writes; values are what you want in the archive.
+Zora = "Zuora"
 
 [diarize]
 # Distinguish individual voices on the system-audio and room channels. Runtime

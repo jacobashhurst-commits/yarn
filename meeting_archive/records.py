@@ -32,6 +32,7 @@ from .models import (
     Turn,
     format_duration,
     format_timestamp,
+    speaker_display_indices,
     speaker_index,
 )
 
@@ -312,9 +313,10 @@ def name_speakers_in_text(text: str, transcript: "Transcript", roster: dict) -> 
     """
     if not text or not roster:
         return text
+    display = speaker_display_indices(transcript.speaker_profiles)
     by_index: dict[int, str | None] = {}
     for profile in transcript.speaker_profiles:
-        index = speaker_index(profile.speaker)
+        index = display.get(profile.speaker)
         if index is None:
             continue
         name = str(roster.get(profile.speaker) or "").strip()
@@ -443,8 +445,9 @@ def render_markdown(
             if bucket["quip"]:
                 line += f' said: "{bucket["quip"]}"'
             lines.append(line)
+        display = speaker_display_indices(transcript.speaker_profiles)
         for profile in unnamed:
-            index = profile.speaker.rsplit("-", 1)[-1]
+            index = display.get(profile.speaker) or speaker_index(profile.speaker) or "?"
             detail = (
                 f"{format_duration(profile.speaking_s)} across {profile.turns} turns, "
                 "not yet identified"

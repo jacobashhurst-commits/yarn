@@ -920,6 +920,7 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         find_channel_audio(cfg, meeting_id, p.channel) is not None
         for p in transcript.speaker_profiles
     )
+    display = models.speaker_display_indices(transcript.speaker_profiles)
     voices = []
     for profile in transcript.speaker_profiles:
         clips = identity_clips(transcript, profile)
@@ -931,7 +932,7 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
                 log.exception("voice match failed for %s in %s", profile.speaker, meeting_id)
         conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
         guess, reason = dialog_prediction(ranked, conversation)
-        index = models.speaker_index(profile.speaker) or 0
+        index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
         # Tiny crumbs (a cough, a "yeah") are still in the transcript as
         # Speaker N, but asking Jacob to name them is noise. The identify
         # window skips them unless they are the only voices left.
