@@ -73,6 +73,8 @@ def test_install_app_skips_download_when_already_present(tmp_path, monkeypatch):
     app = tmp_path / "SwiftBar.app"
     app.mkdir()
     monkeypatch.setattr(yarn_setup, "existing_app", lambda name: app)
+    monkeypatch.setattr(yarn_setup, "app_is_trusted", lambda _app: True)
+    monkeypatch.setattr(yarn_setup, "_clear_quarantine", lambda _app: None)
 
     def boom(*_a, **_k):
         raise AssertionError("should not download an app that is already installed")
@@ -82,6 +84,58 @@ def test_install_app_skips_download_when_already_present(tmp_path, monkeypatch):
         yarn_setup.install_app_from_zip("http://example.invalid", "SwiftBar.app", "menubar")
         == app
     )
+
+
+def test_install_replaces_an_app_macos_calls_damaged(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    apps = tmp_path / "Applications"
+    damaged = apps / "Ollama.app"
+    damaged.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(yarn_setup, "application_folders", lambda: [apps])
+    monkeypatch.setattr(yarn_setup, "cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(yarn_setup, "emit", lambda _payload: None)
+
+    def trusted(app: Path) -> bool:
+        return (app / "Contents" / "Info.plist").is_file()
+
+    monkeypatch.setattr(yarn_setup, "app_is_trusted", trusted)
+
+    def fake_download(_url, dest: Path, _step, long=False):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"zip")
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[:2] == ["ditto", "-xk"]:
+            bundle = Path(argv[3]) / "Ollama.app" / "Contents"
+            bundle.mkdir(parents=True)
+            (bundle / "Info.plist").write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[0] == "ditto":
+            src, dest = Path(argv[1]), Path(argv[2])
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["xattr", "-dr"]:
+            assert argv[2] == "com.apple.quarantine"
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(yarn_setup, "download", fake_download)
+    monkeypatch.setattr(yarn_setup, "run", fake_run)
+
+    installed = yarn_setup.install_app_from_zip(
+        "http://example.invalid/Ollama.zip", "Ollama.app", "ollama"
+    )
+    assert installed == apps / "Ollama.app"
+    assert (installed / "Contents" / "Info.plist").is_file()
+    assert calls[0][:2] == ["ditto", "-xk"]
+    assert not any(argv[:2] == ["xattr", "-cr"] for argv in calls)
 
 
 def test_ollama_binary_uses_path(monkeypatch, tmp_path):

@@ -139,28 +139,77 @@ def cache_dir() -> Path:
     return path
 
 
+def application_folders() -> list[Path]:
+    return [Path("/Applications"), Path.home() / "Applications"]
+
+
 def existing_app(name: str) -> Path | None:
-    for folder in (Path("/Applications"), Path.home() / "Applications"):
+    for folder in application_folders():
         path = folder / name
         if path.exists():
             return path
     return None
 
 
+def app_is_trusted(app: Path) -> bool:
+    """A signed Mac app macOS will actually open.
+
+    unzip plus a normal file copy, then stripping every extra attribute,
+    breaks the signature. macOS then says the app is damaged. Cancelling
+    that dialog leaves the broken copy where the next run will find it.
+    """
+    if not (app / "Contents" / "Info.plist").is_file():
+        return False
+    proc = run(
+        ["codesign", "--verify", "--deep", "--strict", str(app)],
+        timeout=60,
+    )
+    return proc.returncode == 0
+
+
+def _clear_quarantine(app: Path) -> None:
+    # Only the download flag. Clearing every attribute is what made the
+    # signature look damaged.
+    run(["xattr", "-dr", "com.apple.quarantine", str(app)], timeout=30)
+
+
+def _remove_app(app: Path) -> None:
+    if app.is_symlink() or app.is_file():
+        app.unlink()
+        return
+    shutil.rmtree(app)
+
+
 def install_app_from_zip(url: str, app_name: str, step_id: str) -> Path:
     """Put a .app from a zip into Applications. No Homebrew required."""
     found = existing_app(app_name)
-    if found:
+    if found and app_is_trusted(found):
+        _clear_quarantine(found)
         return found
+    if found:
+        emit(
+            {
+                "type": "log",
+                "id": step_id,
+                "text": (
+                    f"Replacing {app_name}. macOS had marked the last copy damaged."
+                ),
+            }
+        )
+        _remove_app(found)
     archive = cache_dir() / app_name.replace(" ", "") / "download.zip"
     extract = cache_dir() / app_name.replace(" ", "") / "extract"
     if extract.exists():
         shutil.rmtree(extract)
     extract.mkdir(parents=True)
     download(url, archive, step_id, long=step_id == "ollama")
-    unzip = run(["unzip", "-q", str(archive), "-d", str(extract)], timeout=120)
-    if unzip.returncode != 0:
-        raise RuntimeError(f"Could not unpack {app_name}: {(unzip.stderr or '')[-400:]}")
+    # ditto keeps the signature. unzip and copytree do not, and that is the
+    # "app is damaged, move to bin" dialog.
+    unpacked = run(["ditto", "-xk", str(archive), str(extract)], timeout=180)
+    if unpacked.returncode != 0:
+        raise RuntimeError(
+            f"Could not unpack {app_name}: {(unpacked.stderr or '')[-400:]}"
+        )
     apps = [p for p in extract.rglob("*.app") if p.name == app_name]
     if not apps:
         apps = list(extract.rglob("*.app"))
@@ -168,14 +217,24 @@ def install_app_from_zip(url: str, app_name: str, step_id: str) -> Path:
         raise RuntimeError(f"The {app_name} download did not contain an app.")
     src = apps[0]
     last_error = ""
-    for folder in (Path("/Applications"), Path.home() / "Applications"):
+    for folder in application_folders():
         dest = folder / app_name
         try:
             folder.mkdir(parents=True, exist_ok=True)
             if dest.exists():
-                return dest
-            shutil.copytree(src, dest)
-            run(["xattr", "-cr", str(dest)], timeout=30)
+                if app_is_trusted(dest):
+                    _clear_quarantine(dest)
+                    return dest
+                _remove_app(dest)
+            copied = run(["ditto", str(src), str(dest)], timeout=180)
+            if copied.returncode != 0:
+                last_error = (copied.stderr or copied.stdout or "could not copy").strip()
+                continue
+            _clear_quarantine(dest)
+            if not app_is_trusted(dest):
+                last_error = "macOS still calls it damaged"
+                _remove_app(dest)
+                continue
             emit({"type": "log", "id": step_id, "text": f"Installed {app_name} to {dest}"})
             return dest
         except OSError as exc:
@@ -185,15 +244,31 @@ def install_app_from_zip(url: str, app_name: str, step_id: str) -> Path:
 
 
 def ollama_binary() -> str | None:
-    for path in (
+    app = existing_app("Ollama.app")
+    trusted = bool(app and app_is_trusted(app))
+    if trusted and app is not None:
+        _clear_quarantine(app)
+    candidates: list[str | None] = [
         which("ollama"),
         "/usr/local/bin/ollama",
         "/opt/homebrew/bin/ollama",
-        "/Applications/Ollama.app/Contents/Resources/ollama",
-        str(Path.home() / "Applications/Ollama.app/Contents/Resources/ollama"),
-    ):
-        if path and Path(path).is_file():
-            return path
+    ]
+    if trusted and app is not None:
+        for rel in ("Contents/Resources/ollama", "Contents/MacOS/ollama"):
+            candidates.append(str(app / rel))
+    for path in candidates:
+        if not path or not Path(path).is_file():
+            continue
+        # The damaged bundle's own binary is still on disk. macOS refuses
+        # to exec it and Python reports "No such file or directory".
+        if app is not None and not trusted:
+            try:
+                Path(path).resolve().relative_to(app.resolve())
+            except ValueError:
+                pass
+            else:
+                continue
+        return path
     return None
 
 
@@ -939,14 +1014,30 @@ def _transient_download(detail: str) -> bool:
 
 def ensure_ollama_ready(binary: str) -> str:
     """Return `ollama list` output once the app is actually answering."""
-    probe = run([binary, "list"], timeout=20)
+    try:
+        probe = run([binary, "list"], timeout=20)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Ollama is on this Mac, but macOS will not run it. "
+            "Run Yarn Setup again so it can replace that copy."
+        ) from exc
     if probe.returncode == 0:
         return probe.stdout or ""
-    subprocess.Popen(["open", "-a", "Ollama"])
+    app = existing_app("Ollama.app")
+    if app and app_is_trusted(app):
+        subprocess.Popen(["open", "-a", str(app)])
+    else:
+        subprocess.Popen(["open", "-a", "Ollama"])
     last = (probe.stderr or probe.stdout or "").strip()
     for _ in range(30):
         time.sleep(2)
-        probe = run([binary, "list"], timeout=20)
+        try:
+            probe = run([binary, "list"], timeout=20)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Ollama is on this Mac, but macOS will not run it. "
+                "Run Yarn Setup again so it can replace that copy."
+            ) from exc
         if probe.returncode == 0:
             return probe.stdout or ""
         last = (probe.stderr or probe.stdout or last).strip()
@@ -1042,6 +1133,11 @@ def step_ollama(repo: Path) -> None:
             raise RuntimeError(
                 f"Could not install Ollama ({exc}). Open Ollama, then run Yarn Setup again."
             ) from exc
+        if not app_is_trusted(app):
+            raise RuntimeError(
+                "Ollama was installed, but macOS still calls it damaged. "
+                "Run Yarn Setup again."
+            )
         subprocess.Popen(["open", "-a", str(app)])
         for _ in range(20):
             time.sleep(2)
