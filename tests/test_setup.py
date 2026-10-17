@@ -323,9 +323,25 @@ def test_ollama_pull_does_not_retry_a_real_refusal(monkeypatch):
 def test_faster_whisper_repo_names_the_huggingface_id():
     assert (
         yarn_setup.faster_whisper_repo("large-v3-turbo")
-        == "Systran/faster-whisper-large-v3-turbo"
+        == "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
     )
     assert yarn_setup.faster_whisper_repo("org/custom") == "org/custom"
+    assert "Systran" not in yarn_setup.faster_whisper_repo("large-v3-turbo")
+
+
+def test_speech_failure_hides_the_traceback():
+    detail = (
+        "Traceback (most recent call last):\n"
+        '  File "/Users/megashhurst/Library/Application Support/Yarn/app/.venv/'
+        'lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py", '
+        "line 274, in snapshot_download\n"
+        "    repo_info = api.repo_info(repo_id=repo_id)\n"
+        "    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+        "Repository Not Found. Invalid username or password.\n"
+    )
+    plain = yarn_setup._plain_failure(detail)
+    assert plain == "Repository Not Found. Invalid username or password."
+    assert "site-packages" not in plain
 
 
 def test_step_whisper_prefetches_faster_whisper_when_there_is_no_cli(
@@ -359,8 +375,9 @@ def test_step_whisper_prefetches_faster_whisper_when_there_is_no_cli(
     yarn_setup.step_whisper(tmp_path)
     assert calls
     assert calls[0][0] == "/venv/bin/python"
-    assert "snapshot_download" in calls[0][-1]
-    assert "Systran/faster-whisper-large-v3-turbo" in calls[0][-1]
+    assert "download_model" in calls[0][-1]
+    assert "mobiuslabsgmbh/faster-whisper-large-v3-turbo" in calls[0][-1]
+    assert "Systran" not in calls[0][-1]
 
 
 def test_flatten_nested_speaker_model(tmp_path):

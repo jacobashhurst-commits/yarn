@@ -710,10 +710,32 @@ when = "after_meeting"
 
 
 def faster_whisper_repo(model: str) -> str:
-    """Hugging Face id faster-whisper loads for a short model name."""
+    """Hugging Face id faster-whisper loads for a short model name.
+
+    Systran/faster-whisper-large-v3-turbo now returns 401 to an anonymous
+    download. faster-whisper itself requests the mobius repo, which is public
+    and redirects to the same files.
+    """
     if "/" in model:
         return model
+    if model in ("large-v3-turbo", "turbo"):
+        return "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
     return f"Systran/faster-whisper-{model}"
+
+
+def _plain_failure(detail: str) -> str:
+    """The last real sentence of a tool failure, without a Python traceback."""
+    lines = []
+    for line in detail.splitlines():
+        text = line.strip()
+        if not text or text.startswith("File ") or text.startswith("Traceback"):
+            continue
+        if set(text) <= {"^"} or "site-packages" in text:
+            continue
+        lines.append(text)
+    if not lines:
+        return "the download did not finish"
+    return lines[-1][:500]
 
 
 def _prefetch_faster_whisper(repo: Path, model: str) -> None:
@@ -721,7 +743,8 @@ def _prefetch_faster_whisper(repo: Path, model: str) -> None:
 
     Config sets local_files_only, so a meeting will not download them later.
     A Mac without Homebrew never gets whisper-cli, and this is the engine
-    that install then selects.
+    that install then selects. download_model uses the same repo id the
+    transcriber will look up, so the cache actually hits.
     """
     repo_id = faster_whisper_repo(model)
     emit(
@@ -734,13 +757,13 @@ def _prefetch_faster_whisper(repo: Path, model: str) -> None:
     )
     py = venv_python(repo)
     code = (
-        "from huggingface_hub import snapshot_download\n"
-        f"print(snapshot_download({repo_id!r}))\n"
+        "from faster_whisper.utils import download_model\n"
+        f"print(download_model({repo_id!r}))\n"
     )
     proc = run([str(py), "-c", code], timeout=3600)
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "speech model download failed")[-2000:]
-        raise RuntimeError(detail)
+        detail = _plain_failure(proc.stderr or proc.stdout or "")
+        raise RuntimeError(f"Could not download the speech model. {detail}")
     emit({"type": "log", "id": "whisper", "text": "Speech model is on this Mac"})
 
 

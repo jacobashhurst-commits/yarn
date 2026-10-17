@@ -12,13 +12,20 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 xattr -cr "$REPO_DIR" 2>/dev/null || true
 # A double-clicked command does not see Homebrew. Look there before deciding
 # this Mac has no usable Python.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="/Library/Developer/CommandLineTools/usr/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 SWIFT_SRC="$REPO_DIR/ui/setup/YarnSetup.swift"
 APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Setup.app"
 APP_BIN="$APP_DIR/Contents/MacOS/YarnSetup"
 
 python_ok() {
   [[ -n "${1:-}" && -x "$1" ]] || return 1
+  # A Mac with no developer tools has a stub at /usr/bin/python3. Running it
+  # opens an installer and this command exits, so the person has to start
+  # Yarn Setup again after the download. Skip the stub and install Python
+  # ourselves, then keep going.
+  if [[ "$1" == /usr/bin/python3 ]] && ! xcode-select -p >/dev/null 2>&1; then
+    return 1
+  fi
   "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
     >/dev/null 2>&1
 }
@@ -99,6 +106,32 @@ if ! python_ok "$PYTHON"; then
   exit 1
 fi
 
+ensure_window_tools() {
+  export PATH="/Library/Developer/CommandLineTools/usr/bin:$PATH"
+  command -v swiftc >/dev/null 2>&1 && return 0
+  if xcode-select -p >/dev/null 2>&1; then
+    return 1
+  fi
+  echo "Yarn needs a one-time macOS install before the window can open." >&2
+  echo "A Mac window will ask to install the tools. Click Install." >&2
+  echo "Leave this window open. Yarn continues on its own when that finishes." >&2
+  xcode-select --install >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 360); do
+    export PATH="/Library/Developer/CommandLineTools/usr/bin:$PATH"
+    if command -v swiftc >/dev/null 2>&1; then
+      echo "Tools are in. Opening Yarn Setup." >&2
+      return 0
+    fi
+    if (( i % 12 == 0 )); then
+      echo "Still waiting for the macOS tools. Leave this window open." >&2
+    fi
+    sleep 5
+  done
+  echo "The tools did not finish. Continuing in this window." >&2
+  return 1
+}
+
 if [[ "${1:-}" == "--cli" ]]; then
   export PYTHONPATH="$REPO_DIR"
   export PATH="$REPO_DIR/.venv/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -138,6 +171,9 @@ PLIST
 }
 
 if [[ ! -x "$APP_BIN" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+  if ! command -v swiftc >/dev/null 2>&1; then
+    ensure_window_tools || true
+  fi
   if ! build_app; then
     echo "yarn-setup: could not build the window; running in the terminal instead" >&2
     export PYTHONPATH="$REPO_DIR"
