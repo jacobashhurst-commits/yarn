@@ -63,7 +63,12 @@ header all reversible later.
 
 ### Mac (Apple Silicon)
 
-Open the Yarn folder and double-click **Yarn Setup**. Read **Start here.txt**
+The share link is the [Yarn page](https://jacobashhurst-commits.github.io/yarn/).
+It downloads one zip, `Yarn.Setup.Apple.Silicon.zip`, and walks through the
+Mac security clicks. That zip is a GitHub Release, not Code → Download ZIP.
+Code → Download ZIP is the whole source tree.
+
+Open the folder from the release zip and double-click **Yarn Setup**. Read **Start here.txt**
 if the Mac refuses to open it (unsigned download). Setup copies Yarn out of
 Downloads into `~/Library/Application Support/Yarn` so the recorder can run
 as a background job — macOS blocks LaunchAgents from reading Downloads.

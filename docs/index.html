@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yarn</title>
+  <meta name="description" content="Yarn records meetings on your Mac and keeps them there. One download.">
+  <style>
+    :root {
+      --navy: #0d244b;
+      --blue: #167dff;
+      --ink: #19293d;
+      --muted: #617188;
+      --line: #e4ebf3;
+      --paper: #f6f8fb;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: white;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    header {
+      padding: 48px 24px 36px;
+      text-align: center;
+    }
+    header img { width: min(280px, 70vw); height: auto; }
+    h1 {
+      margin: 8px 0 0;
+      color: var(--navy);
+      font-size: 40px;
+      font-weight: 650;
+      letter-spacing: -0.03em;
+    }
+    .tag {
+      margin: 8px 0 0;
+      color: var(--blue);
+      font-size: 18px;
+      font-weight: 560;
+    }
+    .lede {
+      max-width: 38rem;
+      margin: 18px auto 0;
+      font-size: 17px;
+    }
+    .quiet { color: var(--muted); }
+    .download {
+      display: inline-block;
+      margin-top: 28px;
+      padding: 14px 28px;
+      background: var(--blue);
+      color: white;
+      text-decoration: none;
+      font-size: 17px;
+      font-weight: 650;
+      border-radius: 12px;
+    }
+    .download:hover { filter: brightness(1.05); }
+    .fine {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    main { max-width: 720px; margin: 0 auto; padding: 8px 24px 72px; }
+    h2 {
+      margin: 36px 0 8px;
+      color: var(--navy);
+      font-size: 22px;
+      letter-spacing: -0.02em;
+    }
+    .intro { margin: 0 0 18px; color: var(--muted); }
+    ol.steps { list-style: none; margin: 0; padding: 0; }
+    ol.steps li {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 14px;
+      padding: 18px 0;
+      border-top: 1px solid var(--line);
+    }
+    .num {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #e8f2ff;
+      color: var(--blue);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    h3 { margin: 6px 0 6px; font-size: 17px; color: var(--navy); }
+    p { margin: 0; }
+    .warn {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--paper);
+      border-radius: 10px;
+      color: var(--navy);
+    }
+    footer {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0 24px 48px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    footer a { color: var(--blue); }
+    @media (max-width: 560px) {
+      h1 { font-size: 32px; }
+      header { padding-top: 32px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="yarn-mark.png" alt="Yarn">
+    <h1>Yarn</h1>
+    <p class="tag">Your meetings. Your memories. Your computer.</p>
+    <p class="lede">Yarn records a meeting when you press start, writes down who said what, and keeps it on your Mac.</p>
+    <a class="download" href="https://github.com/jacobashhurst-commits/yarn/releases/latest/download/Yarn.Setup.Apple.Silicon.zip">Download for Apple Silicon</a>
+    <p class="fine">One zip. Apple Silicon Macs only. No account. Nothing is uploaded.</p>
+  </header>
+  <main>
+    <h2>After the download</h2>
+    <p class="intro">The zip is the installer. The speech model and a few other pieces download next, onto this Mac, while a window stays open. That is the slow part. You only do it once.</p>
+    <ol class="steps">
+      <li>
+        <div class="num">1</div>
+        <div>
+          <h3>Open the zip</h3>
+          <p>It lands in Downloads. Double-click it. You should see Yarn Setup and a note called Start here.</p>
+        </div>
+      </li>
+      <li>
+        <div class="num">2</div>
+        <div>
+          <h3>Double-click Yarn Setup</h3>
+          <p>Not the bin folder. The Yarn Setup file sitting next to the note.</p>
+        </div>
+      </li>
+      <li>
+        <div class="num">3</div>
+        <div>
+          <h3>If the Mac says it was not opened</h3>
+          <p>It will offer Done and Move to Bin.</p>
+          <p class="warn">Click Done. Do not click Move to Bin.</p>
+          <p style="margin-top:10px">Then open System Settings from the Apple menu. Click Privacy &amp; Security. Scroll to the Security section, past Camera and Microphone. When you see Yarn Setup blocked, click Open Anyway. If it asks again, click Open.</p>
+          <p style="margin-top:10px">If Open Anyway is not there yet, double-click Yarn Setup once more, click Done, and look again. The button appears after the Mac has tried to open it.</p>
+        </div>
+      </li>
+      <li>
+        <div class="num">4</div>
+        <div>
+          <h3>Click Get started, and leave the window open</h3>
+          <p>The long parts are downloads. Your Mac may ask for your password, the microphone, SwiftBar, and Ollama. Those are fine. Click Allow or Open.</p>
+          <p style="margin-top:10px">When it says Yarn is ready, it is in the Dock. Click that icon to record. There is also a small Yarn icon in the menu bar.</p>
+        </div>
+      </li>
+    </ol>
+  </main>
+  <footer>
+    <p>Everything Yarn keeps stays on this Mac. The source is on <a href="https://github.com/jacobashhurst-commits/yarn">GitHub</a> if you want to read it. This page is the download.</p>
+  </footer>
+</body>
+</html>

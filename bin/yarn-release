@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#
+# Build the zip people download from the Yarn page.
+# It is the installer folder, not the whole source tree. Models are still
+# fetched by Yarn Setup after this zip is opened. That is deliberate.
+#
+#   bin/yarn-release
+#   # writes dist/Yarn.Setup.Apple.Silicon.zip
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STAGE="$(mktemp -d)"
+NAME="Yarn.Setup.Apple.Silicon"
+ROOT="$STAGE/$NAME"
+OUT="$REPO_DIR/dist/$NAME.zip"
+
+mkdir -p "$ROOT" "$REPO_DIR/dist"
+
+copy() {
+  local src="$1"
+  mkdir -p "$ROOT/$(dirname "$src")"
+  cp -R "$REPO_DIR/$src" "$ROOT/$src"
+}
+
+for path in \
+  "Yarn Setup.command" \
+  "Start here.txt" \
+  "README.md" \
+  "pyproject.toml" \
+  "uv.lock" \
+  "requirements.txt" \
+  "config.example.toml" \
+  "meeting_archive" \
+  "bin" \
+  "ui"
+do
+  copy "$path"
+done
+
+find "$ROOT" \( -name '__pycache__' -o -name '.DS_Store' -o -name '._*' \) -print0 \
+  | while IFS= read -r -d '' path; do
+      rm -rf "$path"
+    done
+find "$ROOT" -name '*.pyc' -delete || true
+chmod +x "$ROOT/Yarn Setup.command" "$ROOT"/bin/*
+
+rm -f "$OUT"
+COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$ROOT" "$OUT"
+rm -rf "$STAGE"
+echo "$OUT"
