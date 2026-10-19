@@ -45,6 +45,9 @@ final class Controller: NSObject, NSWindowDelegate {
     let closeButton = NSButton(title: "Close", target: nil, action: nil)
     let doneNote = NSTextField(wrappingLabelWithString: "Yarn is installed, but the app was not where Setup expected it. Open Yarn from your home Applications folder.")
     private var rows: [FaceRow] = []
+    private let activityScroll = NSScrollView()
+    private let activityText = NSTextView()
+    private var activityLines: [String] = []
 
     init(repo: String, python: String) {
         self.repo = repo
@@ -106,7 +109,7 @@ final class Controller: NSObject, NSWindowDelegate {
         ))
         welcomeBox.setCustomSpacing(14, after: welcomeBox.arrangedSubviews.last!)
         welcomeBox.addArrangedSubview(label(
-            "A small brain needs a little setup.",
+            "Small brain. Surprisingly useful. (Like its creator.)",
             size: 15, weight: .semibold, color: navy
         ))
         welcomeBox.addArrangedSubview(label(
@@ -162,7 +165,7 @@ final class Controller: NSObject, NSWindowDelegate {
         heading.textColor = navy
         personality.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         personality.textColor = blue
-        personality.maximumNumberOfLines = 2
+        personality.maximumNumberOfLines = 3
         personality.preferredMaxLayoutWidth = textWidth
         detail.font = NSFont.systemFont(ofSize: 13)
         detail.textColor = yarnColor(0xB42318)
@@ -178,6 +181,12 @@ final class Controller: NSObject, NSWindowDelegate {
             progressBox.addArrangedSubview(row.view)
         }
         progressBox.addArrangedSubview(detail)
+        buildActivity()
+        progressBox.addArrangedSubview(activityScroll)
+        for view in progressBox.arrangedSubviews {
+            view.setContentHuggingPriority(.defaultHigh, for: .vertical)
+        }
+        activityScroll.setContentHuggingPriority(.init(1), for: .vertical)
 
         closeButton.target = self
         closeButton.action = #selector(cancelRun)
@@ -241,6 +250,7 @@ final class Controller: NSObject, NSWindowDelegate {
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         stack.layoutSubtreeIfNeeded()
         let height = ceil(stack.fittingSize.height)
@@ -394,7 +404,9 @@ final class Controller: NSObject, NSWindowDelegate {
             set(id, state: "running")
             downloadPercent = nil
         case "log":
-            break
+            if let text = obj["text"] as? String {
+                noteActivity(text)
+            }
         case "progress":
             if let id = obj["id"] as? String, modelIDs.contains(id),
                let percent = obj["percent"] as? Int {
@@ -421,6 +433,48 @@ final class Controller: NSObject, NSWindowDelegate {
         refreshRows()
     }
 
+    private func buildActivity() {
+        activityText.isEditable = false
+        activityText.isSelectable = true
+        activityText.drawsBackground = false
+        activityText.isRichText = false
+        activityText.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        activityText.textColor = yarnColor(0x8A97A8)
+        activityText.textContainerInset = NSSize(width: 0, height: 8)
+        activityText.isVerticallyResizable = true
+        activityText.isHorizontallyResizable = false
+        activityText.autoresizingMask = [.width]
+        activityText.textContainer?.widthTracksTextView = true
+        activityText.textContainer?.lineFragmentPadding = 2
+        activityScroll.documentView = activityText
+        activityScroll.drawsBackground = false
+        activityScroll.borderType = .noBorder
+        activityScroll.hasVerticalScroller = true
+        activityScroll.autohidesScrollers = true
+        activityScroll.translatesAutoresizingMaskIntoConstraints = false
+        activityScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        activityScroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        activityScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
+    }
+
+    private func noteActivity(_ line: String) {
+        let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        activityLines.append(clean)
+        if activityLines.count > 80 {
+            activityLines.removeFirst(activityLines.count - 80)
+        }
+        let shown = activityLines.joined(separator: "\n")
+        activityText.textStorage?.setAttributedString(NSAttributedString(
+            string: shown,
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: yarnColor(0x8A97A8),
+            ]
+        ))
+        activityText.scrollToEndOfDocument(nil)
+    }
+
     private func set(_ id: String, state: String) {
         if let i = steps.firstIndex(where: { $0.id == id }) {
             steps[i].state = state
@@ -435,7 +489,7 @@ final class Controller: NSObject, NSWindowDelegate {
         }
         if !finished {
             personality.stringValue = modelsRunning
-                ? "Downloading a small brain. Please be patient."
+                ? "Downloading a small brain. Will take a minute. When was the last time you called your Mum?"
                 : ""
         }
         for (index, group) in faceGroups.enumerated() {
