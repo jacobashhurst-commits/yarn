@@ -64,9 +64,10 @@ header all reversible later.
 ### Mac (Apple Silicon)
 
 The share link is the [Yarn page](https://jacobashhurst-commits.github.io/yarn/).
-It downloads one zip, `Yarn.Setup.Apple.Silicon.zip`, and walks through the
-Mac security clicks. That zip is a GitHub Release, not Code → Download ZIP.
-Code → Download ZIP is the whole source tree.
+It explains Yarn and downloads one zip, `Yarn.Setup.Apple.Silicon.zip`.
+That zip is a GitHub Release, not Code → Download ZIP.
+Code → Download ZIP is the whole source tree. The release zip already
+contains Yarn Setup, so a Mac does not need Xcode or Python beforehand.
 
 Open the folder from the release zip and double-click **Yarn Setup**. Read **Start here.txt**
 if the Mac refuses to open it (unsigned download). Setup copies Yarn out of

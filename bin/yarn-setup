@@ -170,6 +170,15 @@ PLIST
   mv -f "$APP_BIN.partial" "$APP_BIN"
 }
 
+# The release zip already contains this app, built for Apple Silicon.
+# A Mac with no Xcode, Homebrew, or Python can open it. Compiling here
+# would stop and ask them to install developer tools first.
+BUNDLED="$REPO_DIR/Yarn Setup.app"
+if [[ -x "$BUNDLED/Contents/MacOS/YarnSetup" ]]; then
+  xattr -cr "$BUNDLED" 2>/dev/null || true
+  exec open -n "$BUNDLED" --args --repo "$REPO_DIR" --python "$PYTHON"
+fi
+
 if [[ ! -x "$APP_BIN" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
   if ! command -v swiftc >/dev/null 2>&1; then
     ensure_window_tools || true

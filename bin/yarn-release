@@ -45,6 +45,38 @@ find "$ROOT" \( -name '__pycache__' -o -name '.DS_Store' -o -name '._*' \) -prin
 find "$ROOT" -name '*.pyc' -delete || true
 chmod +x "$ROOT/Yarn Setup.command" "$ROOT"/bin/*
 
+# Ship the Setup window already built. Otherwise the first double-click
+# needs Xcode's compiler, which a normal Mac does not have.
+APP="$ROOT/Yarn Setup.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.setup</string>
+  <key>CFBundleName</key><string>Yarn Setup</string>
+  <key>CFBundleDisplayName</key><string>Setup</string>
+  <key>CFBundleExecutable</key><string>YarnSetup</string>
+  <key>CFBundleIconFile</key><string>Yarn</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Yarn records meetings you start, on this Mac only.</string>
+</dict>
+</plist>
+PLIST
+cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
+  "$APP/Contents/Resources/yarn-mark.png"
+swiftc -parse-as-library -O -o "$APP/Contents/MacOS/YarnSetup" \
+  "$REPO_DIR/ui/setup/YarnSetup.swift" \
+  "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
+  -framework AppKit
+"$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP" Setup
+xattr -cr "$APP" 2>/dev/null || true
+
 rm -f "$OUT"
 COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$ROOT" "$OUT"
 rm -rf "$STAGE"
