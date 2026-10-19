@@ -30,6 +30,7 @@ from meeting_archive.speakers import (
     leftover_assignment,
     load_library,
     meeting_banner,
+    name_needs_detail,
     remember_confirmation,
     render_voices_html,
     snippet_window,
@@ -864,6 +865,32 @@ def test_usable_dialog_guess_rejects_transcript_and_locations():
     assert usable_dialog_guess("Ket", attendees=["Lauren", "Ket", "Jacob"]) == "Ket"
     assert usable_dialog_guess("Jacob", known=["Jacob", "Adam"]) == "Jacob"
     assert usable_dialog_guess("Marina") == "Marina"
+
+
+def test_jacob_and_Jacob_are_one_person(cfg):
+    first = remember_confirmation(cfg, name="Jacob", meeting_id="2026-09-25T11-00-00")
+    again = remember_confirmation(cfg, name="jacob", meeting_id="2026-09-26T11-00-00")
+    assert first.name == "Jacob"
+    assert again.name == "Jacob"
+    assert again.confirmation_count == 2
+    assert len(load_library(cfg)) == 1
+
+
+def test_a_second_jacob_with_a_title_stays_a_second_person(cfg):
+    remember_confirmation(cfg, name="Jacob", meeting_id="2026-09-25T11-00-00")
+    remember_confirmation(
+        cfg,
+        name="jacob",
+        meeting_id="2026-09-26T11-00-00",
+        title="Finance director",
+        distinct=True,
+    )
+    people = load_library(cfg)
+    assert len(people) == 2
+    assert {person.title for person in people} == {"", "Finance director"}
+    assert name_needs_detail(people, "Jacob")
+    assert not name_needs_detail(people, "Jacob Smith")
+    assert not name_needs_detail(people, "Jacob", title="Engineer")
 
 
 def test_known_speakers_html_lists_confirmed_voices(cfg):

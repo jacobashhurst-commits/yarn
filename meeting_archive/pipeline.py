@@ -451,11 +451,14 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     detected = attendee_suggestion(transcript.detected_names)
     header = ""
     if cfg.chunk.include_context_header:
+        from .speakers import labels_for_search
+
         header = context_header(
             date_label=label,
             attendees=notes.get("attendees", ""),
             detected_names=detected,
             notes=notes.get("notes", ""),
+            identified=labels_for_search(cfg, list(roster.values())),
         )
 
     chunks = chunk_turns(
@@ -518,11 +521,25 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
             processing=records.processing_from_job(jobs.load(cfg, meeting_id)),
         ),
     )
+    from .speakers import load_library
+
+    titles = {
+        person.name.casefold(): person.title
+        for person in load_library(cfg)
+        if person.title.strip()
+    }
+    html_path = cfg.transcript_html(meeting_id)
+    records.write_text_atomic(
+        html_path,
+        records.render_transcript_html(transcript, labeller, notes, titles=titles),
+    )
     if previous_md != md_path and previous_md.exists():
         previous_md.unlink()
+        previous_md.with_suffix(".html").unlink(missing_ok=True)
     stamped = cfg.transcript_json(meeting_id).with_suffix(".md")
     if stamped != md_path and stamped.exists():
         stamped.unlink()
+        stamped.with_suffix(".html").unlink(missing_ok=True)
 
     if notes and not notes.get("applied", True):
         records.mark_notes_applied(cfg.notes_json(meeting_id))

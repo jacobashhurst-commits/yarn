@@ -89,12 +89,15 @@ def context_header(
     attendees: str = "",
     detected_names: str = "",
     notes: str = "",
+    identified: str = "",
 ) -> str:
     """One compact line of meeting context, prepended to each chunk."""
     parts = [f"Meeting {date_label}"]
     people = attendees or detected_names
     if people:
         parts.append(f"Present: {people}")
+    if identified:
+        parts.append(f"Speakers: {identified}")
     if notes:
         parts.append(f"Notes: {notes}")
     return " | ".join(parts)

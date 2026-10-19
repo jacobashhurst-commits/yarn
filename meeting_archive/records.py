@@ -489,6 +489,132 @@ def render_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_transcript_html(
+    transcript: Transcript,
+    label_fn,
+    notes: dict | None = None,
+    *,
+    titles: dict[str, str] | None = None,
+) -> str:
+    """Readable meeting page. Same facts as the markdown, in the Yarn style."""
+    from . import htmltheme
+
+    notes = notes or {}
+    titles = titles or {}
+    roster = speaker_roster(notes)
+    minutes = int(transcript.duration_s // 60)
+    seconds = int(transcript.duration_s % 60)
+    label_turn = _turn_labeller(label_fn)
+    heading = transcript.title.strip() if transcript.title else "Meeting"
+    when = date_label(transcript.meeting_id)
+
+    def titled(name: str) -> str:
+        title = titles.get(name.casefold(), "").strip()
+        shown = htmltheme.html_escape(name)
+        if title:
+            shown += f' <span class="role">{htmltheme.html_escape(title)}</span>'
+        return shown
+
+    summary = name_speakers_in_text(transcript.summary.strip(), transcript, roster)
+    if summary:
+        summary_html = f"<p>{htmltheme.html_escape(summary)}</p>"
+    elif transcript.summary_error:
+        summary_html = f'<p class="empty">Summary unavailable.</p>'
+    elif transcript.turns:
+        summary_html = '<p class="empty">Summary has not been written yet.</p>'
+    else:
+        summary_html = '<p class="empty">No speech was available to summarize.</p>'
+
+    voice_rows = []
+    if transcript.speaker_profiles:
+        named: dict[str, dict] = {}
+        unnamed: list = []
+        for profile in transcript.speaker_profiles:
+            name = str(roster.get(profile.speaker, "")).strip()
+            if not name:
+                unnamed.append(profile)
+                continue
+            key = name.casefold()
+            bucket = named.setdefault(
+                key,
+                {"name": name, "speaking_s": 0.0, "turns": 0, "quip": ""},
+            )
+            speaking = float(profile.speaking_s or 0.0)
+            bucket["speaking_s"] += speaking
+            bucket["turns"] += int(profile.turns or 0)
+            if profile.quip and speaking >= float(bucket.get("quip_s", -1)):
+                bucket["quip"] = profile.quip
+                bucket["quip_s"] = speaking
+        for bucket in named.values():
+            quip = (
+                f'<div class="why">“{htmltheme.html_escape(bucket["quip"])}”</div>'
+                if bucket["quip"]
+                else ""
+            )
+            voice_rows.append(
+                f'<li><div class="item">{titled(bucket["name"])}</div>'
+                f'<div class="mono">{format_duration(bucket["speaking_s"])} '
+                f'across {bucket["turns"]} turns</div>{quip}</li>'
+            )
+        display = speaker_display_indices(transcript.speaker_profiles)
+        for profile in unnamed:
+            index = display.get(profile.speaker) or speaker_index(profile.speaker) or "?"
+            quip = (
+                f'<div class="why">“{htmltheme.html_escape(profile.quip)}”</div>'
+                if profile.quip
+                else ""
+            )
+            voice_rows.append(
+                f'<li><div class="item">Speaker {htmltheme.html_escape(str(index))}</div>'
+                f'<div class="mono">{format_duration(profile.speaking_s)} '
+                f"across {profile.turns} turns, not yet identified</div>{quip}</li>"
+            )
+
+    turns_html = []
+    if not transcript.turns:
+        turns_html.append(
+            '<p class="empty">No speech was recognised in this recording.</p>'
+        )
+    else:
+        for speaker, start, end, text in _coalesce_turns_for_display(
+            transcript.turns, label_turn
+        ):
+            start_stamp = format_timestamp(start)
+            stamp = (
+                f"{start_stamp}–{format_timestamp(end)}"
+                if end - start >= 1.0
+                else start_stamp
+            )
+            turns_html.append(
+                '<article class="turn">'
+                f'<div class="turn-meta"><span class="mono">{htmltheme.html_escape(stamp)}</span> '
+                f"{titled(speaker)}</div>"
+                f"<p>{htmltheme.html_escape(text)}</p>"
+                "</article>"
+            )
+
+    attendees = str(notes.get("attendees") or "").strip()
+    attendee_line = (
+        f'<p class="lede">{htmltheme.html_escape(attendees)}</p>' if attendees else ""
+    )
+    voices_card = ""
+    if voice_rows:
+        voices_card = (
+            '<section class="card"><h2>Voices</h2><ol class="items">'
+            + "".join(voice_rows)
+            + "</ol></section>"
+        )
+    body = f"""
+  {htmltheme.masthead("Transcript", heading)}
+  <p class="when">{htmltheme.html_escape(when)} · {minutes}m {seconds:02d}s · saved on this Mac</p>
+  {attendee_line}
+  <section class="card"><h2>Summary</h2>{summary_html}</section>
+  {voices_card}
+  <section class="card"><h2>Transcript</h2>{"".join(turns_html)}</section>
+"""
+    return htmltheme.document(f"Yarn transcript, {heading}", body)
+
+
 def _format_processing_span(seconds: float) -> str:
     """Like format_duration, but uses hours once a stage runs past an hour."""
     total = max(0, int(seconds))

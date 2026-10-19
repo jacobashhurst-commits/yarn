@@ -1,26 +1,26 @@
-// Yarn Setup - a window, not a terminal.
-//
-//   YarnSetup --repo /path/to/yarn. --python /usr/bin/python3
-//
-// Built by bin/yarn-setup into an .app and launched with `open`.
+// Yarn Setup. The first window is a short welcome, then the real install,
+// then a short "you're done". How to record, background processing, audio
+// retention and the daily brief are explained when Yarn itself opens.
 
 import AppKit
 import Darwin
 
 struct Step: Equatable {
     let id: String
-    let title: String
     var state: String = "pending" // pending | running | done | failed
-    var elapsed: String = ""
-    var detail: String = ""
 }
 
-func fmtMs(_ ms: Int) -> String {
-    if ms < 1000 { return "\(ms)ms" }
-    let s = Double(ms) / 1000.0
-    if s < 60 { return String(format: "%.1fs", s) }
-    return String(format: "%.0fm %.0fs", s / 60, s.truncatingRemainder(dividingBy: 60))
-}
+// Shown in the order the installer actually runs them. The labels are the
+// ones people see. The ids are the worker's, so a tick means that work finished.
+private let faceGroups: [(title: String, ids: [String])] = [
+    ("Checking your Mac", ["prereqs"]),
+    ("Installing required components", ["venv", "deps", "tools"]),
+    ("Setting up your meeting archive", ["config"]),
+    ("Downloading local AI models", ["whisper", "speakers", "ollama"]),
+    ("Adding Yarn to your menu bar", ["menubar"]),
+]
+
+private let modelIDs: Set<String> = ["whisper", "speakers", "ollama"]
 
 final class Controller: NSObject, NSWindowDelegate {
     let repo: String
@@ -28,40 +28,41 @@ final class Controller: NSObject, NSWindowDelegate {
     var steps: [Step] = []
     var worker: Process?
     var finished = false
+    var downloadPercent: Int?
+    var stray = ""
 
     let window: NSWindow
-    let heading = NSTextField(labelWithString: "Welcome to Yarn")
-    let subtitle = NSTextField(labelWithString: "")
-    let welcome = NSTextField(wrappingLabelWithString: "")
-    let startButton = NSButton(title: "Get started", target: nil, action: nil)
-    let fastBox = NSButton(checkboxWithTitle: "Fast summaries (smaller, quicker)", target: nil, action: nil)
-    let accurateBox = NSButton(checkboxWithTitle: "Accurate summaries (better writing, more memory)", target: nil, action: nil)
-    let summaryHint = NSTextField(wrappingLabelWithString: "")
-    let bar = NSProgressIndicator()
-    let list = NSStackView()
+    let stack = NSStackView()
+    let logo = NSImageView()
+    let welcomeBox = NSStackView()
+    let progressBox = NSStackView()
+    let doneBox = NSStackView()
+    let heading = NSTextField(labelWithString: "Installing Yarn")
+    let personality = NSTextField(wrappingLabelWithString: "")
     let detail = NSTextField(wrappingLabelWithString: "")
-    let cancel = NSButton(title: "Not now", target: nil, action: nil)
-    var statusLine = ""
-    var statusNote = ""
-    var stepIndex = 1
-    var stepTotal = 1
-    var rowLabels: [NSTextField] = []
-    var rowTimes: [NSTextField] = []
-    var rowMarks: [NSTextField] = []
+    private let installButton = SetupButton(title: "Install Yarn")
+    private let openButton = SetupButton(title: "Open Yarn")
+    let closeButton = NSButton(title: "Close", target: nil, action: nil)
+    let doneNote = NSTextField(wrappingLabelWithString: "Yarn is installed, but the app was not where Setup expected it. Open Yarn from your home Applications folder.")
+    private var rows: [FaceRow] = []
 
     init(repo: String, python: String) {
         self.repo = repo
         self.python = python
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 640),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         super.init()
-        window.title = "Yarn"
+        window.title = "Yarn Setup"
         window.delegate = self
         window.isReleasedWhenClosed = false
+        // The mark is the blue yarn on a clear background. The window stays
+        // light so that mark sits on white in dark mode as well.
+        window.appearance = NSAppearance(named: .aqua)
+        window.backgroundColor = .white
         build()
     }
 
@@ -72,169 +73,262 @@ final class Controller: NSObject, NSWindowDelegate {
     }
 
     private func build() {
+        let ink = yarnColor(0x19293D)
+        let navy = yarnColor(0x0D244B)
+        let slate = yarnColor(0x617188)
+        let blue = yarnColor(0x167DFF)
+
+        logo.image = loadMark()
+        logo.imageScaling = .scaleProportionallyUpOrDown
+        logo.translatesAutoresizingMaskIntoConstraints = false
+        logo.widthAnchor.constraint(equalToConstant: 132).isActive = true
+        logo.heightAnchor.constraint(equalToConstant: 65).isActive = true
+
+        welcomeBox.orientation = .vertical
+        welcomeBox.alignment = .leading
+        welcomeBox.spacing = 8
+        welcomeBox.translatesAutoresizingMaskIntoConstraints = false
+
+        welcomeBox.addArrangedSubview(label("Welcome to Yarn", size: 26, weight: .semibold, color: navy))
+        let tag = label(
+            "Your meetings. Your memories. Your computer.",
+            size: 15, weight: .medium, color: blue
+        )
+        welcomeBox.addArrangedSubview(tag)
+        welcomeBox.setCustomSpacing(12, after: tag)
+        welcomeBox.addArrangedSubview(label(
+            "Yarn records your meetings, figures out who said what, and turns conversations into searchable notes and a daily brief.",
+            size: 13, weight: .regular, color: ink
+        ))
+        welcomeBox.addArrangedSubview(label(
+            "No subscriptions. No cloud AI processing. Your conversations stay on your Mac.",
+            size: 13, weight: .regular, color: ink
+        ))
+        welcomeBox.setCustomSpacing(14, after: welcomeBox.arrangedSubviews.last!)
+        welcomeBox.addArrangedSubview(label(
+            "A small brain needs a little setup.",
+            size: 15, weight: .semibold, color: navy
+        ))
+        welcomeBox.addArrangedSubview(label(
+            "Yarn uses free, local AI models instead of sending your meetings to someone else's computer.",
+            size: 13, weight: .regular, color: ink
+        ))
+        welcomeBox.addArrangedSubview(label(
+            "We'll get everything ready for you.",
+            size: 13, weight: .regular, color: ink
+        ))
+        welcomeBox.setCustomSpacing(12, after: welcomeBox.arrangedSubviews.last!)
+        welcomeBox.addArrangedSubview(label(
+            "What we're setting up:",
+            size: 13, weight: .semibold, color: navy
+        ))
+        addSetupLine(
+            "1",
+            "Yarn. Your meeting recorder and searchable archive.",
+            blue: blue, ink: ink
+        )
+        addSetupLine(
+            "2",
+            "Local AI. Free models for transcription, speaker identification and summaries.",
+            blue: blue, ink: ink
+        )
+        addSetupLine(
+            "3",
+            "Your menu bar. The little Yarn icon, ready when you need it.",
+            blue: blue, ink: ink
+        )
+        welcomeBox.setCustomSpacing(12, after: welcomeBox.arrangedSubviews.last!)
+        welcomeBox.addArrangedSubview(label(
+            "Some components need downloading once. After that, Yarn processes your meetings locally.",
+            size: 12, weight: .regular, color: slate
+        ))
+
+        installButton.target = self
+        installButton.action = #selector(beginInstall)
+        installButton.keyEquivalent = "\r"
+        installButton.translatesAutoresizingMaskIntoConstraints = false
+        welcomeBox.setCustomSpacing(16, after: welcomeBox.arrangedSubviews.last!)
+        welcomeBox.addArrangedSubview(installButton)
+        installButton.widthAnchor.constraint(equalToConstant: 148).isActive = true
+        installButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+
+        progressBox.orientation = .vertical
+        progressBox.alignment = .leading
+        progressBox.spacing = 10
+        progressBox.translatesAutoresizingMaskIntoConstraints = false
+        progressBox.isHidden = true
+
         heading.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
-        subtitle.font = NSFont.systemFont(ofSize: 13)
-        subtitle.textColor = .secondaryLabelColor
-        welcome.font = NSFont.systemFont(ofSize: 14)
-        welcome.textColor = .labelColor
-        welcome.maximumNumberOfLines = 0
-        welcome.preferredMaxLayoutWidth = 664
-        welcome.stringValue = """
-        Yarn records meetings you start, on this Mac only. Nothing is uploaded.
-
-        When this finishes, Yarn is in the Dock. Click it to record, watch a meeting process, name the voices, read the daily brief, or ask about your meetings. A small menu-bar icon does the same things.
-
-        It will install two free, open-source apps if they are not already here:
-
-        • SwiftBar, the menu-bar icon
-        • Ollama, summaries and Ask Yarn, still on this computer
-
-        macOS may ask for your password or microphone permission. That’s normal. Click Get started and wait. The long steps are downloads, not homework.
-        """
-        let ram = memoryGB()
-        let neo = ram > 0 && ram <= 10
-        fastBox.state = .on
-        accurateBox.state = neo ? .off : .on
-        accurateBox.isEnabled = !neo
-        summaryHint.font = NSFont.systemFont(ofSize: 12)
-        summaryHint.textColor = .secondaryLabelColor
-        summaryHint.maximumNumberOfLines = 0
-        summaryHint.preferredMaxLayoutWidth = 664
-        if neo {
-            summaryHint.stringValue = String(
-                format: "This Mac has %.0f GB, so it can only run Fast. Accurate needs about 16 GB.",
-                ram
-            )
-            fastBox.isEnabled = false
-        } else {
-            summaryHint.stringValue = "Download Fast, Accurate, or both. You pick which one Yarn uses in the menu bar."
-        }
-        startButton.target = self
-        startButton.action = #selector(beginInstall)
-        startButton.keyEquivalent = "\r"
-        bar.isHidden = true
-        list.isHidden = true
-        detail.isHidden = true
-        bar.isIndeterminate = false
-        bar.minValue = 0
-        bar.maxValue = 100
-        bar.doubleValue = 0
-        detail.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        detail.textColor = .secondaryLabelColor
+        heading.textColor = navy
+        personality.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        personality.textColor = blue
+        personality.maximumNumberOfLines = 2
+        personality.preferredMaxLayoutWidth = textWidth
+        detail.font = NSFont.systemFont(ofSize: 13)
+        detail.textColor = yarnColor(0xB42318)
         detail.maximumNumberOfLines = 6
-        cancel.target = self
-        cancel.action = #selector(cancelRun)
-        cancel.keyEquivalent = "\u{1b}"
+        detail.preferredMaxLayoutWidth = textWidth
+        detail.isHidden = true
 
-        list.orientation = .vertical
-        list.alignment = .leading
-        list.spacing = 10
-        list.translatesAutoresizingMaskIntoConstraints = false
+        progressBox.addArrangedSubview(heading)
+        progressBox.addArrangedSubview(personality)
+        for group in faceGroups {
+            let row = FaceRow(title: group.title)
+            rows.append(row)
+            progressBox.addArrangedSubview(row.view)
+        }
+        progressBox.addArrangedSubview(detail)
 
-        let stack = NSStackView(views: [
-            heading, subtitle, welcome, summaryHint, fastBox, accurateBox,
-            startButton, bar, list, detail, cancel,
+        closeButton.target = self
+        closeButton.action = #selector(cancelRun)
+        closeButton.keyEquivalent = "\u{1b}"
+        closeButton.isHidden = true
+        progressBox.addArrangedSubview(closeButton)
+
+        doneBox.orientation = .vertical
+        doneBox.alignment = .leading
+        doneBox.spacing = 10
+        doneBox.translatesAutoresizingMaskIntoConstraints = false
+        doneBox.isHidden = true
+        doneBox.addArrangedSubview(label("You're all set.", size: 26, weight: .semibold, color: navy))
+        doneBox.addArrangedSubview(label(
+            "Yarn is ready to remember the things you won't.",
+            size: 15, weight: .regular, color: ink
+        ))
+        openButton.target = self
+        openButton.action = #selector(openYarn)
+        openButton.keyEquivalent = "\r"
+        openButton.translatesAutoresizingMaskIntoConstraints = false
+        doneBox.setCustomSpacing(16, after: doneBox.arrangedSubviews.last!)
+        doneBox.addArrangedSubview(openButton)
+        openButton.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        openButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        doneNote.font = NSFont.systemFont(ofSize: 13)
+        doneNote.textColor = yarnColor(0xB42318)
+        doneNote.maximumNumberOfLines = 0
+        doneNote.preferredMaxLayoutWidth = textWidth
+        doneNote.isHidden = true
+
+        let logoRow = NSView()
+        logoRow.translatesAutoresizingMaskIntoConstraints = false
+        logoRow.addSubview(logo)
+        NSLayoutConstraint.activate([
+            logo.topAnchor.constraint(equalTo: logoRow.topAnchor),
+            logo.bottomAnchor.constraint(equalTo: logoRow.bottomAnchor),
+            logo.centerXAnchor.constraint(equalTo: logoRow.centerXAnchor),
+            logoRow.widthAnchor.constraint(equalToConstant: textWidth),
         ])
+
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 20, right: 28)
+        stack.spacing = 16
+        stack.edgeInsets = NSEdgeInsets(top: 22, left: 28, bottom: 22, right: 28)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        welcome.widthAnchor.constraint(equalToConstant: 664).isActive = true
-        bar.widthAnchor.constraint(equalToConstant: 664).isActive = true
-        detail.widthAnchor.constraint(equalToConstant: 664).isActive = true
+        stack.addArrangedSubview(logoRow)
+        stack.addArrangedSubview(welcomeBox)
+        stack.addArrangedSubview(progressBox)
+        stack.addArrangedSubview(doneBox)
+        welcomeBox.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
+        progressBox.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
+        doneBox.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
 
-        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 720, height: 640))
-        window.contentView?.addSubview(stack)
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.white.cgColor
+        window.contentView = content
+        content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
         ])
+        stack.layoutSubtreeIfNeeded()
+        let height = ceil(stack.fittingSize.height)
+        window.setContentSize(NSSize(width: 520, height: height))
     }
 
-    private func rebuildList() {
-        list.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        rowLabels = []
-        rowTimes = []
-        rowMarks = []
-        for step in steps {
-            let mark = NSTextField(labelWithString: glyph(step.state))
-            mark.font = NSFont.systemFont(ofSize: 13)
-            mark.textColor = color(step.state)
-            mark.widthAnchor.constraint(equalToConstant: 22).isActive = true
-            let title = NSTextField(labelWithString: step.title)
-            title.font = NSFont.systemFont(
-                ofSize: 14,
-                weight: step.state == "running" ? .medium : .regular
-            )
-            title.textColor = step.state == "pending" ? .tertiaryLabelColor : .labelColor
-            let time = NSTextField(labelWithString: step.elapsed)
-            time.font = NSFont.systemFont(ofSize: 12)
-            time.textColor = .tertiaryLabelColor
-            time.alignment = .right
-            time.widthAnchor.constraint(equalToConstant: 72).isActive = true
-            let row = NSStackView(views: [mark, title, NSView(), time])
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.widthAnchor.constraint(equalToConstant: 664).isActive = true
-            list.addArrangedSubview(row)
-            rowMarks.append(mark)
-            rowLabels.append(title)
-            rowTimes.append(time)
-        }
+    private var textWidth: CGFloat { 464 }
+
+    private func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = NSFont.systemFont(ofSize: size, weight: weight)
+        field.textColor = color
+        field.maximumNumberOfLines = 0
+        field.preferredMaxLayoutWidth = textWidth
+        return field
     }
 
-    private func refreshRows() {
-        guard rowLabels.count == steps.count else {
-            rebuildList()
-            return
-        }
-        for i in steps.indices {
-            rowMarks[i].stringValue = glyph(steps[i].state)
-            rowMarks[i].textColor = color(steps[i].state)
-            rowLabels[i].stringValue = steps[i].title
-            rowLabels[i].textColor = steps[i].state == "pending" ? .tertiaryLabelColor : .labelColor
-            rowLabels[i].font = NSFont.systemFont(
-                ofSize: 14,
-                weight: steps[i].state == "running" ? .medium : .regular
-            )
-            rowTimes[i].stringValue = steps[i].elapsed
-        }
+    private func addSetupLine(_ number: String, _ text: String, blue: NSColor, ink: NSColor) {
+        let n = NSTextField(labelWithString: number)
+        n.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        n.textColor = blue
+        n.translatesAutoresizingMaskIntoConstraints = false
+        n.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        let words = NSTextField(wrappingLabelWithString: text)
+        words.font = NSFont.systemFont(ofSize: 13)
+        words.textColor = ink
+        words.maximumNumberOfLines = 0
+        words.preferredMaxLayoutWidth = textWidth - 24
+        let row = NSStackView(views: [n, words])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 8
+        welcomeBox.addArrangedSubview(row)
     }
 
-    private func glyph(_ state: String) -> String {
-        switch state {
-        case "done": return "✓"
-        case "failed": return "✕"
-        case "running": return "●"
-        default: return "○"
+    private func loadMark() -> NSImage? {
+        if let url = Bundle.main.url(forResource: "yarn-mark", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            return image
         }
+        let path = (repo as NSString).appendingPathComponent("meeting_archive/assets/yarn-mark.png")
+        return NSImage(contentsOfFile: path)
     }
 
-    private func color(_ state: String) -> NSColor {
-        switch state {
-        case "done": return NSColor.systemGreen
-        case "failed": return NSColor.systemRed
-        case "running": return NSColor.controlAccentColor
-        default: return NSColor.tertiaryLabelColor
-        }
+    private func showProgress() {
+        welcomeBox.isHidden = true
+        doneBox.isHidden = true
+        progressBox.isHidden = false
+        heading.stringValue = "Installing Yarn"
+        personality.stringValue = ""
+        detail.stringValue = ""
+        detail.isHidden = true
+        closeButton.isHidden = true
+        installButton.keyEquivalent = ""
+        window.title = "Yarn Setup"
+    }
+
+    private func showDone() {
+        welcomeBox.isHidden = true
+        progressBox.isHidden = true
+        doneBox.isHidden = false
+        openButton.keyEquivalent = "\r"
+        window.title = "Yarn Setup"
+    }
+
+    private func showFailure(_ message: String) {
+        showProgress()
+        heading.stringValue = "Yarn couldn't finish"
+        personality.stringValue = ""
+        detail.stringValue = message
+        detail.isHidden = message.isEmpty
+        closeButton.isHidden = false
+        closeButton.title = "Close"
+        finished = true
+    }
+
+    @objc private func beginInstall() {
+        showProgress()
+        launchWorker()
     }
 
     private func launchWorker() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        var pull: [String] = []
-        if fastBox.state == .on { pull.append("fast") }
-        if accurateBox.state == .on { pull.append("accurate") }
-        if pull.isEmpty { pull = ["fast"] }
         process.arguments = [
             "-m", "meeting_archive.setup",
             "--repo", repo,
-            "--pull", pull.joined(separator: ","),
+            "--pull", pullArgument(),
         ]
         var env = ProcessInfo.processInfo.environment
         env["PYTHONPATH"] = repo
@@ -259,9 +353,16 @@ final class Controller: NSObject, NSWindowDelegate {
             try process.run()
             worker = process
         } catch {
-            subtitle.stringValue = "Could not start setup"
-            detail.stringValue = "\(error)"
+            showFailure("Could not start setup. \(error.localizedDescription)")
         }
+    }
+
+    // Same choice the old checkboxes made, without putting it on the welcome.
+    // A Mac with 10 GB or less cannot run the larger summary model.
+    private func pullArgument() -> String {
+        let ram = memoryGB()
+        if ram > 0 && ram <= 10 { return "fast" }
+        return "fast,accurate"
     }
 
     private var buffer = ""
@@ -282,66 +383,37 @@ final class Controller: NSObject, NSWindowDelegate {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String
         else {
-            if !trimmed.isEmpty { detail.stringValue = trimmed }
+            if !trimmed.isEmpty { stray = trimmed }
             return
         }
         switch type {
         case "hello":
-            if let raw = obj["steps"] as? [[String: Any]] {
-                steps = raw.compactMap { item in
-                    guard let id = item["id"] as? String,
-                          let title = item["title"] as? String else { return nil }
-                    return Step(id: id, title: title)
-                }
-                rebuildList()
-                subtitle.stringValue = "1 of \(steps.count) steps"
-            }
+            break
         case "start":
             let id = obj["id"] as? String ?? ""
-            let index = obj["index"] as? Int ?? 1
-            let total = obj["total"] as? Int ?? steps.count
             set(id, state: "running")
-            heading.stringValue = obj["title"] as? String ?? "Install Yarn"
-            stepIndex = index
-            stepTotal = total
-            statusNote = ""
-            subtitle.stringValue = "\(index) of \(total) steps"
-            bar.doubleValue = Double(index - 1) * 100.0 / Double(max(total, 1))
-            cancel.isEnabled = true
+            downloadPercent = nil
         case "log":
-            if let text = obj["text"] as? String {
-                statusLine = text
-                statusNote = obj["note"] as? String ?? ""
-                showStatus(percent: nil)
-            }
+            break
         case "progress":
-            if let percent = obj["percent"] as? Int {
-                let shown = min(100, max(0, percent))
-                bar.doubleValue = Double(shown)
-                subtitle.stringValue = "\(stepIndex) of \(stepTotal) steps, \(shown)%"
-                showStatus(percent: shown)
+            if let id = obj["id"] as? String, modelIDs.contains(id),
+               let percent = obj["percent"] as? Int {
+                downloadPercent = min(100, max(0, percent))
             }
         case "done":
             let id = obj["id"] as? String ?? ""
             let ok = obj["ok"] as? Bool ?? false
-            let ms = obj["elapsed_ms"] as? Int ?? 0
-            set(id, state: ok ? "done" : "failed", elapsed: fmtMs(ms))
-            if !ok, let message = obj["message"] as? String {
-                detail.stringValue = message
+            set(id, state: ok ? "done" : "failed")
+            if !ok {
+                showFailure(obj["message"] as? String ?? "Something needs attention.")
             }
         case "finish":
             finished = true
             let ok = obj["ok"] as? Bool ?? false
             if ok {
-                showWelcome()
-            } else {
-                heading.stringValue = "Setup stopped"
-                subtitle.stringValue = "Something needs attention"
-                if let message = obj["message"] as? String {
-                    detail.stringValue = message
-                }
-                cancel.title = "Close"
-                cancel.isEnabled = true
+                showDone()
+            } else if detail.isHidden {
+                showFailure(obj["message"] as? String ?? "Something needs attention.")
             }
         default:
             break
@@ -349,84 +421,70 @@ final class Controller: NSObject, NSWindowDelegate {
         refreshRows()
     }
 
-    private func showStatus(percent: Int?) {
-        var lines: [String] = []
-        if !statusLine.isEmpty { lines.append(statusLine) }
-        if !statusNote.isEmpty { lines.append(statusNote) }
-        if let percent { lines.append("\(percent)%") }
-        detail.stringValue = lines.joined(separator: "\n")
-    }
-
-    private func set(_ id: String, state: String, elapsed: String? = nil) {
+    private func set(_ id: String, state: String) {
         if let i = steps.firstIndex(where: { $0.id == id }) {
             steps[i].state = state
-            if let elapsed { steps[i].elapsed = elapsed }
+        } else if !id.isEmpty {
+            steps.append(Step(id: id, state: state))
         }
+    }
+
+    private func refreshRows() {
+        let modelsRunning = faceGroups.contains { group in
+            group.ids.contains(where: { modelIDs.contains($0) }) && groupState(group.ids) == "running"
+        }
+        if !finished {
+            personality.stringValue = modelsRunning
+                ? "Downloading a small brain. Please be patient."
+                : ""
+        }
+        for (index, group) in faceGroups.enumerated() {
+            let state = groupState(group.ids)
+            let percent = (state == "running" && group.ids.contains(where: { modelIDs.contains($0) }))
+                ? downloadPercent
+                : nil
+            rows[index].apply(state: state, percent: percent)
+        }
+    }
+
+    private func groupState(_ ids: [String]) -> String {
+        let states = ids.compactMap { id in steps.first { $0.id == id }?.state }
+        if states.contains("failed") { return "failed" }
+        if states.contains("running") { return "running" }
+        if states.count == ids.count && states.allSatisfy({ $0 == "done" }) { return "done" }
+        if states.contains("done") { return "running" }
+        return "pending"
     }
 
     private func workerFinished(code: Int32) {
         worker = nil
         if !finished {
             if code == 0 {
-                showWelcome()
+                showDone()
             } else {
-                heading.stringValue = "Setup stopped"
-                subtitle.stringValue = "Exit \(code)"
-                cancel.title = "Close"
+                let message = !detail.stringValue.isEmpty
+                    ? detail.stringValue
+                    : (stray.isEmpty ? "Setup stopped before it finished." : stray)
+                showFailure(message)
             }
         }
         finished = true
     }
 
-    private var welcomed = false
-    private var welcomePane: YarnWelcomePane?
-
-    private func showWelcome() {
-        if welcomed { return }
-        welcomed = true
-        let pane = YarnWelcomePane(settingsPath: welcomeSettingsPath) { [weak self] in
-            self?.openYarn()
-        }
-        welcomePane = pane
-        window.title = "Welcome to Yarn"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.backgroundColor = welcomeColor(light: 0xFFFFFF, dark: 0x101820)
-        window.setContentSize(NSSize(width: 640, height: 760))
-        window.contentView = pane
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private var welcomeSettingsPath: String {
-        NSHomeDirectory() + "/meeting-archive/.yarn-settings.json"
-    }
-
     @objc private func openYarn() {
-        if welcomePane?.skip.state != .on {
-            YarnWelcomeSettings.handoff(welcomeSettingsPath)
-        }
+        // Leave the how-to welcome for Yarn itself. Setup does not mark it seen.
         let app = NSHomeDirectory() + "/Applications/Yarn.app"
-        if FileManager.default.fileExists(atPath: app) {
-            NSWorkspace.shared.open(URL(fileURLWithPath: app))
+        guard FileManager.default.fileExists(atPath: app) else {
+            doneBox.isHidden = false
+            openButton.isHidden = true
+            if doneNote.superview == nil {
+                doneBox.addArrangedSubview(doneNote)
+            }
+            doneNote.isHidden = false
+            return
         }
+        NSWorkspace.shared.open(URL(fileURLWithPath: app))
         NSApp.terminate(nil)
-    }
-
-    @objc private func beginInstall() {
-        welcome.isHidden = true
-        summaryHint.isHidden = true
-        fastBox.isHidden = true
-        accurateBox.isHidden = true
-        startButton.isHidden = true
-        bar.isHidden = false
-        list.isHidden = false
-        detail.isHidden = false
-        heading.stringValue = "Install Yarn"
-        subtitle.stringValue = "Preparing…"
-        cancel.title = "Cancel"
-        launchWorker()
     }
 
     @objc private func cancelRun() {
@@ -437,10 +495,140 @@ final class Controller: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        welcomePane?.rememberChoice()
         if let worker, worker.isRunning { worker.terminate() }
         NSApp.terminate(nil)
     }
+}
+
+private final class FaceRow {
+    let view = NSStackView()
+    private let mark = NSImageView()
+    private let spinner = NSProgressIndicator()
+    private let title = NSTextField(labelWithString: "")
+    private let percent = NSTextField(labelWithString: "")
+
+    init(title text: String) {
+        title.stringValue = text
+        title.font = NSFont.systemFont(ofSize: 13)
+        title.textColor = yarnColor(0x617188)
+        title.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        title.lineBreakMode = .byTruncatingTail
+        percent.font = NSFont.systemFont(ofSize: 12)
+        percent.textColor = yarnColor(0x167DFF)
+        percent.alignment = .right
+        percent.setContentHuggingPriority(.required, for: .horizontal)
+        mark.imageScaling = .scaleProportionallyUpOrDown
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.isHidden = true
+        let slot = NSView()
+        slot.translatesAutoresizingMaskIntoConstraints = false
+        slot.addSubview(mark)
+        slot.addSubview(spinner)
+        NSLayoutConstraint.activate([
+            slot.widthAnchor.constraint(equalToConstant: 16),
+            slot.heightAnchor.constraint(equalToConstant: 16),
+            mark.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            mark.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            mark.topAnchor.constraint(equalTo: slot.topAnchor),
+            mark.bottomAnchor.constraint(equalTo: slot.bottomAnchor),
+            spinner.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            spinner.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            spinner.topAnchor.constraint(equalTo: slot.topAnchor),
+            spinner.bottomAnchor.constraint(equalTo: slot.bottomAnchor),
+        ])
+        view.orientation = .horizontal
+        view.alignment = .centerY
+        view.spacing = 8
+        view.translatesAutoresizingMaskIntoConstraints = false
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        view.addArrangedSubview(slot)
+        view.addArrangedSubview(title)
+        view.addArrangedSubview(spacer)
+        view.addArrangedSubview(percent)
+        view.widthAnchor.constraint(equalToConstant: 464).isActive = true
+        apply(state: "pending", percent: nil)
+    }
+
+    func apply(state: String, percent shown: Int?) {
+        let running = state == "running"
+        spinner.isHidden = !running
+        mark.isHidden = running
+        if running {
+            spinner.startAnimation(nil)
+        } else {
+            spinner.stopAnimation(nil)
+        }
+        mark.image = symbol(state)
+        mark.contentTintColor = tint(state)
+        title.textColor = state == "pending" ? yarnColor(0x617188) : yarnColor(0x19293D)
+        title.font = NSFont.systemFont(ofSize: 13, weight: running ? .semibold : .regular)
+        if let shown, running {
+            percent.stringValue = "\(shown)%"
+        } else {
+            percent.stringValue = ""
+        }
+    }
+
+    private func symbol(_ state: String) -> NSImage? {
+        let name: String
+        switch state {
+        case "done": name = "checkmark.circle.fill"
+        case "failed": name = "xmark.circle.fill"
+        default: name = "circle"
+        }
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    }
+
+    private func tint(_ state: String) -> NSColor {
+        switch state {
+        case "done": return yarnColor(0x167DFF)
+        case "failed": return yarnColor(0xB42318)
+        default: return yarnColor(0xC5D0DC)
+        }
+    }
+}
+
+private final class SetupButton: NSButton {
+    convenience init(title: String) {
+        self.init(frame: .zero)
+        self.title = title
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        yarnColor(0x167DFF).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        let shown = title as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = shown.size(withAttributes: attrs)
+        shown.draw(
+            in: NSRect(
+                x: (bounds.width - size.width) / 2,
+                y: (bounds.height - size.height) / 2 - 1,
+                width: size.width,
+                height: size.height
+            ),
+            withAttributes: attrs
+        )
+    }
+}
+
+private func yarnColor(_ hex: UInt32) -> NSColor {
+    NSColor(
+        srgbRed: CGFloat((hex >> 16) & 0xff) / 255,
+        green: CGFloat((hex >> 8) & 0xff) / 255,
+        blue: CGFloat(hex & 0xff) / 255,
+        alpha: 1
+    )
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {

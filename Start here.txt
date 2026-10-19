@@ -3,14 +3,19 @@ YARN. Keep this open beside the other windows.
 
 You only do this once. Yarn stays on this Mac. Nothing is uploaded.
 
-
-1. Double-click “Yarn Setup” in this folder
-   (not the bin folder, this one, sitting next to this note)
-
-   A welcome window should appear. Skip to step 4.
+The Mac will refuse to open Setup the first time. Apple charges $99 a year
+so that doesn't happen. I'm not paying that for one click. You will need
+Privacy & Security, then Open Anyway. After that, it stays open.
 
 
-2. If the Mac says “Not Opened” and offers Done / Move to Bin
+1. Double-click Setup in this folder
+   (the Yarn Setup app next to this note, not the yarn folder)
+
+   Expect “Not Opened”. That is step 2, not a mistake.
+   If a welcome window does appear, skip to step 4.
+
+
+2. When the Mac says “Not Opened” and offers Done / Move to Bin
 
    Do not click Move to Bin.
    Click Done.
@@ -50,7 +55,7 @@ You only do this once. Yarn stays on this Mac. Nothing is uploaded.
 4. In the Yarn window
 
    Read the short welcome.
-   Click Get started.
+   Click Install Yarn.
 
    Leave the window open. The long bits are downloads.
    Your Mac may ask for:
@@ -60,7 +65,8 @@ You only do this once. Yarn stays on this Mac. Nothing is uploaded.
    • To open SwiftBar. Click Open
    • To open Ollama. Click Open
 
-   When it says Yarn is ready, you are done with this note.
+   When it says you're all set, click Open Yarn.
+   You are done with this note.
    The zip in Downloads can be deleted after that. Yarn now lives on this Mac.
 
 

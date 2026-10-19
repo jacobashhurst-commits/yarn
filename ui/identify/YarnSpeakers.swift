@@ -109,11 +109,17 @@ struct Voice: Decodable {
     var isCrumb: Bool { crumb ?? false }
 }
 
+struct Person: Decodable {
+    let name: String
+    let title: String
+}
+
 struct Payload: Decodable {
     let meeting_id: String
     let banner: String
     let has_audio: Bool
     let names: [String]
+    let people: [Person]
     let voices: [Voice]
 }
 
@@ -254,6 +260,12 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     let clipText = WrapLabel(size: 15, color: YarnColor.ink)
     let statusLabel = NSTextField(labelWithString: "")
     let nameBox = NSComboBox()
+    let titleBox = NSTextField()
+    let lastNameBox = NSTextField()
+    let distinguishHint = WrapLabel(size: 13, weight: .regular, color: YarnColor.slate)
+    var titles: [String: String] = [:]
+    var distinctKeys: Set<String> = []
+    var askedToDistinguish = false
     let playButton = NSButton(title: "Play", target: nil, action: nil)
     let nextButton = NSButton(title: "Next clip", target: nil, action: nil)
     let stopButton = NSButton(title: "Stop", target: nil, action: nil)
@@ -336,6 +348,16 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         nameBox.controlSize = .large
         nameBox.placeholderString = "Name, or leave blank if you don't know"
         nameBox.font = NSFont.systemFont(ofSize: 15)
+        titleBox.translatesAutoresizingMaskIntoConstraints = false
+        lastNameBox.translatesAutoresizingMaskIntoConstraints = false
+        titleBox.placeholderString = "Title, optional. Finance director"
+        titleBox.font = NSFont.systemFont(ofSize: 14)
+        titleBox.controlSize = .large
+        lastNameBox.placeholderString = "Last name"
+        lastNameBox.font = NSFont.systemFont(ofSize: 14)
+        lastNameBox.controlSize = .large
+        lastNameBox.isHidden = true
+        distinguishHint.isHidden = true
 
         let pad: CGFloat = 22
 
@@ -383,7 +405,9 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         saveButton.translatesAutoresizingMaskIntoConstraints = false
         saveButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
         saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
-        let nameStack = NSStackView(views: [nameLabel, nameBox])
+        let nameStack = NSStackView(views: [
+            nameLabel, nameBox, titleBox, distinguishHint, lastNameBox,
+        ])
         nameStack.orientation = .vertical
         nameStack.alignment = .leading
         nameStack.spacing = 6
@@ -421,6 +445,9 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             label.widthAnchor.constraint(equalTo: prediction.widthAnchor).isActive = true
         }
         nameBox.widthAnchor.constraint(equalTo: nameStack.widthAnchor).isActive = true
+        titleBox.widthAnchor.constraint(equalTo: nameStack.widthAnchor).isActive = true
+        lastNameBox.widthAnchor.constraint(equalTo: nameStack.widthAnchor).isActive = true
+        distinguishHint.widthAnchor.constraint(equalTo: nameStack.widthAnchor).isActive = true
 
         formViews = [voiceRow, detailLabel, prediction, card, playerRow, nameStack]
 
@@ -582,6 +609,8 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             button.isEnabled = enabled
         }
         nameBox.isEnabled = enabled
+        titleBox.isEnabled = enabled
+        lastNameBox.isEnabled = enabled
     }
 
     var voice: Voice { queue[position] }
@@ -600,8 +629,13 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         detailLabel.show(v.detail, spacing: 1)
         applyPrediction(v)
 
+        askedToDistinguish = false
+        lastNameBox.stringValue = ""
+        lastNameBox.isHidden = true
+        distinguishHint.isHidden = true
         let answer = answers[v.key]
         nameBox.stringValue = answer ?? (v.named.isEmpty ? v.guess : v.named)
+        titleBox.stringValue = titles[v.key] ?? ""
         backButton.isEnabled = index > 0
         saveButton.title = index == queue.count - 1 ? "Save & finish" : "Save & next"
         renderClip()
@@ -785,10 +819,66 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     func record() {
         let typed = nameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         answers[voice.key] = typed
+        titles[voice.key] = titleBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func fold(_ value: String) -> String {
+        value.lowercased().split { $0.isWhitespace }.joined(separator: " ")
+    }
+
+    /// jacob and Jacob are one person. A second Jacob, with no last name and
+    /// no title, is asked to add one. Accepting the suggested name is not a
+    /// second person.
+    func needsDistinction(_ name: String, title: String) -> Bool {
+        let key = fold(name)
+        guard !key.isEmpty, !key.contains(" "), title.isEmpty else { return false }
+        if fold(voice.guess) == key || fold(voice.named) == key { return false }
+        let known = payload?.people.contains { fold($0.name) == key || fold($0.name).split(separator: " ").first.map(String.init) == key } ?? false
+        let other = answers.contains { other, value in
+            other != voice.key && (fold(value) == key || fold(value).split(separator: " ").first.map(String.init) == key)
+        }
+        return known || other
+    }
+
+    func canonical(_ name: String) -> String {
+        let key = fold(name)
+        if let person = payload?.people.first(where: { fold($0.name) == key }) {
+            return person.name
+        }
+        return name
     }
 
     @objc func save() {
         record()
+        var name = answers[voice.key] ?? ""
+        let title = titles[voice.key] ?? ""
+        if !lastNameBox.isHidden {
+            let last = lastNameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !last.isEmpty {
+                let first = canonical(name).split { $0.isWhitespace }.first.map(String.init) ?? name
+                name = "\(first) \(last)"
+                answers[voice.key] = name
+            } else {
+                name = canonical(name)
+                answers[voice.key] = name
+            }
+        }
+        if needsDistinction(name, title: title) && !askedToDistinguish {
+            askedToDistinguish = true
+            let known = canonical(name)
+            distinguishHint.show(
+                "Yarn already knows \(known). Add a last name or a title if this is someone else. Save again if this is the same \(known)."
+            )
+            lastNameBox.isHidden = false
+            window.makeFirstResponder(lastNameBox)
+            return
+        }
+        if askedToDistinguish && (!lastNameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !title.isEmpty) {
+            distinctKeys.insert(voice.key)
+        }
+        if lastNameBox.isHidden {
+            answers[voice.key] = canonical(name)
+        }
         // One confirmation covers every other voice that already guessed the
         // same person - diarize often splits Charles into Charles×4.
         propagateSameName()
@@ -853,6 +943,12 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             for v in queue {
                 guard let answer = answers[v.key], !answer.isEmpty, answer != v.named else { continue }
                 args += ["--set", "\(v.key)=\(answer)"]
+                if let title = titles[v.key], !title.isEmpty {
+                    args += ["--title", "\(v.key)=\(title)"]
+                }
+                if distinctKeys.contains(v.key) {
+                    args += ["--distinct", v.key]
+                }
             }
         }
         guard args.count > 2 else {

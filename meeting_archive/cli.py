@@ -569,6 +569,8 @@ def cmd_speakers(cfg: Config, args) -> int:
 
     if args.set:
         updates: dict[str, str] = {}
+        titles: dict[str, str] = {}
+        distinct: set[str] = set()
         cleared: list[str] = []
         valid = {p.speaker for p in transcript.speaker_profiles}
         for item in args.set:
@@ -589,6 +591,14 @@ def cmd_speakers(cfg: Config, args) -> int:
                 cleared.append(key)
                 continue
             updates[key] = name
+        for item in getattr(args, "title", None) or []:
+            key, _, title = item.partition("=")
+            key, title = key.strip(), title.strip()
+            if key and title:
+                titles[key] = title
+        for key in getattr(args, "distinct", None) or []:
+            if key.strip():
+                distinct.add(key.strip())
         if cleared:
             records.clear_speaker_names(notes_path, cleared)
             roster = {k: v for k, v in roster.items() if k not in cleared}
@@ -632,6 +642,8 @@ def cmd_speakers(cfg: Config, args) -> int:
                     meeting_id=args.meeting_id,
                     embedding=embedding,
                     clip=clip,
+                    title=titles.get(key, ""),
+                    distinct=key in distinct,
                 )
         except Exception:
             logging.getLogger("meeting_archive").exception(
@@ -909,6 +921,18 @@ def cmd_import_transcript(cfg: Config, args) -> int:
         print(exc, file=sys.stderr)
         return 1
     print(f"imported {transcript.meeting_id} ({len(transcript.turns)} turn(s))")
+    return 0
+
+
+def cmd_transcripts(cfg: Config, args) -> int:
+    from . import library
+
+    path = library.render_transcript_index(cfg)
+    print(path)
+    if getattr(args, "open", False):
+        import webbrowser
+
+        webbrowser.open(path.as_uri())
     return 0
 
 
@@ -1283,6 +1307,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="name a voice, e.g. --set room-2=Marina (repeatable)",
     )
     p.add_argument(
+        "--title",
+        action="append",
+        metavar="KEY=TITLE",
+        help="optional job title for a voice named in the same command",
+    )
+    p.add_argument(
+        "--distinct",
+        action="append",
+        metavar="KEY",
+        help="this voice shares a first name with someone else",
+    )
+    p.add_argument(
         "--pending-tsv",
         action="store_true",
         help="tab-separated unidentified voices, for bin/speaker-popup",
@@ -1353,6 +1389,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path", type=Path)
     p.add_argument("--title", default="")
     p.set_defaults(func=cmd_import_transcript)
+
+    p = sub.add_parser("transcripts", help="open the transcript pages")
+    p.add_argument("--html", action="store_true", help="write the transcript index")
+    p.add_argument("--open", action="store_true", help="open the index in the browser")
+    p.set_defaults(func=cmd_transcripts)
 
     p = sub.add_parser("library", help="list meetings in the archive")
     p.add_argument("--html", action="store_true")

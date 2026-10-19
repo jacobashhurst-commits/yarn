@@ -1,5 +1,6 @@
-// The welcome shown at the end of Setup, and again when Yarn is opened,
-// until the person ticks Don't show again.
+// Shown the first time Yarn itself opens, until Don't show again is ticked.
+// Setup already introduced Yarn. This window is the how-to: record, let it
+// work in the background, how long audio is kept, and the daily brief.
 
 import AppKit
 
@@ -119,24 +120,13 @@ final class YarnWelcomePane: NSView {
         mark.heightAnchor.constraint(equalToConstant: 46).isActive = true
         stack.addArrangedSubview(mark)
 
-        addText("Welcome to Yarn", size: 28, weight: .semibold, color: navy)
-        addText("Your meetings. Your memories. Your computer.", size: 16, weight: .medium, color: blue)
+        addText("How Yarn works", size: 28, weight: .semibold, color: navy)
         stack.setCustomSpacing(18, after: stack.arrangedSubviews.last!)
-        addText(
-            "Yarn records your meetings, figures out who said what, and turns conversations into searchable memories, actionable notes and a daily brief.",
-            size: 14, weight: .regular, color: ink
-        )
-        addText(
-            "Everything is processed and stored locally on your Mac by default. No cloud required, no subscriptions, no one else storing your conversations.",
-            size: 14, weight: .regular, color: ink
-        )
+        addText("Getting started", size: 18, weight: .semibold, color: navy)
+        addStep("1", "Record", "Click the little Yarn icon hiding in your Mac's menu bar.", navy: navy, slate: slate, blue: blue)
+        addStep("2", "Get on with it", "Yarn transcribes and summarises in the background.", navy: navy, slate: slate, blue: blue)
+        addStep("3", "Remember", "Search your meetings or open your daily brief. All locally.", navy: navy, slate: slate, blue: blue)
         stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
-        addText("How does it work?", size: 18, weight: .semibold, color: navy)
-        addReason(
-            "Small brain. Surprisingly useful. (Like its creator.)",
-            "Yarn uses free, local AI. It doesn't have the horsepower of ChatGPT or Claude, but you don't need a Ferrari to drive to the shops.",
-            navy: navy, slate: slate
-        )
         addReason(
             "It's a little slower. Who cares?",
             "Yarn works in the background. Record your next meeting while it's processing the last one.",
@@ -152,11 +142,6 @@ final class YarnWelcomePane: NSView {
             "A daily brief of important discussions, outstanding actions and what needs your attention.",
             navy: navy, slate: slate
         )
-        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
-        addText("Getting started", size: 18, weight: .semibold, color: navy)
-        addStep("1", "Record", "Click the little Yarn icon hiding in your Mac's menu bar.", navy: navy, slate: slate, blue: blue)
-        addStep("2", "Get on with it", "Yarn transcribes and summarises in the background.", navy: navy, slate: slate, blue: blue)
-        addStep("3", "Remember", "Search your meetings or open your daily brief. All locally.", navy: navy, slate: slate, blue: blue)
         stack.setCustomSpacing(18, after: stack.arrangedSubviews.last!)
         addText(
             "Yarn isn't trying to be ChatGPT or Claude. It doesn't need to be. (But if you want a bigger brain, Yarn plays nicely with both through MCP.)",
@@ -264,7 +249,7 @@ final class YarnWelcomeWindow: NSWindowController, NSWindowDelegate {
     init(settingsPath: String, onStart: @escaping () -> Void) {
         pane = YarnWelcomePane(settingsPath: settingsPath, onStart: onStart)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 640),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false

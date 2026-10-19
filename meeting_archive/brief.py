@@ -143,7 +143,9 @@ def gather_sources(cfg: Config, *, today: date | None = None) -> list[MeetingBri
             summary = " ".join(t.text for t in transcript.turns[:12])
         else:
             continue
-        md = cfg.transcript_md(transcript.meeting_id)
+        page = cfg.transcript_html(transcript.meeting_id)
+        if not page.exists():
+            page = cfg.transcript_md(transcript.meeting_id)
         found.append(
             MeetingBriefSource(
                 meeting_id=transcript.meeting_id,
@@ -152,7 +154,7 @@ def gather_sources(cfg: Config, *, today: date | None = None) -> list[MeetingBri
                 duration_s=float(transcript.duration_s or 0.0),
                 attendees=str(notes.get("attendees") or ""),
                 summary=summary[:SUMMARY_CHARS],
-                md_uri=md.as_uri() if md.exists() else "",
+                md_uri=page.as_uri() if page.exists() else "",
                 summary_missing=missing,
             )
         )

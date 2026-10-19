@@ -17,15 +17,20 @@ OUT="$REPO_DIR/dist/$NAME.zip"
 
 mkdir -p "$ROOT" "$REPO_DIR/dist"
 
+# The folder people open should show the installer, not the program.
+# Setup and the double-click command stay on top. Everything they do not
+# need to touch goes in yarn/.
+INNER="$ROOT/yarn"
+mkdir -p "$INNER"
+cp -f "$REPO_DIR/Yarn Setup.command" "$REPO_DIR/Start here.txt" "$ROOT/"
+
 copy() {
   local src="$1"
-  mkdir -p "$ROOT/$(dirname "$src")"
-  cp -R "$REPO_DIR/$src" "$ROOT/$src"
+  mkdir -p "$INNER/$(dirname "$src")"
+  cp -R "$REPO_DIR/$src" "$INNER/$src"
 }
 
 for path in \
-  "Yarn Setup.command" \
-  "Start here.txt" \
   "README.md" \
   "pyproject.toml" \
   "uv.lock" \
@@ -43,7 +48,7 @@ find "$ROOT" \( -name '__pycache__' -o -name '.DS_Store' -o -name '._*' \) -prin
       rm -rf "$path"
     done
 find "$ROOT" -name '*.pyc' -delete || true
-chmod +x "$ROOT/Yarn Setup.command" "$ROOT"/bin/*
+chmod +x "$ROOT/Yarn Setup.command" "$INNER"/bin/*
 
 # Ship the Setup window already built. Otherwise the first double-click
 # needs Xcode's compiler, which a normal Mac does not have.

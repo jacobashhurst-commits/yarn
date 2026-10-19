@@ -120,10 +120,12 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
     for row in rows:
         mins = int(row.duration_s // 60)
         secs = int(row.duration_s % 60)
-        md = cfg.transcript_md(row.meeting_id)
+        page = cfg.transcript_html(row.meeting_id)
+        if not page.exists():
+            page = cfg.transcript_md(row.meeting_id)
         title = row.title
-        if md.exists():
-            title = f'<a href="{md.as_uri()}">{_esc(title)}</a>'
+        if page.exists():
+            title = f'<a href="{page.as_uri()}">{_esc(title)}</a>'
         else:
             title = _esc(title)
         audio = "kept" if row.keep_audio else ("yes" if row.audio_present else "expired")
@@ -154,6 +156,72 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
         htmltheme.document("Yarn library", "\n".join(lines)),
         encoding="utf-8",
     )
+    return path
+
+
+def render_transcript_index(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
+    """One page of meetings, each opening a Yarn-styled transcript."""
+    from . import htmltheme, records
+    from .models import speaker_display_indices
+    from .speakers import load_library
+
+    rows = rows if rows is not None else list_meetings(cfg)
+    titles = {
+        person.name.casefold(): person.title
+        for person in load_library(cfg)
+        if person.title.strip()
+    }
+    items = []
+    for row in rows:
+        if not row.has_transcript:
+            continue
+        path = cfg.transcript_json(row.meeting_id)
+        page = cfg.transcript_html(row.meeting_id)
+        if path.exists() and not page.exists():
+            try:
+                transcript = Transcript.read(path)
+                notes = records.read_notes(cfg.notes_json(row.meeting_id))
+                roster = records.speaker_roster(notes)
+                display = speaker_display_indices(transcript.speaker_profiles)
+                page.write_text(
+                    records.render_transcript_html(
+                        transcript,
+                        cfg.turn_labeller(roster, display),
+                        notes,
+                        titles=titles,
+                    ),
+                    encoding="utf-8",
+                )
+            except (OSError, ValueError):
+                page = cfg.transcript_md(row.meeting_id)
+        if not page.exists():
+            page = cfg.transcript_md(row.meeting_id)
+        if not page.exists():
+            continue
+        mins = int(row.duration_s // 60)
+        secs = int(row.duration_s % 60)
+        items.append(
+            f'<li><a href="{page.as_uri()}">{_esc(row.title)}</a> '
+            f'<span class="mono">{_esc(row.date)} · {mins}m {secs:02d}s</span></li>'
+        )
+    body = "\n".join(
+        [
+            htmltheme.masthead("Transcripts", "Meetings on this Mac"),
+            '<p class="lede">Each meeting opens as a page. The text files stay on disk.</p>',
+            "<ul>",
+            *items,
+            "</ul>" if items else "<p>No transcripts yet.</p>",
+        ]
+    )
+    if not items:
+        body = "\n".join(
+            [
+                htmltheme.masthead("Transcripts", "Meetings on this Mac"),
+                "<p>No transcripts yet.</p>",
+            ]
+        )
+    path = cfg.root / "transcripts.html"
+    path.write_text(htmltheme.document("Yarn transcripts", body), encoding="utf-8")
     return path
 
 

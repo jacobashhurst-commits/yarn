@@ -10,4 +10,8 @@ cd "$ROOT"
 # run, strip that flag so the next click is quiet.
 xattr -cr "$ROOT" 2>/dev/null || true
 
+# The release zip keeps the program in yarn/. A checkout keeps it here.
+if [[ -x "$ROOT/yarn/bin/yarn-setup" ]]; then
+  exec "$ROOT/yarn/bin/yarn-setup" "$@"
+fi
 exec "$ROOT/bin/yarn-setup" "$@"

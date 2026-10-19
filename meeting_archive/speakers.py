@@ -31,6 +31,8 @@ class KnownSpeaker:
     confirmation_count: int = 0
     last_seen: str = ""
     notes: str = ""
+    # Optional job title, for search. Never required, and never used as a name.
+    title: str = ""
     # Mean embedding, if we were able to extract one. Omitted from UI.
     embedding: list[float] = field(default_factory=list)
     # Filename of a short reference wav under speakers/clips/. That directory
@@ -45,6 +47,7 @@ class KnownSpeaker:
             "confirmation_count": self.confirmation_count,
             "last_seen": self.last_seen,
             "notes": self.notes,
+            "title": self.title,
             "embedding": self.embedding,
             "clip": self.clip,
         }
@@ -58,6 +61,7 @@ class KnownSpeaker:
             confirmation_count=int(d.get("confirmation_count") or 0),
             last_seen=d.get("last_seen", ""),
             notes=d.get("notes", ""),
+            title=str(d.get("title") or ""),
             embedding=[float(x) for x in (d.get("embedding") or [])],
             clip=str(d.get("clip") or ""),
         )
@@ -90,6 +94,94 @@ def save_library(cfg: Config, speakers: list[KnownSpeaker]) -> Path:
     )
 
 
+def fold_name(name: str) -> str:
+    """Identity key. jacob and Jacob are the same person."""
+    return " ".join(str(name or "").casefold().split())
+
+
+def search_label(person: KnownSpeaker) -> str:
+    """How a person should appear in search text. The title is optional."""
+    title = person.title.strip()
+    return f"{person.name} ({title})" if title else person.name
+
+
+def labels_for_search(cfg: Config, names: list[str]) -> str:
+    """Roster names, with a title in parentheses when one was saved."""
+    library = load_library(cfg)
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        key = fold_name(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        people = [person for person in library if fold_name(person.name) == key]
+        if not people:
+            labels.append(str(raw).strip())
+        elif len(people) == 1:
+            labels.append(search_label(people[0]))
+        else:
+            labels.append("; ".join(search_label(person) for person in people))
+    return ", ".join(labels)
+
+
+def _match_person(
+    speakers: list[KnownSpeaker], name: str, title: str = ""
+) -> KnownSpeaker | None:
+    """The library row this name belongs to, or None if it is a new person.
+
+    A matching name with no title yet is the same person getting a title.
+    The same name with a different title is someone else.
+    """
+    key = fold_name(name)
+    title_key = fold_name(title)
+    if not key:
+        return None
+    exact = [
+        person
+        for person in speakers
+        if fold_name(person.name) == key and fold_name(person.title) == title_key
+    ]
+    if exact:
+        return exact[0]
+    if title_key:
+        bare = [
+            person
+            for person in speakers
+            if fold_name(person.name) == key and not fold_name(person.title)
+        ]
+        if len(bare) == 1:
+            return bare[0]
+        return None
+    same = [person for person in speakers if fold_name(person.name) == key]
+    if len(same) == 1:
+        return same[0]
+    return None
+
+
+def stored_spelling(speakers: list[KnownSpeaker], name: str) -> str:
+    """Keep Jacob if the new typing is jacob."""
+    key = fold_name(name)
+    for person in speakers:
+        if fold_name(person.name) == key:
+            return person.name
+    return " ".join(str(name or "").split())
+
+
+def name_needs_detail(speakers: list[KnownSpeaker], name: str, title: str = "") -> bool:
+    """True when this single name is already in the library and nothing new distinguishes it.
+
+    A last name, or a title, is enough. Confirming the same person again,
+    including a change of capitalisation, is not a second person.
+    """
+    folded = fold_name(name)
+    if not folded or fold_name(title):
+        return False
+    if len(folded.split()) > 1:
+        return False
+    return any(fold_name(person.name).split()[0] == folded for person in speakers)
+
+
 def remember_confirmation(
     cfg: Config,
     *,
@@ -97,13 +189,25 @@ def remember_confirmation(
     meeting_id: str,
     embedding: list[float] | None = None,
     clip: str = "",
+    title: str = "",
+    distinct: bool = False,
 ) -> KnownSpeaker:
-    """Record that Jacob named a voice. Embeddings are averaged when present."""
+    """Record that Jacob named a voice. Embeddings are averaged when present.
+
+    `distinct` means this is a second person who shares the first name and
+    was given a title so the two can be told apart.
+    """
     speakers = load_library(cfg)
-    found = next((s for s in speakers if s.name.casefold() == name.casefold()), None)
+    title = title.strip()
+    name = stored_spelling(speakers, name)
+    found = _match_person(speakers, name, title)
+    if distinct and found is not None and fold_name(found.title) != fold_name(title):
+        found = None
     if found is None:
-        found = KnownSpeaker(name=name)
+        found = KnownSpeaker(name=name, title=title)
         speakers.append(found)
+    elif title and not found.title.strip():
+        found.title = title
     repeat = meeting_id in found.meeting_ids
     prior = found.confirmation_count
     if not repeat:
@@ -968,6 +1072,11 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         "banner": meeting_banner(cfg, meeting_id),
         "has_audio": has_audio,
         "names": names,
+        "people": [
+            {"name": person.name, "title": person.title}
+            for person in library
+            if is_real_name(person.name)
+        ],
         "voices": voices,
     }
 
@@ -1069,7 +1178,12 @@ def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) ->
         lines.append(
             '<div class="voice">'
             f"<strong>{_esc(person.name)}</strong>"
-            f'<div class="mono">{person.confirmation_count} confirmation(s) · '
+            + (
+                f'<div class="mono">{_esc(person.title)}</div>'
+                if person.title.strip()
+                else ""
+            )
+            + f'<div class="mono">{person.confirmation_count} confirmation(s) · '
             f"last seen {_esc(last)}</div>"
             f"{clip_html}"
             "</div>"

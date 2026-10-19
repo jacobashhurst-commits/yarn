@@ -339,9 +339,13 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         footer.stringValue = foot
         footer.textColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
         fitWindow()
-        if snap.ollamaDown && noteLabel.stringValue.isEmpty {
-            noteLabel.stringValue = "Summaries need Ollama. Open it from the menu bar if a summary is waiting."
-            noteLabel.isHidden = false
+        let idle = noteLabel.stringValue.isEmpty
+            || noteLabel.stringValue == restingNote
+            || noteLabel.stringValue == "Opening the library…"
+        if snap.ollamaDown && idle {
+            note("Summaries need Ollama. Open it from the menu bar if a summary is waiting.")
+        } else if idle {
+            note(restingNote)
         }
     }
 
@@ -473,7 +477,6 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func library() {
-        note("Opening the library…")
         let ma = paths.ma
         let page = paths.root + "/library.html"
         DispatchQueue.global(qos: .userInitiated).async {
@@ -486,6 +489,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             task.waitUntilExit()
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(URL(fileURLWithPath: page))
+                self.note(self.restingNote)
             }
         }
     }
@@ -509,7 +513,21 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func transcripts() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: paths.root + "/transcripts"))
+        let ma = paths.ma
+        let page = paths.root + "/transcripts.html"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: ma)
+            task.arguments = ["transcripts", "--html"]
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            try? task.run()
+            task.waitUntilExit()
+            DispatchQueue.main.async {
+                NSWorkspace.shared.open(URL(fileURLWithPath: page))
+                self.note(self.restingNote)
+            }
+        }
     }
 
     /// One fill for the whole meeting. A stage with no measured fraction
@@ -540,6 +558,8 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         barFloor = max(barFloor, min(end, value))
         return barFloor
     }
+
+    let restingNote = "How good this is free!"
 
     func note(_ text: String) {
         noteLabel.stringValue = text

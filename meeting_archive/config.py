@@ -343,6 +343,10 @@ class Config:
                 return json_path.parent / name
         return self._transcript_base(meeting_id).with_suffix(".md")
 
+    def transcript_html(self, meeting_id: str) -> Path:
+        """The readable page. Same name as the markdown, so a retitle moves both."""
+        return self.transcript_md(meeting_id).with_suffix(".html")
+
     def _transcript_base(self, meeting_id: str) -> Path:
         # meeting_id looks like 2026-09-11T14-03-22; shard by year/month so the
         # folder stays browsable after a couple of years of meetings.

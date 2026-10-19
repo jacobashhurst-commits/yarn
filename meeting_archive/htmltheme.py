@@ -85,6 +85,10 @@ h1 {
 .when { margin: 8px 0 16px; }
 .overview { max-width: 42rem; margin: 0 0 16px; font-size: 17px; }
 .lede { color: var(--slate); max-width: 42rem; margin: 0 0 24px; }
+.role { color: var(--slate); font-weight: 500; }
+.turn { padding: 14px 0; border-top: 1px solid var(--line); }
+.turn p { margin: 6px 0 0; }
+.turn-meta { color: var(--navy); font-weight: 600; }
 .hint {
   margin: 0 0 16px;
   padding: 12px 16px;
