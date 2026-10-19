@@ -243,6 +243,20 @@ def install_app_from_zip(url: str, app_name: str, step_id: str) -> Path:
     raise RuntimeError(f"Could not install {app_name}: {last_error}")
 
 
+def _ollama_runs(path: str) -> bool:
+    """True when macOS will actually start this file.
+
+    Homebrew writes `/opt/homebrew/bin/ollama` before the program inside
+    Ollama.app has landed. A damaged copy is still a file too. Both make
+    Python report "No such file or directory" for a path that exists.
+    """
+    try:
+        proc = run([path, "--version"], timeout=20)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
 def ollama_binary() -> str | None:
     app = existing_app("Ollama.app")
     trusted = bool(app and app_is_trusted(app))
@@ -268,8 +282,21 @@ def ollama_binary() -> str | None:
                 pass
             else:
                 continue
+        if not _ollama_runs(path):
+            continue
         return path
     return None
+
+
+def wait_for_ollama_binary() -> str | None:
+    """Homebrew's link can show up a few seconds before the program runs."""
+    found = ollama_binary()
+    for _ in range(8):
+        if found:
+            return found
+        time.sleep(2)
+        found = ollama_binary()
+    return found
 
 
 def emit(payload: dict) -> None:
@@ -980,6 +1007,7 @@ _TRANSIENT_DOWNLOAD = (
     "connection refused",
     "network is unreachable",
     "stream error",
+    "still being put in place",
 )
 PULL_ATTEMPTS = 4
 
@@ -1084,13 +1112,18 @@ def pull_ollama_model(binary: str, model: str, label: str) -> None:
 
 
 def _pull_ollama_once(binary: str, model: str, label: str) -> None:
-    proc = subprocess.Popen(
-        [binary, "pull", model],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            [binary, "pull", model],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Ollama is still being put in place. The download will continue."
+        ) from exc
     last = -1
     tail: list[str] = []
     stream = proc.stdout
@@ -1123,8 +1156,12 @@ def _pull_ollama_once(binary: str, model: str, label: str) -> None:
 def step_ollama(repo: Path) -> None:
     ollama = ollama_binary()
     if not ollama:
-        if _brew_install("ollama", cask=True, step_id="ollama"):
-            ollama = ollama_binary()
+        # The cask used to be named ollama. Homebrew now installs ollama-app
+        # and still accepts the old name, so try the current one first.
+        if _brew_install("ollama-app", cask=True, step_id="ollama") or _brew_install(
+            "ollama", cask=True, step_id="ollama"
+        ):
+            ollama = wait_for_ollama_binary()
     if not ollama:
         emit({"type": "log", "id": "ollama", "text": "Downloading Ollama (free, stays on this Mac)"})
         try:
@@ -1139,11 +1176,7 @@ def step_ollama(repo: Path) -> None:
                 "Run Yarn Setup again."
             )
         subprocess.Popen(["open", "-a", str(app)])
-        for _ in range(20):
-            time.sleep(2)
-            ollama = ollama_binary()
-            if ollama:
-                break
+        ollama = wait_for_ollama_binary()
     if not ollama:
         raise RuntimeError(
             "Ollama is installed but not ready yet. Open it once, then run Yarn Setup again."

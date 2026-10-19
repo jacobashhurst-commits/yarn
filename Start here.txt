@@ -8,8 +8,8 @@ so that doesn't happen. I'm not paying that for one click. You will need
 Privacy & Security, then Open Anyway. After that, it stays open.
 
 
-1. Double-click Setup in this folder
-   (the Yarn Setup app next to this note, not the yarn folder)
+1. Double-click Yarn Setup.command in this folder
+   (the command next to this note)
 
    Expect “Not Opened”. That is step 2, not a mistake.
    If a welcome window does appear, skip to step 4.
@@ -30,13 +30,14 @@ Privacy & Security, then Open Anyway. After that, it stays open.
    c. Scroll to the Security section on the right
       (past Camera, Microphone, etc.)
 
-   d. You should see a line about Yarn Setup being blocked.
+   d. You should see a line about Yarn Setup.command, or Yarn Setup,
+      being blocked.
       Click Open Anyway.
 
    e. If it asks again, click Open.
 
    If there is no Open Anyway button yet:
-      Double-click Yarn Setup once more, click Done,
+      Double-click Yarn Setup.command once more, click Done,
       then go back to Privacy & Security. The button
       appears after the Mac has tried to open it.
 
@@ -49,7 +50,7 @@ Privacy & Security, then Open Anyway. After that, it stays open.
    Choose App Store and identified developers
    (not “App Store only”).
 
-   Then do step 2 again: Yarn Setup  →  Done  →  Open Anyway.
+   Then do step 2 again: Yarn Setup.command  →  Done  →  Open Anyway.
 
 
 4. In the Yarn window
@@ -85,5 +86,5 @@ Privacy & Security, then Open Anyway. After that, it stays open.
    then look again.
 
 
-If you get stuck, do not delete the Yarn folder.
+If you get stuck, do not delete this folder.
 Come back to this note and start from step 2.

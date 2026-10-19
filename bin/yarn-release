@@ -17,10 +17,10 @@ OUT="$REPO_DIR/dist/$NAME.zip"
 
 mkdir -p "$ROOT" "$REPO_DIR/dist"
 
-# The folder people open should show the installer, not the program.
-# Setup and the double-click command stay on top. Everything they do not
-# need to touch goes in yarn/.
-INNER="$ROOT/yarn"
+# The folder people open should show two things: this note and the command.
+# The Setup app and the program live in a hidden folder, so Finder does not
+# put them next to the note.
+INNER="$ROOT/.yarn"
 mkdir -p "$INNER"
 cp -f "$REPO_DIR/Yarn Setup.command" "$REPO_DIR/Start here.txt" "$ROOT/"
 
@@ -52,7 +52,7 @@ chmod +x "$ROOT/Yarn Setup.command" "$INNER"/bin/*
 
 # Ship the Setup window already built. Otherwise the first double-click
 # needs Xcode's compiler, which a normal Mac does not have.
-APP="$ROOT/Yarn Setup.app"
+APP="$INNER/Yarn Setup.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

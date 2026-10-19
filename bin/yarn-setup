@@ -173,7 +173,7 @@ PLIST
 # The release zip already contains this app, built for Apple Silicon.
 # A Mac with no Xcode, Homebrew, or Python can open it. Compiling here
 # would stop and ask them to install developer tools first.
-# In that zip the app sits next to the yarn folder, not inside it.
+# In that zip the app sits inside .yarn/, with the program.
 BUNDLED="$REPO_DIR/Yarn Setup.app"
 if [[ ! -x "$BUNDLED/Contents/MacOS/YarnSetup" ]]; then
   PARENT="$(cd "$REPO_DIR/.." && pwd)"

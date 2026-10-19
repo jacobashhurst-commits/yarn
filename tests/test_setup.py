@@ -142,7 +142,17 @@ def test_ollama_binary_uses_path(monkeypatch, tmp_path):
     fake = tmp_path / "ollama"
     fake.write_text("", encoding="utf-8")
     monkeypatch.setattr(yarn_setup, "which", lambda name: str(fake) if name == "ollama" else None)
+    monkeypatch.setattr(yarn_setup, "_ollama_runs", lambda path: path == str(fake))
     assert yarn_setup.ollama_binary() == str(fake)
+
+
+def test_ollama_binary_skips_a_link_macos_will_not_run(monkeypatch, tmp_path):
+    fake = tmp_path / "ollama"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(yarn_setup, "which", lambda name: str(fake) if name == "ollama" else None)
+    monkeypatch.setattr(yarn_setup, "existing_app", lambda name: None)
+    monkeypatch.setattr(yarn_setup, "_ollama_runs", lambda path: False)
+    assert yarn_setup.ollama_binary() is None
 
 
 def test_prereqs_reject_intel_macs(tmp_path, monkeypatch):
