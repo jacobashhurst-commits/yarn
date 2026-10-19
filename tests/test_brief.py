@@ -63,6 +63,11 @@ def test_gather_sources_looks_back_two_weeks(cfg: Config):
     sources = brief.gather_sources(cfg, today=today)
     assert len(sources) == 1
     assert sources[0].title == "MYOB ROM"
+    assert sources[0].md_uri.endswith(".html")
+    page = cfg.transcript_html(sources[0].meeting_id)
+    text = page.read_text(encoding="utf-8")
+    assert "What was said" in text
+    assert "Yarn" in text
 
 
 def test_hours_by_day_fills_empty_days(cfg: Config):
@@ -117,6 +122,9 @@ def test_render_brief_html_includes_charts_and_sections(cfg: Config):
     assert "Open brief at login" in html
     assert "Saved on this Mac" in html
     assert "data:image/png;base64," in html
+    assert sources[0].md_uri.endswith(".html")
+    assert sources[0].md_uri in html
+    assert ".md\"" not in html
     assert "#0D244B" in html
     assert "test-model" in html
 

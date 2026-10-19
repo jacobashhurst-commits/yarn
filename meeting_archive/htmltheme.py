@@ -232,7 +232,16 @@ a:hover { color: var(--blue); }
 .note { color: var(--warn); }
 .err { color: var(--err); }
 .voice { padding: 16px 0; border-bottom: 1px solid var(--line); }
-.voice audio { width: 100%; margin-top: 8px; }
+.voice audio, .player audio { width: 100%; margin-top: 8px; }
+.player + .player { margin-top: 14px; }
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
 """
 
 

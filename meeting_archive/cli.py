@@ -570,6 +570,7 @@ def cmd_speakers(cfg: Config, args) -> int:
     if args.set:
         updates: dict[str, str] = {}
         titles: dict[str, str] = {}
+        companies: dict[str, str] = {}
         distinct: set[str] = set()
         cleared: list[str] = []
         valid = {p.speaker for p in transcript.speaker_profiles}
@@ -596,6 +597,11 @@ def cmd_speakers(cfg: Config, args) -> int:
             key, title = key.strip(), title.strip()
             if key and title:
                 titles[key] = title
+        for item in getattr(args, "company", None) or []:
+            key, _, company = item.partition("=")
+            key, company = key.strip(), company.strip()
+            if key and company:
+                companies[key] = company
         for key in getattr(args, "distinct", None) or []:
             if key.strip():
                 distinct.add(key.strip())
@@ -643,15 +649,19 @@ def cmd_speakers(cfg: Config, args) -> int:
                     embedding=embedding,
                     clip=clip,
                     title=titles.get(key, ""),
+                    company=companies.get(key, ""),
                     distinct=key in distinct,
                 )
         except Exception:
             logging.getLogger("meeting_archive").exception(
                 "could not update speaker library for %s", args.meeting_id
             )
-        for key, name in sorted(updates.items()):
+        display = models.speaker_display_indices(transcript.speaker_profiles)
+        for key, name in sorted(updates.items(), key=lambda item: display.get(item[0], 0)):
             tag = " (assumed last remaining name)" if assumed and key == assumed[0] else ""
-            print(f"{key} -> {name}{tag}")
+            index = display.get(key) or models.speaker_index(key)
+            who = f"Speaker {index}" if index else key
+            print(f"{who} -> {name}{tag}")
         if assumed:
             print(f"ASSUMED\t{assumed[0]}\t{assumed[1]}")
         print("run `ma ingest` or let the watcher pick it up to relabel the transcript")
@@ -1311,6 +1321,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="KEY=TITLE",
         help="optional job title for a voice named in the same command",
+    )
+    p.add_argument(
+        "--company",
+        action="append",
+        metavar="KEY=COMPANY",
+        help="optional company for a voice named in the same command",
     )
     p.add_argument(
         "--distinct",

@@ -489,18 +489,94 @@ def render_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def meeting_recordings(cfg, meeting_id: str) -> list[tuple[str, Path]]:
+    """Playable channel files still on disk, archive first.
+
+    The raw multi-channel file is skipped. Browsers play the split wavs,
+    and those are what a listen-back is for. A purged meeting returns nothing.
+    """
+    folders = (
+        getattr(cfg, "audio_archive_dir", None),
+        getattr(cfg, "processing_dir", None),
+        getattr(cfg, "inbox_dir", None),
+        getattr(cfg, "failed_dir", None),
+    )
+    found: dict[str, Path] = {}
+    for folder in folders:
+        if folder is None or not Path(folder).is_dir():
+            continue
+        for path in sorted(Path(folder).glob(f"{meeting_id}__*.wav")):
+            channel = path.stem.split("__", 1)[-1]
+            if channel == "raw" or channel in found:
+                continue
+            found[channel] = path
+    order = {"room": 0, "mic": 1, "sys": 2}
+    only = len(found) == 1
+    return [
+        (_recording_caption(cfg, channel, only), found[channel])
+        for channel in sorted(found, key=lambda item: (order.get(item, 9), item))
+    ]
+
+
+def _recording_caption(cfg, channel: str, only: bool) -> str:
+    if only:
+        return "The recording"
+    if channel == "mic":
+        return str(getattr(cfg, "own_label", "") or "You")
+    if channel == "sys":
+        other = str(getattr(cfg, "other_label", "") or "")
+        return "The other side" if other in {"", "Other"} else other
+    if channel == "room":
+        return "The room"
+    return channel
+
+
+def ensure_transcript_page(cfg, transcript: Transcript, notes: dict | None = None) -> Path:
+    """Write the Yarn transcript page and return it.
+
+    The daily brief and the library both link here, so a meeting opened from
+    either place is the same page.
+    """
+    from .models import speaker_display_indices
+    from .speakers import library_details
+
+    if notes is None:
+        notes = read_notes(cfg.notes_json(transcript.meeting_id))
+    roster = speaker_roster(notes)
+    display = speaker_display_indices(transcript.speaker_profiles)
+    titles, companies = library_details(cfg)
+    page = cfg.transcript_html(transcript.meeting_id)
+    page.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(
+        page,
+        render_transcript_html(
+            transcript,
+            cfg.turn_labeller(roster, display),
+            notes,
+            titles=titles,
+            companies=companies,
+            recordings=meeting_recordings(cfg, transcript.meeting_id),
+        ),
+    )
+    return page
+
+
 def render_transcript_html(
     transcript: Transcript,
     label_fn,
     notes: dict | None = None,
     *,
     titles: dict[str, str] | None = None,
+    companies: dict[str, str] | None = None,
+    recordings: list[tuple[str, Path]] | None = None,
 ) -> str:
     """Readable meeting page. Same facts as the markdown, in the Yarn style."""
     from . import htmltheme
 
     notes = notes or {}
     titles = titles or {}
+    companies = companies or {}
+    recordings = recordings or []
     roster = speaker_roster(notes)
     minutes = int(transcript.duration_s // 60)
     seconds = int(transcript.duration_s % 60)
@@ -509,10 +585,17 @@ def render_transcript_html(
     when = date_label(transcript.meeting_id)
 
     def titled(name: str) -> str:
-        title = titles.get(name.casefold(), "").strip()
+        bits = [
+            bit
+            for bit in (
+                titles.get(name.casefold(), "").strip(),
+                companies.get(name.casefold(), "").strip(),
+            )
+            if bit
+        ]
         shown = htmltheme.html_escape(name)
-        if title:
-            shown += f' <span class="role">{htmltheme.html_escape(title)}</span>'
+        if bits:
+            shown += f' <span class="role">{htmltheme.html_escape(", ".join(bits))}</span>'
         return shown
 
     summary = name_speakers_in_text(transcript.summary.strip(), transcript, roster)
@@ -570,32 +653,63 @@ def render_transcript_html(
                 f"across {profile.turns} turns, not yet identified</div>{quip}</li>"
             )
 
-    turns_html = []
-    if not transcript.turns:
-        turns_html.append(
-            '<p class="empty">No speech was recognised in this recording.</p>'
-        )
-    else:
-        for speaker, start, end, text in _coalesce_turns_for_display(
-            transcript.turns, label_turn
-        ):
-            start_stamp = format_timestamp(start)
-            stamp = (
-                f"{start_stamp}–{format_timestamp(end)}"
-                if end - start >= 1.0
-                else start_stamp
-            )
-            turns_html.append(
-                '<article class="turn">'
-                f'<div class="turn-meta"><span class="mono">{htmltheme.html_escape(stamp)}</span> '
-                f"{titled(speaker)}</div>"
-                f"<p>{htmltheme.html_escape(text)}</p>"
-                "</article>"
-            )
-
     attendees = str(notes.get("attendees") or "").strip()
     attendee_line = (
         f'<p class="lede">{htmltheme.html_escape(attendees)}</p>' if attendees else ""
+    )
+    if recordings:
+        players = []
+        for caption, path in recordings:
+            players.append(
+                '<div class="player">'
+                f'<div class="item">{htmltheme.html_escape(caption)}</div>'
+                f'<audio controls preload="none" src="{htmltheme.html_escape(path.as_uri())}"></audio>'
+                "</div>"
+            )
+        tracks = ""
+        if len(recordings) > 1:
+            tracks = '<p class="why">A call is two tracks. Play both to hear everyone.</p>'
+        listen = (
+            '<section class="card"><h2>Listen</h2>'
+            '<p class="why">Still on this Mac.</p>'
+            f"{tracks}{''.join(players)}</section>"
+        )
+    else:
+        listen = (
+            '<section class="card"><h2>Listen</h2>'
+            '<p class="empty">The recording has been cleared. The transcript stays.</p>'
+            "</section>"
+        )
+    bars = []
+    spoken: list[tuple[str, float]] = []
+    if transcript.speaker_profiles:
+        display = speaker_display_indices(transcript.speaker_profiles)
+        totals: dict[str, float] = {}
+        for profile in transcript.speaker_profiles:
+            name = str(roster.get(profile.speaker, "")).strip()
+            if not name:
+                index = display.get(profile.speaker) or speaker_index(profile.speaker) or "?"
+                name = f"Speaker {index}"
+            totals[name] = totals.get(name, 0.0) + float(profile.speaking_s or 0.0)
+        spoken = sorted(totals.items(), key=lambda item: item[1], reverse=True)[:8]
+    peak = max((seconds_ for _, seconds_ in spoken), default=0.0) or 1.0
+    for name, amount in spoken:
+        height = max(8, int(72 * (amount / peak))) if amount else 4
+        tip = format_duration(amount)
+        bars.append(
+            f'<div class="bar-col"><div class="bar" style="height:{height}px" '
+            f'title="{htmltheme.html_escape(tip)}"></div>'
+            f"<span>{htmltheme.html_escape(name.split()[0])}</span>"
+            f"<small>{htmltheme.html_escape(tip)}</small></div>"
+        )
+    who = (
+        '<section class="card"><h2>Who spoke</h2>'
+        + (
+            f'<div class="bars">{"".join(bars)}</div>'
+            if bars
+            else '<p class="empty">No separated voices in this one.</p>'
+        )
+        + "</section>"
     )
     voices_card = ""
     if voice_rows:
@@ -604,13 +718,43 @@ def render_transcript_html(
             + "".join(voice_rows)
             + "</ol></section>"
         )
+    dots = ["#167DFF", "#48C8FA", "#0D244B", "#5aa2ff", "#1f4f86", "#8fd4fb"]
+    seen_speakers: dict[str, str] = {}
+    coloured = []
+    if not transcript.turns:
+        coloured.append('<p class="empty">No speech was recognised in this recording.</p>')
+    else:
+        for speaker, start, end, text in _coalesce_turns_for_display(
+            transcript.turns, label_turn
+        ):
+            if speaker not in seen_speakers:
+                seen_speakers[speaker] = dots[len(seen_speakers) % len(dots)]
+            start_stamp = format_timestamp(start)
+            stamp = (
+                f"{start_stamp}–{format_timestamp(end)}"
+                if end - start >= 1.0
+                else start_stamp
+            )
+            coloured.append(
+                '<article class="turn">'
+                f'<div class="turn-meta"><span class="mono">{htmltheme.html_escape(stamp)}</span> '
+                f'<span class="dot" style="background:{seen_speakers[speaker]}"></span>'
+                f"{titled(speaker)}</div>"
+                f"<p>{htmltheme.html_escape(text)}</p>"
+                "</article>"
+            )
+    overview = summary_html.replace("<p>", '<p class="overview">', 1) if summary else summary_html
     body = f"""
   {htmltheme.masthead("Transcript", heading)}
   <p class="when">{htmltheme.html_escape(when)} · {minutes}m {seconds:02d}s · saved on this Mac</p>
   {attendee_line}
-  <section class="card"><h2>Summary</h2>{summary_html}</section>
+  {overview}
+  <div class="grid">
+    {listen}
+    {who}
+  </div>
   {voices_card}
-  <section class="card"><h2>Transcript</h2>{"".join(turns_html)}</section>
+  <section class="card"><h2>What was said</h2>{"".join(coloured)}</section>
 """
     return htmltheme.document(f"Yarn transcript, {heading}", body)
 

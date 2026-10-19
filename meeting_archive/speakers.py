@@ -31,8 +31,9 @@ class KnownSpeaker:
     confirmation_count: int = 0
     last_seen: str = ""
     notes: str = ""
-    # Optional job title, for search. Never required, and never used as a name.
+    # Optional job title and company, for search. Never required, and never a name.
     title: str = ""
+    company: str = ""
     # Mean embedding, if we were able to extract one. Omitted from UI.
     embedding: list[float] = field(default_factory=list)
     # Filename of a short reference wav under speakers/clips/. That directory
@@ -48,6 +49,7 @@ class KnownSpeaker:
             "last_seen": self.last_seen,
             "notes": self.notes,
             "title": self.title,
+            "company": self.company,
             "embedding": self.embedding,
             "clip": self.clip,
         }
@@ -62,6 +64,7 @@ class KnownSpeaker:
             last_seen=d.get("last_seen", ""),
             notes=d.get("notes", ""),
             title=str(d.get("title") or ""),
+            company=str(d.get("company") or ""),
             embedding=[float(x) for x in (d.get("embedding") or [])],
             clip=str(d.get("clip") or ""),
         )
@@ -100,9 +103,24 @@ def fold_name(name: str) -> str:
 
 
 def search_label(person: KnownSpeaker) -> str:
-    """How a person should appear in search text. The title is optional."""
-    title = person.title.strip()
-    return f"{person.name} ({title})" if title else person.name
+    """How a person should appear in search text. Title and company are optional."""
+    detail = ", ".join(
+        bit for bit in (person.title.strip(), person.company.strip()) if bit
+    )
+    return f"{person.name} ({detail})" if detail else person.name
+
+
+def library_details(cfg: Config) -> tuple[dict[str, str], dict[str, str]]:
+    """Title and company by folded name, for transcript pages and search."""
+    titles: dict[str, str] = {}
+    companies: dict[str, str] = {}
+    for person in load_library(cfg):
+        key = person.name.casefold()
+        if person.title.strip():
+            titles[key] = person.title.strip()
+        if person.company.strip():
+            companies[key] = person.company.strip()
+    return titles, companies
 
 
 def labels_for_search(cfg: Config, names: list[str]) -> str:
@@ -125,37 +143,51 @@ def labels_for_search(cfg: Config, names: list[str]) -> str:
     return ", ".join(labels)
 
 
+def _detail_fits(person: KnownSpeaker, title: str, company: str) -> bool:
+    """True when this row can take the new title and company.
+
+    An empty stored field can be filled in. A different title or company
+    is a different person, not a correction.
+    """
+    stored_title = fold_name(person.title)
+    stored_company = fold_name(person.company)
+    if title and stored_title and title != stored_title:
+        return False
+    if company and stored_company and company != stored_company:
+        return False
+    return True
+
+
 def _match_person(
-    speakers: list[KnownSpeaker], name: str, title: str = ""
+    speakers: list[KnownSpeaker],
+    name: str,
+    title: str = "",
+    company: str = "",
 ) -> KnownSpeaker | None:
     """The library row this name belongs to, or None if it is a new person.
 
-    A matching name with no title yet is the same person getting a title.
-    The same name with a different title is someone else.
+    A matching name with no title or company yet is the same person getting
+    those filled in. A different title or company is someone else.
     """
     key = fold_name(name)
     title_key = fold_name(title)
+    company_key = fold_name(company)
     if not key:
         return None
-    exact = [
+    candidates = [
         person
         for person in speakers
-        if fold_name(person.name) == key and fold_name(person.title) == title_key
+        if fold_name(person.name) == key and _detail_fits(person, title_key, company_key)
     ]
-    if exact:
+    if len(candidates) == 1:
+        return candidates[0]
+    exact = [
+        person
+        for person in candidates
+        if fold_name(person.title) == title_key and fold_name(person.company) == company_key
+    ]
+    if len(exact) == 1:
         return exact[0]
-    if title_key:
-        bare = [
-            person
-            for person in speakers
-            if fold_name(person.name) == key and not fold_name(person.title)
-        ]
-        if len(bare) == 1:
-            return bare[0]
-        return None
-    same = [person for person in speakers if fold_name(person.name) == key]
-    if len(same) == 1:
-        return same[0]
     return None
 
 
@@ -168,14 +200,19 @@ def stored_spelling(speakers: list[KnownSpeaker], name: str) -> str:
     return " ".join(str(name or "").split())
 
 
-def name_needs_detail(speakers: list[KnownSpeaker], name: str, title: str = "") -> bool:
+def name_needs_detail(
+    speakers: list[KnownSpeaker],
+    name: str,
+    title: str = "",
+    company: str = "",
+) -> bool:
     """True when this single name is already in the library and nothing new distinguishes it.
 
-    A last name, or a title, is enough. Confirming the same person again,
-    including a change of capitalisation, is not a second person.
+    A last name, a title, or a company is enough. Confirming the same person
+    again, including a change of capitalisation, is not a second person.
     """
     folded = fold_name(name)
-    if not folded or fold_name(title):
+    if not folded or fold_name(title) or fold_name(company):
         return False
     if len(folded.split()) > 1:
         return False
@@ -190,24 +227,32 @@ def remember_confirmation(
     embedding: list[float] | None = None,
     clip: str = "",
     title: str = "",
+    company: str = "",
     distinct: bool = False,
 ) -> KnownSpeaker:
     """Record that Jacob named a voice. Embeddings are averaged when present.
 
     `distinct` means this is a second person who shares the first name and
-    was given a title so the two can be told apart.
+    was given a title or company so the two can be told apart.
     """
     speakers = load_library(cfg)
     title = title.strip()
+    company = company.strip()
     name = stored_spelling(speakers, name)
-    found = _match_person(speakers, name, title)
-    if distinct and found is not None and fold_name(found.title) != fold_name(title):
+    found = _match_person(speakers, name, title, company)
+    if distinct and found is not None and (
+        fold_name(found.title) != fold_name(title)
+        or fold_name(found.company) != fold_name(company)
+    ):
         found = None
     if found is None:
-        found = KnownSpeaker(name=name, title=title)
+        found = KnownSpeaker(name=name, title=title, company=company)
         speakers.append(found)
-    elif title and not found.title.strip():
-        found.title = title
+    else:
+        if title and not found.title.strip():
+            found.title = title
+        if company and not found.company.strip():
+            found.company = company
     repeat = meeting_id in found.meeting_ids
     prior = found.confirmation_count
     if not repeat:
@@ -1073,7 +1118,11 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         "has_audio": has_audio,
         "names": names,
         "people": [
-            {"name": person.name, "title": person.title}
+            {
+                "name": person.name,
+                "title": person.title,
+                "company": person.company,
+            }
             for person in library
             if is_real_name(person.name)
         ],
@@ -1179,8 +1228,8 @@ def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) ->
             '<div class="voice">'
             f"<strong>{_esc(person.name)}</strong>"
             + (
-                f'<div class="mono">{_esc(person.title)}</div>'
-                if person.title.strip()
+                f'<div class="mono">{_esc(", ".join(bit for bit in (person.title, person.company) if bit.strip()))}</div>'
+                if person.title.strip() or person.company.strip()
                 else ""
             )
             + f'<div class="mono">{person.confirmation_count} confirmation(s) · '

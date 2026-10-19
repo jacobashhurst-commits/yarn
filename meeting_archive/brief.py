@@ -18,7 +18,12 @@ from pathlib import Path
 from . import records
 from .config import Config, write_setting
 from .models import format_duration
-from .records import Transcript, parse_meeting_id, write_text_atomic
+from .records import (
+    Transcript,
+    ensure_transcript_page,
+    parse_meeting_id,
+    write_text_atomic,
+)
 from .summarize import Summarizer, SummaryUnavailable
 
 log = logging.getLogger(__name__)
@@ -143,8 +148,9 @@ def gather_sources(cfg: Config, *, today: date | None = None) -> list[MeetingBri
             summary = " ".join(t.text for t in transcript.turns[:12])
         else:
             continue
-        page = cfg.transcript_html(transcript.meeting_id)
-        if not page.exists():
+        try:
+            page = ensure_transcript_page(cfg, transcript, notes)
+        except (OSError, ValueError):
             page = cfg.transcript_md(transcript.meeting_id)
         found.append(
             MeetingBriefSource(

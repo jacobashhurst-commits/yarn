@@ -521,17 +521,20 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
             processing=records.processing_from_job(jobs.load(cfg, meeting_id)),
         ),
     )
-    from .speakers import load_library
+    from .speakers import library_details
 
-    titles = {
-        person.name.casefold(): person.title
-        for person in load_library(cfg)
-        if person.title.strip()
-    }
+    titles, companies = library_details(cfg)
     html_path = cfg.transcript_html(meeting_id)
     records.write_text_atomic(
         html_path,
-        records.render_transcript_html(transcript, labeller, notes, titles=titles),
+        records.render_transcript_html(
+            transcript,
+            labeller,
+            notes,
+            titles=titles,
+            companies=companies,
+            recordings=records.meeting_recordings(cfg, meeting_id),
+        ),
     )
     if previous_md != md_path and previous_md.exists():
         previous_md.unlink()

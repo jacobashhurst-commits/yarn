@@ -891,6 +891,53 @@ def test_a_second_jacob_with_a_title_stays_a_second_person(cfg):
     assert name_needs_detail(people, "Jacob")
     assert not name_needs_detail(people, "Jacob Smith")
     assert not name_needs_detail(people, "Jacob", title="Engineer")
+    assert not name_needs_detail(people, "Jacob", company="Northwind")
+
+
+def test_company_is_stored_with_the_person(cfg):
+    person = remember_confirmation(
+        cfg,
+        name="Jacob",
+        meeting_id="2026-09-25T11-00-00",
+        title="Finance director",
+        company="Northwind",
+    )
+    assert person.title == "Finance director"
+    assert person.company == "Northwind"
+    again = remember_confirmation(cfg, name="jacob", meeting_id="2026-09-26T11-00-00")
+    assert again.company == "Northwind"
+    assert len(load_library(cfg)) == 1
+    from meeting_archive.speakers import search_label
+    assert search_label(again) == "Jacob (Finance director, Northwind)"
+
+
+def test_transcript_page_can_play_a_kept_recording(cfg, tmp_path):
+    from meeting_archive.records import render_transcript_html
+
+    wav = tmp_path / "2026-09-25T11-00-00__room.wav"
+    wav.write_bytes(b"RIFF")
+    transcript = Transcript(
+        meeting_id="2026-09-25T11-00-00",
+        duration_s=65,
+        title="Planning",
+        summary="Jacob will send the note.",
+        turns=[Turn(ROOM, 1, 4, "Hello there.", speaker="room-1")],
+    )
+    html = render_transcript_html(
+        transcript,
+        lambda turn: "Jacob",
+        {},
+        titles={"jacob": "Finance director"},
+        companies={"jacob": "Northwind"},
+        recordings=[("The recording", wav)],
+    )
+    assert "Who spoke" in html
+    assert "What was said" in html
+    assert "Finance director, Northwind" in html
+    assert wav.as_uri() in html
+    assert "room-1" not in html
+    cleared = render_transcript_html(transcript, lambda turn: "Jacob", {})
+    assert "recording has been cleared" in cleared
 
 
 def test_known_speakers_html_lists_confirmed_voices(cfg):

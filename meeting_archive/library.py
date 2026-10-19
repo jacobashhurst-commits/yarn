@@ -162,36 +162,18 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
 def render_transcript_index(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
     """One page of meetings, each opening a Yarn-styled transcript."""
     from . import htmltheme, records
-    from .models import speaker_display_indices
-    from .speakers import load_library
 
     rows = rows if rows is not None else list_meetings(cfg)
-    titles = {
-        person.name.casefold(): person.title
-        for person in load_library(cfg)
-        if person.title.strip()
-    }
     items = []
     for row in rows:
         if not row.has_transcript:
             continue
         path = cfg.transcript_json(row.meeting_id)
         page = cfg.transcript_html(row.meeting_id)
-        if path.exists() and not page.exists():
+        if path.exists():
             try:
                 transcript = Transcript.read(path)
-                notes = records.read_notes(cfg.notes_json(row.meeting_id))
-                roster = records.speaker_roster(notes)
-                display = speaker_display_indices(transcript.speaker_profiles)
-                page.write_text(
-                    records.render_transcript_html(
-                        transcript,
-                        cfg.turn_labeller(roster, display),
-                        notes,
-                        titles=titles,
-                    ),
-                    encoding="utf-8",
-                )
+                page = records.ensure_transcript_page(cfg, transcript)
             except (OSError, ValueError):
                 page = cfg.transcript_md(row.meeting_id)
         if not page.exists():
