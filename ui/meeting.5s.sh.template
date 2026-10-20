@@ -355,6 +355,7 @@ fi
 
 echo "---"
 echo "Quick actions | size=12 color=#888888"
+echo "Open Yarn | bash=/usr/bin/open param1=\"$HOME/Applications/Yarn.app\" terminal=false"
 echo "Ask Yarn | bash=\"$MA\" param1=ask terminal=false refresh=true"
 echo "Import recording | bash=\"$(dirname "$REC")/yarn-import\" param1=audio param2=\"$MA\" terminal=false refresh=true"
 echo "Import transcript | bash=\"$(dirname "$REC")/yarn-import\" param1=transcript param2=\"$MA\" terminal=false refresh=true"

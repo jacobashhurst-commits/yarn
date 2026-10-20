@@ -55,6 +55,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.3</string>
+  <key>CFBundleVersion</key><string>0.3</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -106,6 +107,13 @@ PLIST_EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   sleep 0.3
   launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+fi
+
+# Spotlight only offers an app it has been shown. Register the bundle so
+# Command-Space and typing Yarn opens this one.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
 # Open in front so the icon is in the Dock and the window is there to look at.
