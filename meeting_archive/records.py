@@ -126,9 +126,11 @@ class Manifest:
     raw_file: str = ""
     source: str = "native"
     title: str = ""
+    # Empty means English, including meetings recorded before this existed.
+    language: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "meeting_id": self.meeting_id,
             "channels": self.channels,
             "started_at": self.started_at,
@@ -138,6 +140,9 @@ class Manifest:
             "source": self.source,
             "title": self.title,
         }
+        if self.language and self.language != "en":
+            payload["language"] = self.language
+        return payload
 
     @classmethod
     def from_dict(cls, d: dict) -> "Manifest":
@@ -150,6 +155,7 @@ class Manifest:
             raw_file=d.get("raw_file", ""),
             source=d.get("source", "native"),
             title=d.get("title", ""),
+            language=d.get("language", ""),
         )
 
     @classmethod
@@ -198,6 +204,8 @@ class Transcript:
     whisper_engine: str = ""
     # Turns as they were before optional cleanup. Empty means cleanup never ran.
     raw_turns: list[Turn] = field(default_factory=list)
+    # Spoken language. Empty and "en" are English. "auto" means it was not decided.
+    language: str = ""
 
     def to_dict(self) -> dict:
         d = {
@@ -237,6 +245,8 @@ class Transcript:
             d["whisper_engine"] = self.whisper_engine
         if self.raw_turns:
             d["raw_turns"] = [t.to_dict() for t in self.raw_turns]
+        if self.language and self.language != "en":
+            d["language"] = self.language
         return d
 
     @classmethod
@@ -281,6 +291,7 @@ class Transcript:
             source=d.get("source", "native"),
             whisper_engine=d.get("whisper_engine", ""),
             raw_turns=[Turn.from_dict(t) for t in d.get("raw_turns") or []],
+            language=d.get("language", ""),
         )
 
     def unnamed_speakers(self, roster: dict | None = None) -> list[SpeakerProfile]:
@@ -333,12 +344,30 @@ def name_speakers_in_text(text: str, transcript: "Transcript", roster: dict) -> 
 _DISPLAY_COALESCE_GAP_S = 45.0
 
 
+def _role_text(
+    name: str,
+    titles: dict[str, str] | None,
+    companies: dict[str, str] | None,
+) -> str:
+    key = name.casefold()
+    return ", ".join(
+        bit
+        for bit in (
+            (titles or {}).get(key, "").strip(),
+            (companies or {}).get(key, "").strip(),
+        )
+        if bit
+    )
+
+
 def render_markdown(
     transcript: Transcript,
     label_fn,
     notes: dict | None = None,
     *,
     processing: dict | None = None,
+    titles: dict[str, str] | None = None,
+    companies: dict[str, str] | None = None,
 ) -> str:
     """Human-readable transcript. Written for Jacob's eyes, not for embedding.
 
@@ -441,7 +470,11 @@ def render_markdown(
             detail = (
                 f"{format_duration(bucket['speaking_s'])} across {bucket['turns']} turns"
             )
-            line = f"- **{bucket['name']}** ({detail})"
+            role = _role_text(bucket["name"], titles, companies)
+            line = f"- **{bucket['name']}**"
+            if role:
+                line += f", {role}"
+            line += f" ({detail})"
             if bucket["quip"]:
                 line += f' said: "{bucket["quip"]}"'
             lines.append(line)
@@ -583,19 +616,18 @@ def render_transcript_html(
     label_turn = _turn_labeller(label_fn)
     heading = transcript.title.strip() if transcript.title else "Meeting"
     when = date_label(transcript.meeting_id)
+    from .languages import language_label
+
+    if transcript.language and transcript.language not in {"en", "auto"}:
+        heard = language_label(transcript.language)
+        if heard:
+            when = f"{when} · {heard}"
 
     def titled(name: str) -> str:
-        bits = [
-            bit
-            for bit in (
-                titles.get(name.casefold(), "").strip(),
-                companies.get(name.casefold(), "").strip(),
-            )
-            if bit
-        ]
         shown = htmltheme.html_escape(name)
-        if bits:
-            shown += f' <span class="role">{htmltheme.html_escape(", ".join(bits))}</span>'
+        role = _role_text(name, titles, companies)
+        if role:
+            shown += f'<div class="role">{htmltheme.html_escape(role)}</div>'
         return shown
 
     summary = name_speakers_in_text(transcript.summary.strip(), transcript, roster)

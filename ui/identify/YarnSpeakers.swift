@@ -265,6 +265,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     let progressLabel = NSTextField(labelWithString: "")
     let detailLabel = WrapLabel(size: 12, color: YarnColor.slate)
     let guessLabel = WrapLabel(size: 18, weight: .semibold, color: YarnColor.ink)
+    let roleLabel = WrapLabel(size: 13, color: YarnColor.slate)
     let captionLabel = WrapLabel(size: 12, color: YarnColor.slate)
     let matchesLabel = WrapLabel(size: 12, color: YarnColor.slate)
     let savedLabel = WrapLabel(size: 12, color: YarnColor.slate)
@@ -280,6 +281,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     var companies: [String: String] = [:]
     var distinctKeys: Set<String> = []
     var askedToDistinguish = false
+    var showingVoice = false
     let playButton = NSButton(title: "Play", target: nil, action: nil)
     let nextButton = NSButton(title: "Next clip", target: nil, action: nil)
     let stopButton = NSButton(title: "Stop", target: nil, action: nil)
@@ -362,6 +364,8 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         nameBox.controlSize = .large
         nameBox.placeholderString = "Name, or leave blank if you don't know"
         nameBox.font = NSFont.systemFont(ofSize: 15)
+        nameBox.target = self
+        nameBox.action = #selector(namePicked)
         titleBox.translatesAutoresizingMaskIntoConstraints = false
         companyBox.translatesAutoresizingMaskIntoConstraints = false
         lastNameBox.translatesAutoresizingMaskIntoConstraints = false
@@ -386,7 +390,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         voiceRow.alignment = .firstBaseline
         voiceRow.spacing = 12
 
-        let prediction = NSStackView(views: [guessLabel, captionLabel, matchesLabel, savedLabel])
+        let prediction = NSStackView(views: [guessLabel, roleLabel, captionLabel, matchesLabel, savedLabel])
         prediction.orientation = .vertical
         prediction.alignment = .leading
         prediction.spacing = 3
@@ -459,7 +463,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -(pad * 2)).isActive = true
         }
-        for label in [guessLabel, captionLabel, matchesLabel, savedLabel] {
+        for label in [guessLabel, roleLabel, captionLabel, matchesLabel, savedLabel] {
             label.widthAnchor.constraint(equalTo: prediction.widthAnchor).isActive = true
         }
         nameBox.widthAnchor.constraint(equalTo: nameStack.widthAnchor).isActive = true
@@ -636,6 +640,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
 
     func show(_ index: Int) {
         stopClip()
+        showingVoice = true
         position = index
         clipIndex = 0
         let v = voice
@@ -653,13 +658,20 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         lastNameBox.isHidden = true
         distinguishHint.isHidden = true
         let answer = answers[v.key]
-        nameBox.stringValue = answer ?? (v.named.isEmpty ? v.guess : v.named)
+        let shownName = answer ?? (v.named.isEmpty ? v.guess : v.named)
+        nameBox.stringValue = shownName
+        if titles[v.key] == nil {
+            let person = knownPerson(shownName)
+            titles[v.key] = person?.title ?? ""
+            companies[v.key] = person?.company ?? ""
+        }
         titleBox.stringValue = titles[v.key] ?? ""
         companyBox.stringValue = companies[v.key] ?? ""
         backButton.isEnabled = index > 0
         saveButton.title = index == queue.count - 1 ? "Save & finish" : "Save & next"
         renderClip()
         window.makeFirstResponder(nameBox)
+        showingVoice = false
         DispatchQueue.main.async { self.fitWindow() }
     }
 
@@ -690,6 +702,8 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             guessLabel.textColor = YarnColor.ink
             guessLabel.show(v.guess, spacing: 0)
         }
+        let who = v.guess.isEmpty ? v.named : v.guess
+        roleLabel.show(roleLine(who), spacing: 0)
         captionLabel.show(caption(for: v), spacing: 1)
         matchesLabel.show(attributed: matchesLine(v.matches))
         savedLabel.show(v.named.isEmpty ? "" : "Saved as \(v.named)")
@@ -843,6 +857,30 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         companies[voice.key] = companyBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func knownPerson(_ name: String) -> Person? {
+        let key = fold(name)
+        guard !key.isEmpty else { return nil }
+        return payload?.people.first { fold($0.name) == key }
+    }
+
+    func roleLine(_ name: String) -> String {
+        guard let person = knownPerson(name) else { return "" }
+        return [person.title, person.company].filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    @objc func namePicked() {
+        if showingVoice { return }
+        let name = nameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let person = knownPerson(name) else { return }
+        if titleBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            titleBox.stringValue = person.title
+        }
+        if companyBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            companyBox.stringValue = person.company
+        }
+        record()
+    }
+
     func fold(_ value: String) -> String {
         value.lowercased().split { $0.isWhitespace }.joined(separator: " ")
     }
@@ -928,6 +966,10 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             guard !guess.isEmpty else { continue }
             if guess.caseInsensitiveCompare(name) == .orderedSame {
                 answers[v.key] = name
+                if (titles[v.key] ?? "").isEmpty {
+                    titles[v.key] = titles[voice.key] ?? ""
+                    companies[v.key] = companies[voice.key] ?? ""
+                }
                 applied += 1
             }
         }

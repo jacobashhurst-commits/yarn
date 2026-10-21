@@ -32,6 +32,7 @@ from pathlib import Path
 from . import audio, jobs, metrics, records, resources
 from .chunking import chunk_turns, context_header
 from .config import Config
+from .languages import resolve_spoken, uses_english_names
 from .diarize import (
     Diarizer,
     DiarizationUnavailable,
@@ -402,6 +403,7 @@ def finalize(
         duration_s=info["duration"],
         raw_file=raw_kept.name,
         source="native",
+        language=(cfg.whisper.language or "en"),
     )
     # Written last: the watcher triggers on manifests only, so nothing can be
     # picked up before both channels are fully on disk.
@@ -511,6 +513,9 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     # Re-render the markdown so notes and speaker names show up in the
     # readable transcript too. The file is named from the title, so a later
     # notes popup can rename it; drop the previous name if it changed.
+    from .speakers import library_details
+
+    titles, companies = library_details(cfg)
     md_path = cfg.transcript_md(meeting_id)
     records.write_text_atomic(
         md_path,
@@ -519,11 +524,10 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
             labeller,
             notes,
             processing=records.processing_from_job(jobs.load(cfg, meeting_id)),
+            titles=titles,
+            companies=companies,
         ),
     )
-    from .speakers import library_details
-
-    titles, companies = library_details(cfg)
     html_path = cfg.transcript_html(meeting_id)
     records.write_text_atomic(
         html_path,
@@ -589,7 +593,9 @@ def apply_summary(
         display = speaker_display_indices(transcript.speaker_profiles)
         transcript.summary = apply_glossary(
             summarizer.summarize(
-                transcript.turns, cfg.turn_labeller(roster, display)
+                transcript.turns,
+                cfg.turn_labeller(roster, display),
+                language=transcript.language,
             ),
             cfg.glossary.replacements,
         )
@@ -718,7 +724,7 @@ def rediarize(
                 own_names=cfg.names.own_names,
                 own_label=cfg.own_label,
             )
-            if cfg.names.enabled and spans
+            if cfg.names.enabled and spans and uses_english_names(transcript.language)
             else []
         )
         transcript.speaker_profiles = profile_speakers(
@@ -776,7 +782,9 @@ def rediarize(
             display = speaker_display_indices(transcript.speaker_profiles)
             try:
                 transcript.summary = summarizer.summarize(
-                    transcript.turns, cfg.turn_labeller(roster, display)
+                    transcript.turns,
+                    cfg.turn_labeller(roster, display),
+                    language=transcript.language,
                 )
                 transcript.summary_model = cfg.summary.model
                 transcript.summary_error = ""
@@ -963,6 +971,8 @@ def process(
             raise ValueError(f"manifest for {meeting_id} lists no channels")
 
         checkpoint_path = jobs.whisper_checkpoint_path(cfg, meeting_id)
+        requested_language = manifest.language or "en"
+        detected_language = ""
         skip_whisper = job.stage_done("transcribe") and (
             checkpoint_path.exists() or cfg.transcript_json(meeting_id).exists()
         )
@@ -971,12 +981,15 @@ def process(
             if not segments:
                 skip_whisper = False
         if skip_whisper:
+            detected_language = _checkpoint_language(checkpoint_path)
             log.info(
                 "resuming meeting=%s from Whisper checkpoint (%d segments)",
                 meeting_id,
                 len(segments),
             )
         else:
+            if hasattr(transcriber, "set_language"):
+                transcriber.set_language(requested_language)
             jobs.begin_stage(cfg, job, "transcribe")
             transcribe_started = time.perf_counter()
             channels = sorted(manifest.channels.items())
@@ -1020,6 +1033,7 @@ def process(
                         progress=report,
                     )
                 )
+            detected_language = str(getattr(transcriber, "detected_language", "") or "")
             jobs.finish_stage(cfg, job, "transcribe")
             # Persist before the long diarize stage so a reboot / kill can
             # skip Whisper and pick up at Separate voices.
@@ -1029,6 +1043,7 @@ def process(
                 segments,
                 model=cfg.whisper.model,
                 engine=_whisper_engine(transcriber),
+                language=detected_language,
             )
             metrics.record(
                 cfg,
@@ -1084,20 +1099,23 @@ def process(
             max_turn_s=cfg.chunk.max_turn_s,
         )
         turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
+        spoken = resolve_spoken(requested_language, detected_language)
+        english_names = uses_english_names(spoken)
 
         candidates = (
             detect_names(turns, own_names=cfg.names.own_names, min_count=cfg.names.min_count)
-            if cfg.names.enabled
+            if cfg.names.enabled and english_names
             else []
         )
 
         # Which name belongs to which voice. Only ever a suggestion for the
-        # dialog; nothing here labels a turn.
+        # dialog; nothing here labels a turn. The patterns are English, so a
+        # meeting in another language does not run them.
         guesses = (
             infer_speaker_names(
                 turns, own_names=cfg.names.own_names, own_label=cfg.own_label
             )
-            if cfg.names.enabled and spans
+            if cfg.names.enabled and english_names and spans
             else []
         )
         profiles = profile_speakers(turns, guesses=speaker_guess_map(guesses))
@@ -1146,7 +1164,7 @@ def process(
         _keep_known_voices(cfg, meeting_id, guesses)
 
         raw_turns: list = []
-        if cfg.cleanup.enabled and summarizer is not None:
+        if cfg.cleanup.enabled and summarizer is not None and english_names:
             jobs.begin_stage(cfg, job, "cleanup")
             _processing_status(
                 cfg,
@@ -1235,6 +1253,7 @@ def process(
             source=manifest.source or "native",
             whisper_engine=_whisper_engine(transcriber),
             raw_turns=raw_turns,
+            language=spoken,
         )
         transcript.write(cfg.transcript_json(meeting_id))
         checkpoint_path.unlink(missing_ok=True)
@@ -1287,6 +1306,16 @@ def process(
         raise
 
 
+def _checkpoint_language(checkpoint_path: Path) -> str:
+    if not checkpoint_path.exists():
+        return ""
+    try:
+        data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("language") or "")
+
+
 def _write_whisper_checkpoint(
     cfg: Config,
     meeting_id: str,
@@ -1294,6 +1323,7 @@ def _write_whisper_checkpoint(
     *,
     model: str,
     engine: str,
+    language: str = "",
 ) -> Path:
     """Save Whisper output before diarize so sleep/reboot can skip re-ASR."""
     path = jobs.whisper_checkpoint_path(cfg, meeting_id)
@@ -1301,6 +1331,7 @@ def _write_whisper_checkpoint(
         "meeting_id": meeting_id,
         "model": model,
         "whisper_engine": engine,
+        "language": language,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "segments": [segment.to_dict() for segment in segments],
     }

@@ -51,6 +51,9 @@ class WhisperConfig:
     # Model weights are installed once, then normal processing never checks a
     # model host or sends audio over the network.
     local_files_only: bool = True
+    # One language for new meetings. "en" is the default. "auto" decides from
+    # the audio. The meeting itself stores what was used, so a later change
+    # of this setting does not rewrite old transcripts.
     language: str | None = "en"
     beam_size: int = 5
     vad_filter: bool = True
@@ -555,6 +558,10 @@ def _apply_settings_overlay(cfg: Config) -> None:
         cfg.summary.when = str(overlay["summarize_when"])
     if "summary_model" in overlay:
         cfg.summary.model = str(overlay["summary_model"])
+    if "meeting_language" in overlay:
+        from .languages import normalise_language
+
+        cfg.whisper.language = normalise_language(str(overlay["meeting_language"]))
     if "evening_hour" in overlay:
         try:
             hour = int(overlay["evening_hour"])

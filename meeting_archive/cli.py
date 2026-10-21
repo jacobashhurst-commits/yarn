@@ -14,7 +14,7 @@
     ma import-transcript PATH archive a coworker transcript without Whisper
     ma library                list meetings; --html writes a local viewer
     ma keep-audio / delete-audio
-    ma setting KEY VALUE      recognise_known, speaker_engine, audio_retention
+    ma setting KEY VALUE      recognise_known, meeting_language, speaker_engine, audio_retention
     ma rediarize <id>         rebuild speaker labels without rerunning Whisper
     ma ingest <id>            reindex one meeting from its transcript
     ma rebuild                reindex every transcript on disk
@@ -1009,6 +1009,14 @@ def cmd_setting(cfg: Config, args) -> int:
             print("value must be on or off", file=sys.stderr)
             return 1
         value: bool | str = lowered in {"on", "true", "1"}
+    elif args.key == "meeting_language":
+        from .languages import MEETING_LANGUAGES, is_meeting_language, normalise_language
+
+        if not is_meeting_language(lowered):
+            names = ", ".join(label for _code, label in MEETING_LANGUAGES)
+            print(f"value must be one of: {names}", file=sys.stderr)
+            return 1
+        value = normalise_language(lowered)
     elif args.key == "summarize_when":
         if lowered not in {"after_meeting", "evening", "manual"}:
             print(
@@ -1442,6 +1450,7 @@ def build_parser() -> argparse.ArgumentParser:
         "key",
         choices=(
             "recognise_known",
+            "meeting_language",
             "speaker_engine",
             "audio_retention",
             "cleanup_enabled",

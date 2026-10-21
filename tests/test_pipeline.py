@@ -463,7 +463,7 @@ def test_process_puts_local_summary_above_transcript(cfg):
         def is_running(self):
             return True
 
-        def summarize(self, turns, label_fn):
+        def summarize(self, turns, label_fn, language=""):
             assert "ship on Friday" in turns[0].text
             return "The team agreed on a Friday release.\n\n**Decisions**\n- Ship Friday."
 
@@ -530,7 +530,7 @@ def test_apply_summary_fills_a_deferred_meeting(cfg):
         def is_running(self):
             return True
 
-        def summarize(self, turns, label_fn):
+        def summarize(self, turns, label_fn, language=""):
             return "Ship Friday."
 
     assert pipeline.apply_summary(cfg, meeting_id, LaterSummarizer(), FakeStore())

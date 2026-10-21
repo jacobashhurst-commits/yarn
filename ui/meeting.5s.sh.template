@@ -160,6 +160,7 @@ if [[ -f "$PROCESS_CONTROL" ]]; then
 fi
 
 recognise="$(json_raw "$SETTINGS" recognise_known)"
+meeting_language="$(json_raw "$SETTINGS" meeting_language)"
 engine="$(json_raw "$SETTINGS" speaker_engine)"
 retention="$(json_raw "$SETTINGS" audio_retention)"
 summarize_when="$(json_raw "$SETTINGS" summarize_when)"
@@ -400,6 +401,25 @@ fi
 
 echo "---"
 echo "Settings | size=12 color=#888888"
+# The app stays English. This is the language of the next recording.
+case "$meeting_language" in
+  auto) language_label="Decide from the audio" ;;
+  ja) language_label="Japanese" ;;
+  zh) language_label="Chinese" ;;
+  es) language_label="Spanish" ;;
+  fr) language_label="French" ;;
+  de) language_label="German" ;;
+  ko) language_label="Korean" ;;
+  *) language_label="English"; meeting_language="en" ;;
+esac
+echo "Meeting language: ${language_label} | size=11 color=#888888"
+for pair in "en:English" "auto:Decide from the audio" "ja:Japanese" "zh:Chinese" "es:Spanish" "fr:French" "de:German" "ko:Korean"; do
+  code="${pair%%:*}"
+  label="${pair#*:}"
+  mark=""
+  [[ "$meeting_language" == "$code" ]] && mark="checked=true"
+  echo "-- ${label} | bash=\"$MA\" param1=setting param2=meeting_language param3=${code} terminal=false refresh=true ${mark}"
+done
 # Missing means on. A new install does not ask again about a voice it already knows.
 if [[ -z "$recognise" || "$recognise" == "true" || "$recognise" == "1" ]]; then
   echo "Recognise known speakers: On | bash=\"$MA\" param1=setting param2=recognise_known param3=off terminal=false refresh=true"

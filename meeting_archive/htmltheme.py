@@ -101,7 +101,13 @@ h1 {
   font-size: 0.92em;
 }
 .lede { color: var(--slate); max-width: 42rem; margin: 0 0 24px; }
-.role { color: var(--slate); font-weight: 500; }
+.role {
+  display: block;
+  margin-top: 2px;
+  color: var(--slate);
+  font-size: 13px;
+  font-weight: 500;
+}
 .turn { padding: 14px 0; border-top: 1px solid var(--line); }
 .turn p { margin: 6px 0 0; }
 .turn-meta { color: var(--navy); font-weight: 600; }

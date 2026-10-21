@@ -244,7 +244,7 @@ def test_sweep_summaries_retries_an_interrupted_summary(cfg):
         def is_running(self):
             return True
 
-        def summarize(self, turns, label_fn):
+        def summarize(self, turns, label_fn, language=""):
             return "Ship it."
 
     assert watcher.sweep_summaries(cfg, Later(), FakeStore()) == 1
@@ -264,7 +264,7 @@ def test_sweep_summaries_respects_manual_schedule(cfg):
         def is_running(self):
             return True
 
-        def summarize(self, turns, label_fn):
+        def summarize(self, turns, label_fn, language=""):
             raise AssertionError("manual mode must not auto-summarize")
 
     assert watcher.sweep_summaries(cfg, Boom(), FakeStore()) == 0

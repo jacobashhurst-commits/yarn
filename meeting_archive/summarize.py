@@ -182,7 +182,7 @@ class Summarizer:
             )
         self._checked = True
 
-    def summarize(self, turns: list[Turn], label_fn) -> str:
+    def summarize(self, turns: list[Turn], label_fn, language: str = "") -> str:
         if not self.enabled or not turns:
             return ""
         if not self.is_running():
@@ -194,12 +194,19 @@ class Summarizer:
         ]
         parts = _chunks(lines, self.config.chunk_chars)
         summaries = [
-            self._run(_summary_prompt(part, partial=len(parts) > 1, profile=self.config.profile))
+            self._run(
+                _summary_prompt(
+                    part,
+                    partial=len(parts) > 1,
+                    profile=self.config.profile,
+                    language=language,
+                )
+            )
             for part in parts
         ]
         if len(summaries) == 1:
             return summaries[0]
-        return self._run(_combine_prompt(summaries))
+        return self._run(_combine_prompt(summaries, language=language))
 
     def complete(self, prompt: str) -> str:
         """One local answer. Does not start Ollama if it is closed."""
@@ -357,9 +364,15 @@ def _chunks(lines: list[str], limit: int) -> list[str]:
     return chunks
 
 
-def _summary_prompt(transcript: str, partial: bool, profile: str = "default") -> str:
+def _summary_prompt(
+    transcript: str, partial: bool, profile: str = "default", language: str = ""
+) -> str:
+    from .languages import summary_instruction
+
     scope = "This is one part of a longer transcript." if partial else ""
     extra = _PROFILE_HINTS.get(profile, _PROFILE_HINTS["default"])
+    spoken = summary_instruction(language)
+    spoken_line = f"{spoken}\n" if spoken else ""
     return f"""You summarize private meeting transcripts. {scope}
 Use only facts explicitly present below. Do not infer identities, motives,
 decisions, or action items. If speech is unclear, omit it.
@@ -376,7 +389,7 @@ action items with owners and deadlines, unresolved questions, product or
 technical details, commercial details, and follow-up items.
 Do not invent details. Preserve disagreement and hedging.
 {extra}
-Return Markdown with:
+{spoken_line}Return Markdown with:
 - a two-sentence overview
 - 3-7 bullets under **Key points**
 - **Decisions**, **Open questions**, and **Action items** only when explicitly stated
@@ -403,12 +416,16 @@ _PROFILE_HINTS = {
 }
 
 
-def _combine_prompt(summaries: list[str]) -> str:
+def _combine_prompt(summaries: list[str], language: str = "") -> str:
+    from .languages import summary_instruction
+
     joined = "\n\n--- PART ---\n\n".join(summaries)
+    spoken = summary_instruction(language)
+    spoken_line = f"{spoken}\n" if spoken else ""
     return f"""Combine these partial meeting summaries into one concise Markdown
 summary. Remove repetition. Preserve only facts present in the partial
 summaries. Include a two-sentence overview, **Key points**, and include
 **Decisions** or **Action items** only when explicitly present.
-
+{spoken_line}
 {joined}
 """

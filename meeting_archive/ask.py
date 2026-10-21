@@ -342,14 +342,16 @@ def build_prompt(question: str, hits: list[dict], *, earlier: str = "") -> str:
             "Use only facts that are actually in the passages. "
             "Do not say you could not find an email or a summary already written "
             "in the meetings. If the passages do not contain enough to draft it, "
-            "say what is missing. Do not invent names, decisions, or quotes."
+            "say what is missing. Do not invent names, decisions, or quotes. "
+            "Answer in the language of the question. Keep quotes in the language that was spoken."
         )
     else:
         instruction = (
             "Answer the question using only the meeting passages below. "
             "When a passage has both a summary and the spoken turns, and they disagree, follow the turns. "
             "If they do not contain the answer, say you could not find it in the meetings. "
-            "Do not invent names, decisions, or quotes."
+            "Do not invent names, decisions, or quotes. "
+            "Answer in the language of the question. Keep quotes in the language that was spoken."
         )
     return (
         f"{instruction}\n\n"

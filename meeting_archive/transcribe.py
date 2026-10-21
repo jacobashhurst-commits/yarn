@@ -52,6 +52,28 @@ class Transcriber:
     def __init__(self, config: WhisperConfig):
         self.config = config
         self._model = None
+        self._language_override = ""
+        self._detected_counts: dict[str, int] = {}
+
+    def set_language(self, language: str | None) -> None:
+        """Language for the next files. Empty uses the config default."""
+        self._language_override = (language or "").strip().lower()
+        self._detected_counts = {}
+
+    def _requested_language(self) -> str:
+        return self._language_override or (self.config.language or "en")
+
+    def _note_detected(self, code: str, segments: int) -> None:
+        heard = (code or "").strip().lower()
+        if not heard:
+            return
+        self._detected_counts[heard] = self._detected_counts.get(heard, 0) + max(segments, 1)
+
+    @property
+    def detected_language(self) -> str:
+        if not self._detected_counts:
+            return ""
+        return max(self._detected_counts.items(), key=lambda item: item[1])[0]
 
     @property
     def model(self):
@@ -107,10 +129,13 @@ class Transcriber:
             else None
         )
 
+        requested = self._requested_language()
         prompt = (self.config.initial_prompt or "").strip() or None
+        if requested not in {"", "en"}:
+            prompt = None
         segments_iter, info = self.model.transcribe(
             str(path),
-            language=self.config.language,
+            language=None if requested == "auto" else requested,
             beam_size=self.config.beam_size,
             vad_filter=self.config.vad_filter,
             vad_parameters=vad_parameters,
@@ -135,11 +160,13 @@ class Transcriber:
         if progress is not None:
             progress(1.0)
 
+        heard = str(getattr(info, "language", "") or "")
+        self._note_detected(heard, len(segments))
         log.info(
             "channel=%s segments=%d detected_language=%s",
             channel,
             len(segments),
-            getattr(info, "language", "?"),
+            heard or "?",
         )
         return segments
 
@@ -202,13 +229,15 @@ class Transcriber:
                 str(command),
                 "-m", str(model_path),
                 "-f", str(input_path),
-                "-l", self.config.language or "auto",
+                "-l", "auto" if self._requested_language() in {"", "auto"} else self._requested_language(),
                 "-t", str(self.config.num_threads),
                 "-bs", str(self.config.beam_size),
                 "-oj",
                 "-of", str(output_base),
             ]
             prompt = (self.config.initial_prompt or "").strip()
+            if prompt and self._requested_language() not in {"", "en"}:
+                prompt = ""
             if prompt:
                 cmd.extend(["--prompt", prompt])
             stderr_path = tmp_dir / "stderr.log"
@@ -257,11 +286,13 @@ class Transcriber:
 
         if progress:
             progress(1.0)
+        heard = str((data.get("result") or {}).get("language") or "")
+        self._note_detected(heard, len(segments))
         log.info(
             "channel=%s segments=%d detected_language=%s",
             channel,
             len(segments),
-            data.get("result", {}).get("language", "?"),
+            heard or "?",
         )
         return segments
 

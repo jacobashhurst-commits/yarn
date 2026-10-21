@@ -47,6 +47,7 @@ class MeetingBriefSource:
     md_uri: str
     # True when there is no written summary and the text is a transcript excerpt.
     summary_missing: bool = False
+    language: str = ""
 
 
 @dataclass
@@ -162,6 +163,7 @@ def gather_sources(cfg: Config, *, today: date | None = None) -> list[MeetingBri
                 summary=summary[:SUMMARY_CHARS],
                 md_uri=page.as_uri() if page.exists() else "",
                 summary_missing=missing,
+                language=transcript.language or "",
             )
         )
         if len(found) >= MAX_MEETINGS:
@@ -196,8 +198,18 @@ def _context_blob(sources: list[MeetingBriefSource]) -> str:
     return "\n---\n".join(blocks)
 
 
-def _brief_prompt(context: str, day: date) -> str:
-    return f"""You write a private morning brief from meeting notes only.
+def _brief_prompt(context: str, day: date, *, other_languages: bool = False) -> str:
+    heard = ""
+    if other_languages:
+        heard = (
+            "The brief itself is in English. If a meeting was in another "
+            "language, write the point in English and keep short quotes in "
+            "the language that was spoken.\n"
+        )
+    opener = "You write a private morning brief from meeting notes only."
+    if heard:
+        opener = f"{opener}\n{heard.rstrip()}"
+    return f"""{opener}
 Today is {day.isoformat()}. Look at roughly the last two weeks, and what
 still matters for today and the coming week.
 
@@ -316,7 +328,10 @@ def generate_brief(
             "Ollama is not running. Open Ollama, then run Daily brief again."
         )
 
-    raw = summarizer._run(_brief_prompt(_context_blob(sources), today))  # noqa: SLF001
+    other = any((src.language or "en") not in {"", "en"} for src in sources)
+    raw = summarizer._run(  # noqa: SLF001
+        _brief_prompt(_context_blob(sources), today, other_languages=other)
+    )
     try:
         payload = _parse_model_json(raw)
     except (json.JSONDecodeError, ValueError) as exc:
