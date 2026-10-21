@@ -475,43 +475,89 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         ])
     }
 
-    /// The model writes **like this** when it wants emphasis. Show that as bold
-    /// type, and turn markdown bullets into real bullets.
+    /// Models write *like this* and **like this** when they want emphasis.
+    /// Show both as bold, and turn a real bullet into a bullet.
     private func yarnText(_ raw: String) -> NSAttributedString {
-        let bulleted = raw.replacingOccurrences(
-            of: "(?m)^[ \\t]*[*-][ \\t]+",
-            with: "• ",
-            options: .regularExpression
-        )
+        let result = NSMutableAttributedString()
+        let lines = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+        for (index, lineSub) in lines.enumerated() {
+            if index > 0 {
+                result.append(yarnInline("\n", heading: false))
+            }
+            var line = String(lineSub)
+            if let range = line.range(of: #"^\s{0,3}#{1,3}\s+"#, options: .regularExpression) {
+                line.removeSubrange(range)
+                result.append(yarnInline(line, heading: true))
+                continue
+            }
+            if let range = line.range(of: #"^\s*[-*]\s+"#, options: .regularExpression) {
+                line = "• " + String(line[range.upperBound...])
+            }
+            let heading = line.range(of: #"^\*\*.+\*\*$"#, options: .regularExpression) != nil
+            result.append(yarnInline(line, heading: heading))
+        }
+        return result
+    }
+
+    private func yarnInline(_ text: String, heading: Bool) -> NSAttributedString {
         let style = NSMutableParagraphStyle()
         style.lineSpacing = 3
         style.paragraphSpacing = 8
-        let color = YarnColor.ink
-        let base = Self.chatFont(weight: .regular)
-        let bold = Self.chatFont(weight: .semibold)
+        let base = Self.chatFont(weight: heading ? .semibold : .regular)
+        let emph = Self.chatFont(weight: .bold)
+        let code = NSFont.monospacedSystemFont(ofSize: Self.chatSize, weight: .regular)
         let result = NSMutableAttributedString()
-        var rest = bulleted[...]
-        func append(_ part: Substring, font: NSFont) {
-            guard !part.isEmpty else { return }
-            result.append(NSAttributedString(string: String(part), attributes: [
+        let chars = Array(text)
+        var index = 0
+        func emit(_ slice: ArraySlice<Character>, font: NSFont) {
+            guard !slice.isEmpty else { return }
+            result.append(NSAttributedString(string: String(slice), attributes: [
                 .font: font,
-                .foregroundColor: color,
+                .foregroundColor: YarnColor.ink,
                 .paragraphStyle: style,
             ]))
         }
-        while let start = rest.range(of: "**") {
-            append(rest[..<start.lowerBound], font: base)
-            let after = rest[start.upperBound...]
-            if let end = after.range(of: "**") {
-                append(after[..<end.lowerBound], font: bold)
-                rest = after[end.upperBound...]
-            } else {
-                append(rest[start.lowerBound...], font: base)
-                rest = ""
-                break
+        while index < chars.count {
+            if chars[index] == "`",
+               let end = chars[(index + 1)...].firstIndex(of: "`"),
+               end > index + 1 {
+                emit(chars[(index + 1)..<end], font: code)
+                index = end + 1
+                continue
             }
+            if chars[index] == "*" {
+                let double = index + 1 < chars.count && chars[index + 1] == "*"
+                let marker = double ? 2 : 1
+                let start = index + marker
+                var end = start
+                var found = false
+                while end < chars.count {
+                    if double {
+                        if end + 1 < chars.count && chars[end] == "*" && chars[end + 1] == "*" {
+                            found = true
+                            break
+                        }
+                    } else if chars[end] == "*" && !(end + 1 < chars.count && chars[end + 1] == "*") {
+                        found = true
+                        break
+                    }
+                    end += 1
+                }
+                if found && end > start {
+                    emit(chars[start..<end], font: emph)
+                    index = end + marker
+                    continue
+                }
+            }
+            var next = index
+            while next < chars.count && chars[next] != "*" && chars[next] != "`" {
+                next += 1
+            }
+            if next == index { next += 1 }
+            emit(chars[index..<next], font: base)
+            index = next
         }
-        append(rest, font: base)
         return result
     }
 

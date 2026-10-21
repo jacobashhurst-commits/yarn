@@ -116,6 +116,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         background = CommandLine.arguments.contains("--background")
+        YarnStatus.shared.start()
         if !background {
             show()
         }
@@ -126,6 +127,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        YarnStatus.shared.start()
         show()
         return true
     }
@@ -296,7 +298,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             statusLabel.stringValue = "RECORDING"
             bigLabel.stringValue = snap.elapsed
             bigLabel.isHidden = false
-            metaLabel.stringValue = snap.mode == "room" ? "In the room" : snap.mode
+            metaLabel.stringValue = snap.mode == "call" ? "On a call" : "In the room"
             metaLabel.isHidden = false
             recordButton.title = "Stop"
         } else {

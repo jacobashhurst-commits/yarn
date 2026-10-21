@@ -2,12 +2,12 @@
 #
 # Installs the parts that remove the terminal from day-to-day use:
 #
-#   1. A SwiftBar menu bar item to start and stop recordings, and to say which
+#   1. Yarn's own menu bar icon, to start and stop recordings, and to say which
 #      kind of meeting it is at the moment you start it.
 #   2. A LaunchAgent running `ma watch` in the background, so transcription and
 #      indexing happen without a terminal window open.
 #
-# Run once. It prints everything it does and asks before installing SwiftBar.
+# Run once. It prints everything it does.
 
 set -euo pipefail
 
@@ -48,37 +48,14 @@ if [[ -n "$blocked" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-say "1/4  SwiftBar (menu bar UI)"
+say "1/4  Menu bar"
+info "Yarn draws its own menu bar icon."
 
-if [[ -d "/Applications/SwiftBar.app" ]]; then
-  info "already installed"
-elif [[ "${YARN_SETUP_NONINTERACTIVE:-}" == "1" ]]; then
-  if command -v brew >/dev/null 2>&1; then
-    info "installing SwiftBar with Homebrew"
-    brew install --cask swiftbar
-  else
-    info "SwiftBar is not installed; the menu bar icon is skipped."
-    info "Background jobs still run. Install SwiftBar later and re-run this script."
-  fi
-else
-  info "SwiftBar is a free, open-source menu bar host for shell scripts."
-  info "It is the only new dependency, and it is what gives you the record button."
-  read -r -p "  Install it with Homebrew now? [y/N] " reply
-  case "$reply" in
-    [yY]*) brew install --cask swiftbar ;;
-    *) die "skipped -- the menu bar UI needs SwiftBar. Re-run when ready." ;;
-  esac
-fi
-
-# SwiftBar's own menu-bar item is a question mark beside Yarn. The plugin is
-# the icon, so the host's mark stays hidden.
-if [[ -d /Applications/SwiftBar.app ]]; then
-  defaults write com.ameba.SwiftBar HideSwiftBarIcon -bool true
-fi
-
-PLUGIN_DIR="${SWIFTBAR_PLUGIN_DIR:-$HOME/.swiftbar-plugins}"
-mkdir -p "$PLUGIN_DIR"
-PLUGIN="$PLUGIN_DIR/meeting.5s.sh"
+YARN_SUPPORT="${YARN_SUPPORT:-$HOME/Library/Application Support/Yarn}"
+mkdir -p "$YARN_SUPPORT"
+PLUGIN="$YARN_SUPPORT/menu.sh"
+# An older install left this for SwiftBar. Two icons is worse than one.
+rm -f "$HOME/.swiftbar-plugins/meeting.5s.sh"
 # Outside the plugin folder. SwiftBar executes every file it finds there, and
 # it marks them executable, so a png next to the script becomes a second item.
 MENU_MARK="${YARN_SUPPORT:-$HOME/Library/Application Support/Yarn}/menu-mark.png"
@@ -196,7 +173,7 @@ else
   info "menu-bar mark was skipped (swiftc unavailable); icon will use the default"
 fi
 rm -rf "$MENU_MARK_WORK"
-rm -f "$PLUGIN_DIR/.menu-mark" "$PLUGIN_DIR/yarn-mark.png"
+rm -f "$HOME/.swiftbar-plugins/.menu-mark" "$HOME/.swiftbar-plugins/yarn-mark.png"
 info "plugin written to $PLUGIN"
 info "Stop/Start invoke: $REC"
 
@@ -354,23 +331,18 @@ if [[ "$DOCK_OK" == "1" ]]; then
   Yarn is in the Dock. Click it to record, watch progress, name voices,
   open the daily brief, or ask about your meetings.
 
-  The same controls are in the menu bar. Open SwiftBar if that icon is
-  missing and it asks for a plugin folder:
-      $PLUGIN_DIR
+  The same controls are in the menu bar. Opening Yarn puts that icon back.
 EOF
 else
   cat <<EOF
-  The Dock app was not built. Use the menu bar until Xcode Command Line
-  Tools are installed, then run this installer again.
-
-  Open SwiftBar if the menu-bar icon is missing and it asks for a plugin folder:
-      $PLUGIN_DIR
+  The Applications icon was not built. Install Xcode Command Line Tools, then
+  run this installer again. Recording still works from the menu once Yarn is open.
 EOF
 fi
 cat <<EOF
 
   The first recording will ask for microphone permission. Allow it once and
-  it is remembered; the request comes from the recorder, not from SwiftBar.
+  it is remembered. The request comes from the recorder.
 
   To uninstall the background jobs:
       launchctl bootout gui/\$(id -u)/$REC_LABEL

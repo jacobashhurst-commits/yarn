@@ -34,6 +34,7 @@ from meeting_archive.speakers import (
     remember_confirmation,
     render_voices_html,
     snippet_window,
+    names_for_roster,
     suggest_matches,
     usable_dialog_guess,
 )
@@ -223,6 +224,9 @@ def test_library_treats_deferred_summary_as_pending_not_a_failure(cfg):
     transcript.write(cfg.transcript_json(transcript.meeting_id))
     html = library.render_html(cfg).read_text(encoding="utf-8")
     assert "Summary pending" in html
+    page = cfg.transcript_html(transcript.meeting_id)
+    assert page.as_uri() in html
+    assert "Listen" in page.read_text(encoding="utf-8")
     assert 'class="note"' in html
     assert "class=err" not in html
 
@@ -294,6 +298,19 @@ def test_summarize_when_setting_overlay(cfg):
 
     _apply_settings_overlay(other)
     assert other.summary.when == "evening"
+
+
+def test_a_settings_file_with_no_voice_switch_names_returning_voices(cfg):
+    from meeting_archive.config import _apply_settings_overlay
+
+    write_setting(cfg, "summarize_when", "evening")
+    other = Config(root=cfg.root)
+    _apply_settings_overlay(other)
+    assert other.speakers_memory.recognise_known is True
+    write_setting(other, "recognise_known", False)
+    again = Config(root=cfg.root)
+    _apply_settings_overlay(again)
+    assert again.speakers_memory.recognise_known is False
 
 
 @needs_ffmpeg
@@ -510,6 +527,32 @@ def test_no_arbitrary_speaker_cap():
     profiles = profile_speakers(turns)
     assert len(profiles) == 8
     assert {p.speaker for p in profiles} == {f"room-{i}" for i in range(1, 9)}
+
+
+def test_a_trusted_voice_is_named_and_a_guess_from_the_words_is_not(cfg):
+    from meeting_archive.models import SpeakerGuess
+
+    meeting_id = "2026-10-21T09-00-00"
+    guesses = [
+        SpeakerGuess(
+            speaker="room-1",
+            name="Ada",
+            basis="voice",
+            confidence=0.5,
+            evidence="Matched Ada based on 2 previously confirmed meeting(s).",
+        ),
+        SpeakerGuess(speaker="room-2", name="Maybe", basis="self", confidence=0.9),
+        SpeakerGuess(speaker="room-3", name="unsure", basis="voice", confidence=0.5),
+    ]
+    assert names_for_roster(guesses) == {"room-1": "Ada"}
+    cfg.speakers_memory.recognise_known = False
+    pipeline._keep_known_voices(cfg, meeting_id, guesses)
+    assert records.read_notes(cfg.notes_json(meeting_id)) == {}
+    cfg.speakers_memory.recognise_known = True
+    pipeline._keep_known_voices(cfg, meeting_id, guesses)
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    assert notes["speakers"] == {"room-1": "Ada"}
+    assert notes["applied"] is True
 
 
 def test_known_speaker_suggestions_are_never_silent_assignments():

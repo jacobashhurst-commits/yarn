@@ -494,14 +494,14 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
                     if href
                     else f'<span class="src">{label}</span>'
                 )
-            why = f'<div class="why">{_esc(item.why)}</div>' if item.why else ""
+            why = f'<div class="why">{_rich(item.why)}</div>' if item.why else ""
             kind = (
                 '<span class="pill fact">From the meeting</span>'
                 if _grounded(item, brief.sources)
                 else '<span class="pill draft">Draft</span>'
             )
             lis.append(
-                f'<li><div class="item">{_esc(item.text)}</div>{why}'
+                f'<li><div class="item">{_rich(item.text)}</div>{why}'
                 f'<div class="row-meta">{kind}{source}</div></li>'
             )
         return (
@@ -515,7 +515,7 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
         hint = (
             '<p class="hint">You’ve built a few briefs by hand. When it feels useful, '
             "turn on <strong>Open brief at login</strong> in the Yarn menu. "
-            "it stays off until you do.</p>"
+            "It stays off until you do.</p>"
         )
 
     sources = []
@@ -547,7 +547,7 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
     body = f"""
   {htmltheme.masthead("Yarn daily brief", day_label)}
   <p class="when">Generated {generated_label} · saved on this Mac</p>
-  <p class="overview">{_esc(brief.overview)}</p>
+  <div class="prose overview">{_blocks(brief.overview)}</div>
   {hint}
   <div class="columns">
     {section("Needs action", actions, "No open actions jumped out.")}
@@ -576,6 +576,19 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
   </footer>
 """
     return htmltheme.document(f"Yarn brief, {brief.day.isoformat()}", body)
+
+
+def _rich(value: str) -> str:
+    """One line of model text, with emphasis shown as bold."""
+    from .markup import markup_inline
+
+    return markup_inline(value)
+
+
+def _blocks(value: str) -> str:
+    from .markup import markup_to_html
+
+    return markup_to_html(value)
 
 
 def _esc(value: str) -> str:

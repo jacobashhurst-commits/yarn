@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -334,37 +335,109 @@ LONG_DOWNLOAD_NOTE = (
 )
 
 
+def download_request(url: str, already: int) -> urllib.request.Request:
+    """Ask the server to continue a file that already has some bytes on disk."""
+    headers = {"User-Agent": "YarnSetup/0.2"}
+    if already > 0:
+        headers["Range"] = f"bytes={already}-"
+    return urllib.request.Request(url, headers=headers)
+
+
+def resume_mode(status: int, already: int) -> str:
+    """Append a real resume. A full 200 body must replace the partial, not follow it."""
+    if status == 206 and already > 0:
+        return "ab"
+    return "wb"
+
+
+def content_range_total(headers) -> int | None:
+    raw = ""
+    if headers is not None:
+        raw = headers.get("Content-Range") or ""
+    if "/" not in raw:
+        return None
+    tail = raw.rsplit("/", 1)[-1].strip()
+    if tail.isdigit():
+        return int(tail)
+    return None
+
+
+def promote_finished_partial(partial: Path, dest: Path, headers) -> bool:
+    """A 416 means the saved bytes already reach the end of the file."""
+    if not partial.is_file():
+        return False
+    size = partial.stat().st_size
+    total = content_range_total(headers)
+    if size <= 0 or total is None or size < total:
+        return False
+    if size > total:
+        with partial.open("r+b") as handle:
+            handle.truncate(total)
+    partial.replace(dest)
+    return True
+
+
 def download(url: str, dest: Path, step_id: str, *, long: bool = False) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
-    req = urllib.request.Request(url, headers={"User-Agent": "YarnSetup/0.2"})
-    payload: dict = {"type": "log", "id": step_id, "text": f"Downloading {dest.name}"}
+    already = partial.stat().st_size if partial.is_file() else 0
+    req = download_request(url, already)
+    payload: dict = {
+        "type": "log",
+        "id": step_id,
+        "text": (
+            f"Continuing {dest.name}"
+            if already
+            else f"Downloading {dest.name}"
+        ),
+    }
     if long:
         payload["note"] = LONG_DOWNLOAD_NOTE
     emit(payload)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        got = 0
-        last = -1
-        with partial.open("wb") as fh:
-            while True:
-                chunk = resp.read(256 * 1024)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                got += len(chunk)
-                if total:
-                    percent = min(99, int(got * 100 / total))
-                    if percent != last:
-                        last = percent
-                        emit(
-                            {
-                                "type": "progress",
-                                "id": step_id,
-                                "percent": percent,
-                            }
-                        )
-    partial.replace(dest)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            mode = resume_mode(int(status or 200), already)
+            if mode == "ab":
+                total = already + int(resp.headers.get("Content-Length") or 0)
+                got = already
+            else:
+                total = int(resp.headers.get("Content-Length") or 0)
+                got = 0
+            last = -1
+            with partial.open(mode) as fh:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    got += len(chunk)
+                    if total:
+                        percent = min(99, int(got * 100 / total))
+                        if percent != last:
+                            last = percent
+                            emit(
+                                {
+                                    "type": "progress",
+                                    "id": step_id,
+                                    "percent": percent,
+                                }
+                            )
+        partial.replace(dest)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 416 and promote_finished_partial(partial, dest, exc.headers):
+            emit({"type": "progress", "id": step_id, "percent": 100})
+            return
+        # Leave the partial. The next Setup continues it.
+        raise RuntimeError(
+            "The download did not finish. Check the internet connection "
+            "and run Yarn Setup again."
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            "The download did not finish. Check the internet connection "
+            "and run Yarn Setup again."
+        ) from exc
     # The byte count can finish under the advertised length. The file is
     # on disk, so the bar has to be allowed to reach 100.
     emit({"type": "progress", "id": step_id, "percent": 100})
@@ -519,7 +592,19 @@ def step_prereqs(repo: Path) -> None:
         raise RuntimeError("This installer is Mac only for now.")
     if platform.machine() != "arm64":
         raise RuntimeError(
-            "Yarn Setup is Apple Silicon only. Intel Macs are not supported."
+            "Yarn runs on Apple Silicon Macs (M1 or newer). This Mac is Intel, so Yarn cannot install here."
+        )
+    mac = platform.mac_ver()[0] or "this Mac"
+    emit({"type": "log", "id": "prereqs", "text": f"macOS {mac}, Apple Silicon. New enough to run Yarn."})
+    if which("brew"):
+        emit({"type": "log", "id": "prereqs", "text": "Homebrew is already on this Mac."})
+    else:
+        emit(
+            {
+                "type": "log",
+                "id": "prereqs",
+                "text": "No Homebrew. Yarn will download what it needs.",
+            }
         )
     free = shutil.disk_usage(Path.home()).free
     gb = free / (1024 ** 3)
@@ -677,7 +762,10 @@ def _brew_install(formula: str, cask: bool = False, step_id: str = "tools") -> b
 
 def step_tools(repo: Path) -> None:
     ffmpeg = which("ffmpeg")
-    if not ffmpeg:
+    if ffmpeg:
+        emit({"type": "log", "id": "tools", "text": "ffmpeg is already on this Mac."})
+    else:
+        emit({"type": "log", "id": "tools", "text": "ffmpeg is not on this Mac. Getting it."})
         if _brew_install("ffmpeg"):
             ffmpeg = which("ffmpeg")
     if not ffmpeg:
@@ -733,6 +821,33 @@ def _guess_mic() -> str:
     return ""
 
 
+def _turn_on_known_speakers() -> None:
+    """A new install names a returning voice. An explicit Off stays off."""
+    from .config import load_config, write_setting
+
+    try:
+        cfg = load_config()
+    except Exception:
+        return
+    path = cfg.root / ".yarn-settings.json"
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    if "recognise_known" in data:
+        return
+    write_setting(cfg, "recognise_known", True)
+    emit(
+        {
+            "type": "log",
+            "id": "config",
+            "text": "A returning voice is named without asking again.",
+        }
+    )
+
+
 def step_config(repo: Path) -> None:
     from .config import DEFAULT_CONFIG_PATH, DEFAULT_ROOT
     from .resources import summary_model_choice
@@ -744,6 +859,7 @@ def step_config(repo: Path) -> None:
     summary_model, _ = summary_model_choice()
     if DEFAULT_CONFIG_PATH.exists():
         write_summary_model(DEFAULT_CONFIG_PATH, summary_model)
+        _turn_on_known_speakers()
         emit(
             {
                 "type": "log",
@@ -801,6 +917,7 @@ model = "{summary_model}"
 when = "after_meeting"
 """
     DEFAULT_CONFIG_PATH.write_text(body, encoding="utf-8")
+    _turn_on_known_speakers()
     emit(
         {
             "type": "log",
@@ -1288,18 +1405,7 @@ def _prefetch_search_embedder(repo: Path) -> None:
 def step_menubar(repo: Path) -> None:
     py = venv_python(repo)
     ma = repo / ".venv" / "bin" / "ma"
-    if not existing_app("SwiftBar.app"):
-        if not _brew_install("swiftbar", cask=True, step_id="menubar"):
-            emit({"type": "log", "id": "menubar", "text": "Downloading SwiftBar for the menu bar icon"})
-            app = install_app_from_zip(SWIFTBAR_ZIP, "SwiftBar.app", "menubar")
-            subprocess.Popen(["open", "-a", str(app)])
-    plugin_dir = Path.home() / ".swiftbar-plugins"
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    for bundle in ("com.ameba.SwiftBar", "com.swiftbar.SwiftBar"):
-        run(
-            ["defaults", "write", bundle, "PluginDirectory", str(plugin_dir)],
-            timeout=10,
-        )
+    emit({"type": "log", "id": "menubar", "text": "The menu bar icon is part of Yarn."})
     env = {
         "PATH": f"{repo / '.venv' / 'bin'}:{os.environ.get('PATH', '')}",
         "YARN_SETUP_NONINTERACTIVE": "1",
@@ -1313,7 +1419,16 @@ def step_menubar(repo: Path) -> None:
     emit({"type": "log", "id": "menubar", "text": "LaunchAgents loaded"})
     dock = Path.home() / "Applications" / "Yarn.app"
     if (dock / "Contents" / "MacOS" / "Yarn").is_file():
-        emit({"type": "log", "id": "menubar", "text": f"Yarn is in the Dock ({dock})"})
+        emit(
+            {
+                "type": "log",
+                "id": "menubar",
+                "text": (
+                    "Yarn is in Applications. Open it there any time. "
+                    f"That also puts the menu bar icon back. ({dock})"
+                ),
+            }
+        )
     else:
         emit(
             {
@@ -1346,7 +1461,8 @@ def step_menubar(repo: Path) -> None:
             }
         )
     emit({"type": "log", "id": "menubar", "text": f"Command is {ma}"})
-    subprocess.Popen(["open", "-a", "SwiftBar"])
+    if (dock / "Contents" / "MacOS" / "Yarn").is_file():
+        subprocess.Popen(["open", str(dock)])
 
 
 _PULL: list[str] = []

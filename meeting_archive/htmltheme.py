@@ -84,6 +84,22 @@ h1 {
 }
 .when { margin: 8px 0 16px; }
 .overview { max-width: 42rem; margin: 0 0 16px; font-size: 17px; }
+.prose h3 {
+  margin: 18px 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--navy);
+}
+.prose p { margin: 0 0 10px; }
+.prose ul, .prose ol { margin: 0 0 12px; padding-left: 1.2em; }
+.prose li { margin: 4px 0; }
+.prose strong { font-weight: 600; }
+.prose code {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 0.92em;
+}
 .lede { color: var(--slate); max-width: 42rem; margin: 0 0 24px; }
 .role { color: var(--slate); font-weight: 500; }
 .turn { padding: 14px 0; border-top: 1px solid var(--line); }

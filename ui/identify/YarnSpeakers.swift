@@ -566,8 +566,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         applyBanner(payload.banner)
         nameBox.removeAllItems()
         nameBox.addItems(withObjectValues: payload.names)
-        // Prefer meaningful unnamed voices. Crumbs (a cough / "yeah") stay as
-        // Speaker N in the transcript without a naming dialog.
+        // A voice under a second is not a person to name.
         let unnamed = payload.voices.filter { $0.named.isEmpty }
         let meaningful = unnamed.filter { !$0.isCrumb }
         queue = meaningful.isEmpty ? unnamed : meaningful

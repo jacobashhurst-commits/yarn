@@ -34,8 +34,9 @@ if [[ -z "$MA_ROOT" ]]; then
 fi
 [[ -n "$MA_ROOT" ]] || { echo "yarn-dock: could not read the archive root" >&2; exit 1; }
 
-command -v swiftc >/dev/null 2>&1 || { echo "yarn-dock: swiftc is required (Xcode command line tools)" >&2; exit 1; }
 [[ -f "$MARK" ]] || { echo "yarn-dock: logo is missing at $MARK" >&2; exit 1; }
+# A normal Mac has no Swift compiler. The download includes Yarn.app already
+# built. Compiling is for this checkout, where the source may be newer.
 
 # Replacing a running binary fails, and a stale Dock icon would be the old app.
 osascript -e 'tell application "Yarn" to quit' >/dev/null 2>&1 || true
@@ -62,8 +63,6 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-"$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
-
 cp -f "$MARK" "$RES/yarn-mark.png"
 cat > "$RES/paths.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,10 +76,23 @@ cat > "$RES/paths.plist" <<PLIST
 </plist>
 PLIST
 
-swiftc -parse-as-library -O -o "$APP_BIN.partial" \
-  "$SWIFT_SRC" "$(dirname "$SWIFT_SRC")/YarnChat.swift" \
-  "$REPO_DIR/ui/welcome/YarnWelcome.swift" -framework AppKit
-mv -f "$APP_BIN.partial" "$APP_BIN"
+BUNDLED="$REPO_DIR/Yarn.app/Contents/MacOS/Yarn"
+if command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
+  "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
+  swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP_BIN.partial" \
+    "$SWIFT_SRC" "$(dirname "$SWIFT_SRC")/YarnChat.swift" \
+    "$(dirname "$SWIFT_SRC")/YarnMenu.swift" \
+    "$REPO_DIR/ui/welcome/YarnWelcome.swift" -framework AppKit
+  mv -f "$APP_BIN.partial" "$APP_BIN"
+elif [[ -x "$BUNDLED" ]]; then
+  cp -f "$BUNDLED" "$APP_BIN"
+  if [[ -f "$REPO_DIR/Yarn.app/Contents/Resources/Yarn.icns" ]]; then
+    cp -f "$REPO_DIR/Yarn.app/Contents/Resources/Yarn.icns" "$RES/Yarn.icns"
+  fi
+else
+  echo "Yarn could not add an Applications icon on this Mac. The menu bar still works." >&2
+  exit 0
+fi
 
 if [[ "${1:-}" == "--install" ]]; then
   LABEL="com.meetingarchive.dock"
@@ -97,7 +109,7 @@ if [[ "${1:-}" == "--install" ]]; then
     <string>/usr/bin/open</string>
     <string>-g</string>
     <string>$APP_DIR</string>
-    <string>--</args</string>
+    <string>--args</string>
     <string>--background</string>
   </array>
   <key>RunAtLoad</key><true/>
@@ -116,6 +128,8 @@ if [[ -x "$LSREGISTER" ]]; then
   "$LSREGISTER" -f "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
-# Open in front so the icon is in the Dock and the window is there to look at.
+# A running Yarn keeps the old binary. Quit it so the menu bar icon is this build.
+osascript -e 'tell application "Yarn" to quit' >/dev/null 2>&1 || true
+sleep 0.4
 open "$APP_DIR"
 echo "Yarn is in the Dock ($APP_DIR)"

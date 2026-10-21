@@ -24,7 +24,7 @@ private let modelIDs: Set<String> = ["whisper", "speakers", "ollama"]
 
 final class Controller: NSObject, NSWindowDelegate {
     let repo: String
-    let python: String
+    var python: String
     var steps: [Step] = []
     var worker: Process?
     var finished = false
@@ -329,7 +329,71 @@ final class Controller: NSObject, NSWindowDelegate {
 
     @objc private func beginInstall() {
         showProgress()
-        launchWorker()
+        heading.stringValue = "Checking your Mac"
+        personality.stringValue = "Looking at what's already on this Mac."
+        noteActivity("Checking Python, memory, and disk space.")
+        resolvePythonThenWork()
+    }
+
+    // The window is already up. Finding or installing Python happens here so
+    // a fresh Mac never dies in Terminal before anyone can see a check.
+    private var pythonNotes = ""
+
+    private func resolvePythonThenWork() {
+        let checker = (repo as NSString).appendingPathComponent("bin/yarn-python")
+        guard FileManager.default.isExecutableFile(atPath: checker) else {
+            launchWorker()
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [checker]
+        var env = ProcessInfo.processInfo.environment
+        let extra = "/Library/Developer/CommandLineTools/usr/bin:/opt/homebrew/bin:/usr/local/bin"
+        env["PATH"] = extra + ":" + (env["PATH"] ?? "")
+        process.environment = env
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        err.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pythonNotes += text
+                for line in text.split(whereSeparator: \.isNewline) {
+                    let shown = String(line).trimmingCharacters(in: .whitespaces)
+                    if !shown.isEmpty { self.noteActivity(shown) }
+                }
+            }
+        }
+        process.terminationHandler = { [weak self] proc in
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            let path = (String(data: data, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                err.fileHandleForReading.readabilityHandler = nil
+                if proc.terminationStatus == 0, path.hasPrefix("/") {
+                    self.python = path
+                    self.noteActivity("Python is ready.")
+                    self.launchWorker()
+                } else {
+                    let message = self.pythonNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.showFailure(
+                        message.isEmpty
+                            ? "Yarn needs Python 3.11 or newer, and installing it did not work."
+                            : message
+                    )
+                }
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            showFailure("Could not start the checks. \(error.localizedDescription)")
+        }
     }
 
     private func launchWorker() {

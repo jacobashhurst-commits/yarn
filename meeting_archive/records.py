@@ -600,7 +600,9 @@ def render_transcript_html(
 
     summary = name_speakers_in_text(transcript.summary.strip(), transcript, roster)
     if summary:
-        summary_html = f"<p>{htmltheme.html_escape(summary)}</p>"
+        from .markup import markup_to_html
+
+        summary_html = f'<div class="prose overview">{markup_to_html(summary)}</div>'
     elif transcript.summary_error:
         summary_html = f'<p class="empty">Summary unavailable.</p>'
     elif transcript.turns:
@@ -743,7 +745,7 @@ def render_transcript_html(
                 f"<p>{htmltheme.html_escape(text)}</p>"
                 "</article>"
             )
-    overview = summary_html.replace("<p>", '<p class="overview">', 1) if summary else summary_html
+    overview = summary_html
     body = f"""
   {htmltheme.masthead("Transcript", heading)}
   <p class="when">{htmltheme.html_escape(when)} · {minutes}m {seconds:02d}s · saved on this Mac</p>

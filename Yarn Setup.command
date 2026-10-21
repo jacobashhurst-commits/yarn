@@ -11,10 +11,19 @@ cd "$ROOT"
 xattr -cr "$ROOT" 2>/dev/null || true
 
 # The release zip keeps the program in a hidden folder. A checkout keeps it here.
+# Moving only this command onto the Desktop leaves the program behind.
+LAUNCH=""
 if [[ -x "$ROOT/.yarn/bin/yarn-setup" ]]; then
-  exec "$ROOT/.yarn/bin/yarn-setup" "$@"
+  LAUNCH="$ROOT/.yarn/bin/yarn-setup"
+elif [[ -x "$ROOT/yarn/bin/yarn-setup" ]]; then
+  LAUNCH="$ROOT/yarn/bin/yarn-setup"
+elif [[ -x "$ROOT/bin/yarn-setup" ]]; then
+  LAUNCH="$ROOT/bin/yarn-setup"
 fi
-if [[ -x "$ROOT/yarn/bin/yarn-setup" ]]; then
-  exec "$ROOT/yarn/bin/yarn-setup" "$@"
+if [[ -z "$LAUNCH" ]]; then
+  osascript <<'EOF' || true
+display dialog "This folder is incomplete. Unzip the Yarn download again, and run Yarn Setup.command from inside that folder. Do not move the command out on its own." buttons {"OK"} default button 1 with title "Yarn Setup"
+EOF
+  exit 0
 fi
-exec "$ROOT/bin/yarn-setup" "$@"
+exec "$LAUNCH" "$@"

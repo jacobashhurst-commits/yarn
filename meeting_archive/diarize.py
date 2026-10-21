@@ -46,6 +46,11 @@ log = logging.getLogger(__name__)
 # 0.6s; 4-way clustering produced 264s, 287s, 30s, 0.6s and recovered Leanne.
 MIN_SUBSTANTIVE_SPEAKER_S = 2.0
 
+# A cough or a clipped "yeah" still comes back as its own cluster. Under a
+# second in total is not another person: naming it, and listing it, makes the
+# meeting look more crowded than it was. The words stay on the channel.
+MIN_LISTED_SPEAKER_S = 1.0
+
 # Same person, split into several clusters, scores about 0.45-0.7 with this
 # embedding model. Different people on the same call sit around 0.1-0.35.
 # 0.58 is the high end of "same voice" so a chain of merely-similar tracks
@@ -205,6 +210,16 @@ class Diarizer:
                 after,
                 channel,
             )
+        before_brief = len({span.speaker for span in spans})
+        spans = drop_brief_voices(spans)
+        after_brief = len({span.speaker for span in spans})
+        if after_brief < before_brief:
+            log.info(
+                "dropped voices under one second %d -> %d on channel=%s",
+                before_brief,
+                after_brief,
+                channel,
+            )
 
         log.info(
             "channel=%s speakers=%d spans=%d",
@@ -225,6 +240,30 @@ def _speaker_durations(spans: list[SpeakerSpan]) -> dict[str, float]:
 def _smallest_speaker_duration(spans: list[SpeakerSpan]) -> float:
     totals = _speaker_durations(spans)
     return min(totals.values(), default=0.0)
+
+
+def drop_brief_voices(
+    spans: list[SpeakerSpan],
+    min_speaking_s: float = MIN_LISTED_SPEAKER_S,
+) -> list[SpeakerSpan]:
+    """Remove every voice whose speech, added up, is under a second.
+
+    The remaining voices are renumbered by first appearance, so a blip cannot
+    hold "Speaker 1" and push the person who opened the meeting to 2.
+    """
+    if not spans:
+        return spans
+    totals = _speaker_durations(spans)
+    brief = {speaker for speaker, total in totals.items() if total < min_speaking_s}
+    if not brief:
+        return spans
+    kept = [span for span in spans if span.speaker not in brief]
+    if not kept:
+        return []
+    return to_spans(
+        [(span.start, span.end, span.speaker) for span in kept],
+        kept[0].channel,
+    )
 
 
 def drop_tiny_extra_cluster(

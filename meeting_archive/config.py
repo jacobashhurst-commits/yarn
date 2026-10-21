@@ -115,6 +115,8 @@ class CleanupConfig:
 
 @dataclass
 class SpeakersMemoryConfig:
+    # Off until a settings file exists. A file that never mentions the switch
+    # is on, matching the menu. Tests build a Config() directly and stay off.
     recognise_known: bool = False
     # Cosine floor for suggesting a known speaker by voice. The original 0.75
     # was aspirational and unreachable, which made the whole feature dead
@@ -540,6 +542,9 @@ def _apply_settings_overlay(cfg: Config) -> None:
         cfg.audio_retention_days = retention_days(cfg.audio_retention)
     if "recognise_known" in overlay:
         cfg.speakers_memory.recognise_known = bool(overlay["recognise_known"])
+    else:
+        # The menu shows this as on until someone turns it off.
+        cfg.speakers_memory.recognise_known = True
     if "speaker_engine" in overlay:
         cfg.diarize.engine = str(overlay["speaker_engine"])
     if "cleanup_enabled" in overlay:

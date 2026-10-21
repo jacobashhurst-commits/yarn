@@ -186,35 +186,29 @@ This is what removes the terminal from daily use. It installs:
 
 - a **Dock app** — record, watch progress, name voices, open the daily brief,
   and ask about meetings
-- a **SwiftBar menu bar item** — the same controls, including the running
-  timer. While processing, it shows a progress bar and the active phase:
-  transcription, speaker identification, summary, or search indexing.
+- a **menu bar icon inside Yarn** — the same controls, including the running
+  timer. While processing, it shows the active phase: transcription, speaker
+  identification, summary, or search indexing. Opening Yarn puts the icon back.
 - a **recorder LaunchAgent**, idle until you start a recording, which is what
   actually captures the audio (see below)
 - a **LaunchAgent running the watcher**, so transcription and indexing happen
   in the background from login, with no terminal window open
 - a **daily prune** at 09:00 for audio past the retention window
 
-SwiftBar is the only new dependency: free, open source, and it hosts shell
-scripts in the menu bar. The installer asks before installing it. When it
-offers to pick a plugin folder, choose `~/.swiftbar-plugins` — that is where
-the installer writes the plugin.
-
 **Why the recorder is a separate LaunchAgent.** macOS grants microphone
-permission to the *responsible process*, which for anything a SwiftBar plugin
-launches is SwiftBar itself. SwiftBar's bundle declares no
-`NSMicrophoneUsageDescription`, so it can never hold that permission and never
-even appears in the Microphone list in System Settings. macOS does not report
-this as an error — it hands the process a stream of zeros, and the only
-symptom is a recording that is perfectly, silently empty. Running the capture
-as a launchd job makes the recorder responsible for itself, so the permission
-is requested once, granted properly, and remembered. Allow it the first time
-you record. That job is explicitly scheduled as `Interactive`; background
-scheduling can starve sustained AVFoundation capture even though short probes
-look healthy. The raw recording stays at the device's native 48 kHz, then the
-finished channel files are converted to 16 kHz for Whisper. Stop also compares
-audio duration with wall-clock duration and refuses a damaged recording
-instead of quietly producing a partial transcript.
+permission to the *responsible process*. If the menu bar app started the
+recording, that app would have to hold the permission, and a missing
+`NSMicrophoneUsageDescription` never appears in the Microphone list. macOS
+does not report this as an error — it hands the process a stream of zeros,
+and the only symptom is a recording that is perfectly, silently empty.
+Running the capture as a launchd job makes the recorder responsible for
+itself, so the permission is requested once, granted properly, and remembered.
+Allow it the first time you record. That job is explicitly scheduled as
+`Interactive`; background scheduling can starve sustained AVFoundation capture
+even though short probes look healthy. The raw recording stays at the device's
+native 48 kHz, then the finished channel files are converted to 16 kHz for
+Whisper. Stop also compares audio duration with wall-clock duration and
+refuses a damaged recording instead of quietly producing a partial transcript.
 
 ### Local summaries
 

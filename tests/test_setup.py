@@ -10,6 +10,37 @@ import pytest
 from meeting_archive import setup as yarn_setup
 
 
+def test_a_partial_download_continues_instead_of_starting_over(tmp_path):
+    fresh = yarn_setup.download_request("https://example.invalid/model.bin", 0)
+    assert fresh.get_header("Range") is None
+    resumed = yarn_setup.download_request("https://example.invalid/model.bin", 4096)
+    assert resumed.get_header("Range") == "bytes=4096-"
+    assert yarn_setup.resume_mode(206, 4096) == "ab"
+    assert yarn_setup.resume_mode(200, 4096) == "wb"
+    assert yarn_setup.resume_mode(206, 0) == "wb"
+
+    partial = tmp_path / "model.bin.partial"
+    dest = tmp_path / "model.bin"
+    partial.write_bytes(b"abc")
+    assert yarn_setup.promote_finished_partial(
+        partial, dest, {"Content-Range": "bytes */3"}
+    )
+    assert dest.read_bytes() == b"abc"
+    assert not partial.exists()
+
+    partial.write_bytes(b"abcdef")
+    assert yarn_setup.promote_finished_partial(
+        partial, dest, {"Content-Range": "bytes */3"}
+    )
+    assert dest.read_bytes() == b"abc"
+
+    partial.write_bytes(b"ab")
+    assert not yarn_setup.promote_finished_partial(
+        partial, dest, {"Content-Range": "bytes */3"}
+    )
+    assert partial.read_bytes() == b"ab"
+
+
 def test_setup_step_list_matches_the_window_contract():
     ids = [step_id for step_id, _ in yarn_setup.STEPS]
     assert ids == [

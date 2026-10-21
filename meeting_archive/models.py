@@ -218,9 +218,10 @@ class NameCandidate:
 class SpeakerGuess:
     """A name we think belongs to a specific diarized voice, and why.
 
-    Never applied silently. This pre-fills the identification dialog, and if
-    Jacob dismisses it the voice keeps its honest "Speaker 2" label -- guessing
-    from what was said is evidence, not identification.
+    A guess from what was said only pre-fills the dialog. Dismissing it leaves
+    the honest Speaker N label. A voice match that already cleared both gates
+    is written onto the meeting so a returning voice is not asked again, and
+    that write does not update the stored voice.
     """
 
     speaker: str

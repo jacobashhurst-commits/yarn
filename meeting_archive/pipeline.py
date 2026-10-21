@@ -350,8 +350,8 @@ def finalize(
             f"{info['duration']:.0f}s). The recording was not saved.\n"
             f"macOS gives an app that lacks microphone access silence rather "
             f"than an error, so check System Settings > Privacy & Security > "
-            f"Microphone and enable whatever started the recording (SwiftBar "
-            f"for the menu bar, your terminal for the command line)."
+            f"Microphone and enable Yarn, or the terminal if you started "
+            f"the recording from there."
         )
 
     # File duration must track elapsed wall time. A live 48 -> 16 kHz
@@ -622,6 +622,28 @@ def needs_summary(transcript: Transcript) -> bool:
     return True
 
 
+def _keep_known_voices(cfg: Config, meeting_id: str, guesses: list) -> None:
+    """Write a returning voice into the notes so the dialog does not ask again.
+
+    Only a voice match that already cleared both gates is kept. A guess from
+    the words stays in the dialog. The library embedding is left alone, so a
+    wrong automatic name cannot train the next meeting.
+    """
+    if not cfg.speakers_memory.recognise_known:
+        return
+    from .speakers import names_for_roster
+
+    kept = names_for_roster(guesses)
+    if not kept:
+        return
+    records.write_notes(
+        cfg.notes_json(meeting_id),
+        meeting_id,
+        speakers=kept,
+        applied=True,
+    )
+
+
 def rediarize(
     cfg: Config,
     meeting_id: str,
@@ -734,6 +756,7 @@ def rediarize(
             transcript.speaker_profiles,
             speaker_guess_map(transcript.speaker_guesses),
         )
+        _keep_known_voices(cfg, meeting_id, transcript.speaker_guesses)
         transcript.diarize_model = cfg.diarize.model if spans else ""
         transcript.diarize_error = ""
 
@@ -1120,6 +1143,7 @@ def process(
         # so a failed or skipped recognise degrades to a no-op rather than
         # leaving the conversation-derived guesses unapplied.
         apply_guesses(profiles, speaker_guess_map(guesses))
+        _keep_known_voices(cfg, meeting_id, guesses)
 
         raw_turns: list = []
         if cfg.cleanup.enabled and summarizer is not None:

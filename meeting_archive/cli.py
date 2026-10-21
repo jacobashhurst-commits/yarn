@@ -65,7 +65,19 @@ def invoked_ma() -> str:
 
 
 def _tell(message: str, *, alert: bool = False) -> None:
-    """Surface a line the menu bar would otherwise throw away."""
+    """Surface a line the menu bar would otherwise throw away.
+
+    The helper is a tiny Yarn app, so the banner and the alert use the Yarn
+    mark. osascript's own icon is the fallback when that app cannot be built.
+    """
+    helper = Path(__file__).resolve().parents[1] / "bin" / "yarn-notify"
+    if helper.is_file():
+        cmd = [str(helper)]
+        if alert:
+            cmd.append("--alert")
+        cmd.append(message)
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
     if alert:
         script = 'display alert "Yarn" message (item 1 of argv) as warning'
     else:

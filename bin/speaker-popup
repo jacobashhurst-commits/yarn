@@ -64,7 +64,7 @@ PLIST
   cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
     "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
   "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" "Identify" || return 1
-  swiftc -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
+  swiftc -target arm64-apple-macos13.0 -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
     -framework AppKit -framework AVFoundation >/dev/null 2>&1 || return 1
   mv -f "$APP_BIN.partial" "$APP_BIN"
 }

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Print a Python 3.11+ path on stdout. Progress and failures go to stderr so
+# Setup can show them in the window. A fresh Mac often has only the 3.9
+# Command Line Tools stub, which opens an installer and then exits. This
+# skips that stub and installs Python itself.
+
+set -euo pipefail
+
+export PATH="/Library/Developer/CommandLineTools/usr/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-}"
+
+python_ok() {
+  [[ -n "${1:-}" && -x "$1" ]] || return 1
+  if [[ "$1" == /usr/bin/python3 ]] && ! xcode-select -p >/dev/null 2>&1; then
+    return 1
+  fi
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+    >/dev/null 2>&1
+}
+
+host_python() {
+  local c path
+  for c in python3.12 python3.13 python3.11 python3; do
+    path="$(command -v "$c" 2>/dev/null || true)"
+    if python_ok "$path"; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+uv_python() {
+  local uvbin path
+  uvbin="$(command -v uv 2>/dev/null || true)"
+  if [[ -z "$uvbin" && -x "$HOME/Library/Application Support/Yarn/bin/uv" ]]; then
+    uvbin="$HOME/Library/Application Support/Yarn/bin/uv"
+  fi
+  [[ -n "$uvbin" ]] || return 1
+  path="$("$uvbin" python find 3.12 2>/dev/null | tail -1 || true)"
+  if python_ok "$path"; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+  return 1
+}
+
+install_python() {
+  echo "This Mac's Python is too old for Yarn. Installing Python 3.12. It stays on this Mac." >&2
+  if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "Yarn runs on Apple Silicon Macs (M1 or newer)." >&2
+    exit 1
+  fi
+  local bindir="$HOME/Library/Application Support/Yarn/bin"
+  local uvbin="$bindir/uv"
+  mkdir -p "$bindir"
+  if [[ ! -x "$uvbin" ]]; then
+    local tmp found
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL -o "$tmp/uv.tar.gz" \
+      "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz"; then
+      echo "Yarn needs Python 3.11 or newer, and downloading it did not work. Check the internet connection and run Setup again." >&2
+      rm -rf "$tmp"
+      exit 1
+    fi
+    tar -xzf "$tmp/uv.tar.gz" -C "$tmp"
+    found="$(find "$tmp" -type f -name uv | head -1)"
+    if [[ -z "$found" ]]; then
+      echo "Yarn needs Python 3.11 or newer, and downloading it did not work." >&2
+      rm -rf "$tmp"
+      exit 1
+    fi
+    install -m 755 "$found" "$uvbin"
+    rm -rf "$tmp"
+  fi
+  if ! "$uvbin" python install 3.12 >&2; then
+    echo "Yarn needs Python 3.11 or newer, and installing it did not work." >&2
+    exit 1
+  fi
+  "$uvbin" python find 3.12 2>/dev/null | tail -1 || true
+}
+
+if found="$(host_python)"; then
+  echo "Python is already on this Mac." >&2
+  printf '%s\n' "$found"
+  exit 0
+fi
+if found="$(uv_python)"; then
+  echo "Python is already on this Mac." >&2
+  printf '%s\n' "$found"
+  exit 0
+fi
+found="$(install_python)"
+if python_ok "$found"; then
+  printf '%s\n' "$found"
+  exit 0
+fi
+echo "Yarn needs Python 3.11 or newer, and installing it did not work." >&2
+exit 1

@@ -14,6 +14,9 @@ Privacy & Security, then Open Anyway. After that, it stays open.
    Expect “Not Opened”. That is step 2, not a mistake.
    If a welcome window does appear, skip to step 4.
 
+   The window checks this Mac and says what it finds.
+   If Yarn cannot run here, that window says why.
+
 
 2. When the Mac says “Not Opened” and offers Done / Move to Bin
 
@@ -63,7 +66,6 @@ Privacy & Security, then Open Anyway. After that, it stays open.
 
    • Your password. That’s fine
    • Microphone access. Click Allow
-   • To open SwiftBar. Click Open
    • To open Ollama. Click Open
 
    When it says you're all set, click Open Yarn.
@@ -80,10 +82,8 @@ Privacy & Security, then Open Anyway. After that, it stays open.
    There is also a small Yarn icon in the menu bar (top of the screen)
    for the same controls.
 
-   If the Dock icon is missing, open Yarn from your Applications folder
-   (the one inside your home folder).
-   If the menu-bar icon is missing, open SwiftBar once from Applications,
-   then look again.
+   If the Dock icon or the menu-bar icon is missing, open Yarn from your
+   Applications folder (the one inside your home folder). That puts both back.
 
 
 If you get stuck, do not delete this folder.

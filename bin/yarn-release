@@ -75,12 +75,47 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
   "$APP/Contents/Resources/yarn-mark.png"
-swiftc -parse-as-library -O -o "$APP/Contents/MacOS/YarnSetup" \
+# minos follows the SDK unless this is set. Built on a newer Mac, Launch
+# Services then refuses the app on an older one (-10825) before any window.
+swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP/Contents/MacOS/YarnSetup" \
   "$REPO_DIR/ui/setup/YarnSetup.swift" \
   "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
   -framework AppKit
 "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP" Setup
 xattr -cr "$APP" 2>/dev/null || true
+
+# Same for the Applications icon. paths.plist is rewritten on the person's
+# Mac during Setup, so this copy does not contain this machine's archive.
+YARN="$INNER/Yarn.app"
+mkdir -p "$YARN/Contents/MacOS" "$YARN/Contents/Resources"
+cat > "$YARN/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.yarn</string>
+  <key>CFBundleName</key><string>Yarn</string>
+  <key>CFBundleDisplayName</key><string>Yarn</string>
+  <key>CFBundleExecutable</key><string>Yarn</string>
+  <key>CFBundleIconFile</key><string>Yarn</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.3</string>
+  <key>CFBundleVersion</key><string>0.3</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
+  "$YARN/Contents/Resources/yarn-mark.png"
+swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/MacOS/Yarn" \
+  "$REPO_DIR/ui/dock/YarnDock.swift" \
+  "$REPO_DIR/ui/dock/YarnChat.swift" \
+  "$REPO_DIR/ui/dock/YarnMenu.swift" \
+  "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
+  -framework AppKit
+"$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$YARN"
+xattr -cr "$YARN" 2>/dev/null || true
 
 rm -f "$OUT"
 COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$ROOT" "$OUT"

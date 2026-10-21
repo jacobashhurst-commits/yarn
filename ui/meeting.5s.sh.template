@@ -21,10 +21,10 @@ fi
 # If install baked a stale path (e.g. a brew symlink that was never created),
 # Start/Stop fail silently under SwiftBar (terminal=false). Surface it.
 if [[ ! -x "$REC" ]]; then
-  echo "Yarn ⚠"
+  echo "Yarn"
   echo "---"
-  echo "rec missing at $REC | color=red"
-  echo "Fix: re-run ui/install-ui.sh from the yarn repo | color=#888888"
+  echo "Yarn Setup did not finish | color=red"
+  echo "Run Yarn Setup again from the download folder | color=#888888"
   exit 0
 fi
 STATE_FILE="$MA_ROOT/.recording"
@@ -273,10 +273,15 @@ echo "---"
 echo "Recording | size=12 color=#888888"
 if $recording; then
   echo "Recording since ${started_at:-unknown} | size=11 color=#888888"
-  echo "Mode: ${mode} | size=11 color=#888888"
+  if [[ "$mode" == "call" ]]; then
+    echo "On a call | size=11 color=#888888"
+  else
+    echo "In the room | size=11 color=#888888"
+  fi
   echo "Stop recording | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" stop' terminal=false refresh=true"
 else
-  echo "Start recording, laptop mic | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start room' terminal=false refresh=true"
+  echo "Start recording, in the room | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start room' terminal=false refresh=true"
+  echo "Start recording, video call | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start call' terminal=false refresh=true"
 fi
 
 echo "---"
@@ -373,9 +378,13 @@ transcripts="$(find "$TRANSCRIPTS" -name '*.json' 2>/dev/null | wc -l | tr -d ' 
 failed="$(count_files "$FAILED" '\.json$')"
 
 echo "---"
-echo "$transcripts meeting(s) archived | size=11 color=#888888"
+if [[ "$transcripts" == "1" ]]; then
+  echo "1 meeting archived | size=11 color=#888888"
+else
+  echo "$transcripts meetings archived | size=11 color=#888888"
+fi
 if [[ "$failed" -gt 0 ]]; then
-  echo "⚠️ $failed failed, audio kept | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
+  echo "$failed failed, audio kept | size=11 color=#cc0000 bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 fi
 # A raw capture sitting here while nothing is recording was never published.
 # Short leftovers are failed Start clicks (the capture outlived the error
@@ -383,7 +392,7 @@ fi
 if ! $recording; then
   stranded="$(count_files "$IN_PROGRESS" '__raw\.wav$')"
   if [[ "$stranded" -gt 0 ]]; then
-    echo "⚠️ $stranded unpublished capture(s) | size=11 color=#cc0000"
+    echo "$stranded recording(s) did not finish | size=11 color=#cc0000"
     echo "-- Discard aborted starts | bash=\"$MA\" param1=recover param2=--discard-aborted terminal=false refresh=true"
     echo "-- Show files | bash=/usr/bin/open param1=\"$IN_PROGRESS\" terminal=false"
   fi
@@ -391,25 +400,37 @@ fi
 
 echo "---"
 echo "Settings | size=12 color=#888888"
-if [[ "$recognise" == "true" || "$recognise" == "1" ]]; then
+# Missing means on. A new install does not ask again about a voice it already knows.
+if [[ -z "$recognise" || "$recognise" == "true" || "$recognise" == "1" ]]; then
   echo "Recognise known speakers: On | bash=\"$MA\" param1=setting param2=recognise_known param3=off terminal=false refresh=true"
 else
   echo "Recognise known speakers: Off | bash=\"$MA\" param1=setting param2=recognise_known param3=on terminal=false refresh=true"
 fi
-echo "Speaker engine: ${engine} | size=11 color=#617188"
+case "$engine" in
+  sherpa) engine_label="Stable" ;;
+  compare) engine_label="Compare both" ;;
+  *) engine_label="Experimental" ;;
+esac
+echo "Voices: ${engine_label} | size=11 color=#617188"
 pyannote_mark=""; sherpa_mark=""; compare_mark=""
 case "$engine" in
   sherpa) sherpa_mark="checked=true" ;;
   compare) compare_mark="checked=true" ;;
   *) pyannote_mark="checked=true" ;;
 esac
-echo "-- Experimental (pyannote, default) | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true ${pyannote_mark}"
-echo "-- Stable (Sherpa) | bash=\"$MA\" param1=setting param2=speaker_engine param3=sherpa terminal=false refresh=true ${sherpa_mark}"
+echo "-- Experimental | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true ${pyannote_mark}"
+echo "-- Stable | bash=\"$MA\" param1=setting param2=speaker_engine param3=sherpa terminal=false refresh=true ${sherpa_mark}"
 echo "-- Compare both | bash=\"$MA\" param1=setting param2=speaker_engine param3=compare terminal=false refresh=true ${compare_mark}"
-echo "Audio retention: ${retention} | size=11 color=#888888"
-echo "-- 1 week | bash=\"$MA\" param1=setting param2=audio_retention param3=1_week terminal=false refresh=true"
-echo "-- 1 month | bash=\"$MA\" param1=setting param2=audio_retention param3=1_month terminal=false refresh=true"
-echo "-- Never | bash=\"$MA\" param1=setting param2=audio_retention param3=never terminal=false refresh=true"
+week_mark=""; month_mark=""; never_mark=""
+case "$retention" in
+  1_month|month) retention_label="1 month"; month_mark="checked=true" ;;
+  never) retention_label="Never"; never_mark="checked=true" ;;
+  *) retention_label="1 week"; week_mark="checked=true" ;;
+esac
+echo "Audio retention: ${retention_label} | size=11 color=#888888"
+echo "-- 1 week | bash=\"$MA\" param1=setting param2=audio_retention param3=1_week terminal=false refresh=true ${week_mark}"
+echo "-- 1 month | bash=\"$MA\" param1=setting param2=audio_retention param3=1_month terminal=false refresh=true ${month_mark}"
+echo "-- Never | bash=\"$MA\" param1=setting param2=audio_retention param3=never terminal=false refresh=true ${never_mark}"
 case "$summarize_when" in
   evening) summarize_label="Evening" ;;
   manual) summarize_label="Manual" ;;

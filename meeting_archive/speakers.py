@@ -274,7 +274,11 @@ def suggest_matches(
     min_confidence: float = 0.35,
     min_margin: float = 0.08,
 ) -> list[SpeakerGuess]:
-    """Return voice-match guesses. Never applied silently.
+    """Return voice-match guesses that cleared both gates.
+
+    The pipeline writes those names into the meeting notes. Anything that
+    does not clear the gates is not a name. The library itself is updated
+    only when a person confirms a voice in the dialog.
 
     Two things here are load-bearing, and both exist because the old 0.75
     floor made this function unable to return anything at all:
@@ -344,6 +348,16 @@ def suggest_matches(
             )
         )
     return guesses
+
+
+def names_for_roster(guesses: list[SpeakerGuess]) -> dict[str, str]:
+    """Voice matches to store on the meeting. Conversation guesses stay out."""
+    kept: dict[str, str] = {}
+    for guess in guesses:
+        if guess.basis != "voice" or not is_real_name(guess.name):
+            continue
+        kept[guess.speaker] = guess.name
+    return kept
 
 
 _DIALOG_NAME = re.compile(
@@ -1082,10 +1096,10 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
         guess, reason = dialog_prediction(ranked, conversation)
         index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
-        # Tiny crumbs (a cough, a "yeah") are still in the transcript as
-        # Speaker N, but asking Jacob to name them is noise. The identify
-        # window skips them unless they are the only voices left.
-        crumb = float(profile.speaking_s or 0.0) < 4.0 and int(profile.turns or 0) <= 1
+        # Under a second in total is a cough or a clipped word, not a person
+        # to name. New meetings drop these before they become a speaker.
+        # This still hides them on a meeting that was already transcribed.
+        crumb = float(profile.speaking_s or 0.0) < 1.0
         voices.append(
             {
                 "key": profile.speaker,

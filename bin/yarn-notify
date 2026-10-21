@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Show a Yarn notification. The banner carries the Yarn icon.
+#
+#   bin/yarn-notify "Writing today's brief."
+#   bin/yarn-notify --alert "Something needs attention."
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SWIFT_SRC="$REPO_DIR/ui/notify/YarnNotify.swift"
+APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Notify.app"
+APP_BIN="$APP_DIR/Contents/MacOS/YarnNotify"
+MARK="$REPO_DIR/meeting_archive/assets/yarn-mark.png"
+
+build_app() {
+  command -v swiftc >/dev/null 2>&1 || return 1
+  mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" || return 1
+  cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.notify</string>
+  <key>CFBundleName</key><string>Yarn</string>
+  <key>CFBundleDisplayName</key><string>Yarn</string>
+  <key>CFBundleExecutable</key><string>YarnNotify</string>
+  <key>CFBundleIconFile</key><string>Yarn</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.3</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+  cp -f "$MARK" "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
+  "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR" || return 1
+  swiftc -target arm64-apple-macos13.0 -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
+    -framework AppKit -framework UserNotifications >/dev/null 2>&1 || return 1
+  mv -f "$APP_BIN.partial" "$APP_BIN"
+}
+
+if [[ -f "$SWIFT_SRC" ]]; then
+  if [[ ! -x "$APP_BIN" || ! -f "$APP_DIR/Contents/Info.plist" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+    build_app || true
+  fi
+fi
+
+if [[ -x "$APP_BIN" ]]; then
+  if [[ "${1:-}" == "--alert" ]]; then
+    exec open -n "$APP_DIR" --args "$@"
+  fi
+  exec open -n -g "$APP_DIR" --args "$@"
+fi
+
+# No compiler, or the build failed. The message still appears.
+if [[ "${1:-}" == "--alert" ]]; then
+  shift
+  osascript - "$1" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  display alert "Yarn" message (item 1 of argv) as warning
+end run
+APPLESCRIPT
+  exit 0
+fi
+osascript - "$1" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  display notification (item 1 of argv) with title "Yarn"
+end run
+APPLESCRIPT

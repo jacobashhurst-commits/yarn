@@ -121,24 +121,32 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
         mins = int(row.duration_s // 60)
         secs = int(row.duration_s % 60)
         page = cfg.transcript_html(row.meeting_id)
-        if not page.exists():
+        if row.has_transcript:
+            try:
+                page = records.ensure_transcript_page(
+                    cfg, Transcript.read(cfg.transcript_json(row.meeting_id))
+                )
+            except (OSError, ValueError):
+                if not page.exists():
+                    page = cfg.transcript_md(row.meeting_id)
+        elif not page.exists():
             page = cfg.transcript_md(row.meeting_id)
         title = row.title
         if page.exists():
             title = f'<a href="{page.as_uri()}">{_esc(title)}</a>'
         else:
             title = _esc(title)
-        audio = "kept" if row.keep_audio else ("yes" if row.audio_present else "expired")
+        audio = "Kept" if row.keep_audio else ("Here" if row.audio_present else "Cleared")
         summary = (
-            "yes"
+            "Written"
             if row.has_summary
-            else ("pending" if is_pending_summary(row.error) else "no")
+            else ("Waiting" if is_pending_summary(row.error) else "Not yet")
         )
         lines.append(
             "<tr>"
             f"<td class=\"mono\">{_esc(row.date)}</td>"
             f"<td>{title}</td>"
-            f"<td>{_esc(row.state)}</td>"
+            f"<td>{_esc(_state_label(row.state))}</td>"
             f"<td>{mins}m {secs:02d}s</td>"
             f"<td>{row.confirmed}/{row.speakers}</td>"
             f"<td>{summary}</td>"
@@ -205,6 +213,15 @@ def render_transcript_index(cfg: Config, rows: list[MeetingRow] | None = None) -
     path = cfg.root / "transcripts.html"
     path.write_text(htmltheme.document("Yarn transcripts", body), encoding="utf-8")
     return path
+
+
+def _state_label(state: str) -> str:
+    return {
+        "complete": "Done",
+        "running": "Working",
+        "failed": "Failed",
+        "pending": "Waiting",
+    }.get(state, state.replace("_", " "))
 
 
 def _meeting_notice(error: str) -> str:

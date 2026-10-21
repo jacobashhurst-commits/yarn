@@ -360,11 +360,9 @@ def build_prompt(question: str, hits: list[dict], *, earlier: str = "") -> str:
 
 
 def render_answer_html(question: str, answer: str, hits: list[dict]) -> str:
-    paragraphs = [
-        f"<p>{html_escape(part)}</p>"
-        for part in answer.strip().split("\n\n")
-        if part.strip()
-    ]
+    from .markup import markup_to_html
+
+    paragraphs = markup_to_html(answer)
     sources: list[str] = []
     for hit in hits:
         meta = hit.get("metadata") or {}
@@ -387,8 +385,8 @@ def render_answer_html(question: str, answer: str, hits: list[dict]) -> str:
         )
     body = (
         masthead("On this Mac", question.strip())
-        + '<div class="answer">'
-        + "".join(paragraphs)
+        + '<div class="answer prose">'
+        + paragraphs
         + "</div>"
         + source_block
     )
