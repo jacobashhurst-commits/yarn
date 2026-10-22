@@ -51,6 +51,15 @@ MIN_SUBSTANTIVE_SPEAKER_S = 2.0
 # meeting look more crowded than it was. The words stay on the channel.
 MIN_LISTED_SPEAKER_S = 1.0
 
+# A voice that spoke for less than this, in a meeting where someone else spoke
+# for longer, is a fragment of a person already in the room. The Seek SOW
+# meeting (six people, three and a half hours) came back as 96 voices; 55 of
+# them had under ten seconds of speech. Asking who each one was is the part
+# that makes a long meeting feel broken. Those fragments are attached to the
+# longer voice they sound like, or to whoever was speaking just before or
+# after, and they are not listed as their own speaker.
+MIN_NOTABLE_SPEAKER_S = 10.0
+
 # Same person, split into several clusters, scores about 0.45-0.7 with this
 # embedding model. Different people on the same call sit around 0.1-0.35.
 # 0.58 is the high end of "same voice" so a chain of merely-similar tracks
@@ -210,6 +219,17 @@ class Diarizer:
                 after,
                 channel,
             )
+        before_short = len({span.speaker for span in spans})
+        spans = absorb_short_voices(spans, samples, sample_rate, self.config)
+        after_short = len({span.speaker for span in spans})
+        if after_short < before_short:
+            log.info(
+                "folded voices under %ss %d -> %d on channel=%s",
+                int(MIN_NOTABLE_SPEAKER_S),
+                before_short,
+                after_short,
+                channel,
+            )
         before_brief = len({span.speaker for span in spans})
         spans = drop_brief_voices(spans)
         after_brief = len({span.speaker for span in spans})
@@ -240,6 +260,129 @@ def _speaker_durations(spans: list[SpeakerSpan]) -> dict[str, float]:
 def _smallest_speaker_duration(spans: list[SpeakerSpan]) -> float:
     totals = _speaker_durations(spans)
     return min(totals.values(), default=0.0)
+
+
+def absorb_short_voices(
+    spans: list[SpeakerSpan],
+    samples=None,
+    sample_rate: int | None = None,
+    config: DiarizeConfig | None = None,
+    *,
+    min_speaking_s: float = MIN_NOTABLE_SPEAKER_S,
+    voice_scores: dict[tuple[str, str], float] | None = None,
+) -> list[SpeakerSpan]:
+    """Attach every voice under ``min_speaking_s`` to a longer voice.
+
+    Does nothing when nobody spoke that long: a short meeting of people who
+    each said a little is still those people. When a longer voice exists, a
+    fragment is not listed on its own. Preference is the longer voice it
+    sounds most like, then whoever was speaking nearest to it in time.
+    Speaker keys of the longer voices are kept, so a name already stored
+    against one of them still points at that voice.
+    """
+    if not spans:
+        return spans
+    totals = _speaker_durations(spans)
+    anchors = {speaker for speaker, total in totals.items() if total >= min_speaking_s}
+    short = [speaker for speaker, total in totals.items() if total < min_speaking_s]
+    if not anchors or not short:
+        return spans
+
+    vectors: dict[str, list[float]] = {}
+    if (
+        voice_scores is None
+        and samples is not None
+        and sample_rate
+        and config is not None
+    ):
+        for speaker, total in totals.items():
+            if total < 0.8:
+                continue
+            clip = _speaker_waveform(
+                samples, sample_rate, spans, speaker, max_s=12.0
+            )
+            if clip is None or len(clip) < int(sample_rate * 0.8):
+                continue
+            vector = _embed_samples(config, clip, sample_rate)
+            if vector:
+                vectors[speaker] = vector
+
+    mapping: dict[str, str] = {}
+    for speaker in short:
+        target = _best_anchor(speaker, anchors, voice_scores, vectors)
+        if target is None:
+            target = _nearest_anchor(spans, speaker, anchors)
+        if target and target != speaker:
+            mapping[speaker] = target
+    if not mapping:
+        return spans
+
+    rewritten: list[SpeakerSpan] = []
+    for span in spans:
+        speaker = mapping.get(span.speaker, span.speaker)
+        rewritten.append(
+            SpeakerSpan(
+                channel=span.channel,
+                start=span.start,
+                end=span.end,
+                speaker=speaker,
+            )
+        )
+    return rewritten
+
+
+def _best_anchor(
+    speaker: str,
+    anchors: set[str],
+    voice_scores: dict[tuple[str, str], float] | None,
+    vectors: dict[str, list[float]],
+) -> str | None:
+    ranked: list[tuple[float, str]] = []
+    if voice_scores is not None:
+        for anchor in anchors:
+            score = voice_scores.get((speaker, anchor))
+            if score is None:
+                score = voice_scores.get((anchor, speaker))
+            if score is not None:
+                ranked.append((score, anchor))
+    elif speaker in vectors:
+        for anchor in anchors:
+            if anchor in vectors:
+                ranked.append((_cosine(vectors[speaker], vectors[anchor]), anchor))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][1]
+
+
+def _nearest_anchor(
+    spans: list[SpeakerSpan], speaker: str, anchors: set[str]
+) -> str | None:
+    """The longer voice speaking closest to this fragment, by its own speech."""
+    anchor_spans = [span for span in spans if span.speaker in anchors]
+    if not anchor_spans:
+        return None
+    votes: dict[str, float] = {}
+    for span in spans:
+        if span.speaker != speaker:
+            continue
+        best: str | None = None
+        best_gap = float("inf")
+        for other in anchor_spans:
+            if other.end <= span.start:
+                gap = span.start - other.end
+            elif other.start >= span.end:
+                gap = other.start - span.end
+            else:
+                gap = 0.0
+            if gap < best_gap:
+                best_gap = gap
+                best = other.speaker
+        if best:
+            votes[best] = votes.get(best, 0.0) + span.duration
+    if not votes:
+        return None
+    return max(votes, key=votes.get)
 
 
 def drop_brief_voices(

@@ -32,6 +32,7 @@ from meeting_archive.config import Config, DiarizeConfig
 from meeting_archive.diarize import (
     DiarizationUnavailable,
     assign_speakers,
+    absorb_short_voices,
     drop_brief_voices,
     drop_tiny_extra_cluster,
     group_same_voices,
@@ -150,6 +151,38 @@ def test_same_voice_groups_only_mutual_best_matches():
     assert groups["room-4"] == groups["room-11"]
     assert groups["room-13"] == "room-13"
     assert groups["room-1"] == "room-1"
+
+
+def test_a_short_fragment_is_folded_into_the_voice_it_sounds_like():
+    spans = [
+        SpeakerSpan(ROOM, 0.0, 30.0, "room-1"),
+        SpeakerSpan(ROOM, 30.0, 34.0, "room-2"),
+        SpeakerSpan(ROOM, 40.0, 70.0, "room-3"),
+    ]
+    cleaned = absorb_short_voices(
+        spans,
+        voice_scores={("room-2", "room-3"): 0.8, ("room-2", "room-1"): 0.2},
+    )
+    assert [span.speaker for span in cleaned] == ["room-1", "room-3", "room-3"]
+
+
+def test_a_short_fragment_without_a_voice_match_follows_the_nearest_speaker():
+    spans = [
+        SpeakerSpan(ROOM, 0.0, 30.0, "room-1"),
+        SpeakerSpan(ROOM, 30.0, 34.0, "room-2"),
+        SpeakerSpan(ROOM, 50.0, 80.0, "room-3"),
+    ]
+    cleaned = absorb_short_voices(spans)
+    assert [span.speaker for span in cleaned] == ["room-1", "room-1", "room-3"]
+
+
+def test_a_short_meeting_keeps_everyone_who_spoke():
+    spans = [
+        SpeakerSpan(ROOM, 0.0, 4.0, "room-1"),
+        SpeakerSpan(ROOM, 5.0, 9.0, "room-2"),
+    ]
+    cleaned = absorb_short_voices(spans)
+    assert [span.speaker for span in cleaned] == ["room-1", "room-2"]
 
 
 def test_a_voice_under_one_second_is_not_listed_as_a_speaker():

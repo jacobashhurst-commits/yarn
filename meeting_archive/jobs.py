@@ -442,9 +442,33 @@ def recover_stale(cfg: Config) -> int:
     return recovered
 
 
+def whisper_checkpoint_is_complete(path: Path) -> bool:
+    """True when Whisper finished every channel, not merely saved a slice.
+
+    A checkpoint written part-way through a long recording is how a closed lid
+    or a reboot resumes. Treating that file as "transcription done" would
+    drop the rest of the meeting.
+    """
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if data.get("partial"):
+        return False
+    channels = data.get("channels") or {}
+    if isinstance(channels, dict) and channels:
+        for payload in channels.values():
+            if not isinstance(payload, dict) or not payload.get("complete"):
+                return False
+    return "segments" in data
+
+
 def _requeue_interrupted(cfg: Config, job: Job, transcript_path: Path) -> None:
-    """Reset in-flight stages and mark Whisper done when a checkpoint exists."""
-    if whisper_checkpoint_path(cfg, job.meeting_id).exists():
+    """Reset in-flight stages and mark Whisper done when it actually finished."""
+    checkpoint = whisper_checkpoint_path(cfg, job.meeting_id)
+    if whisper_checkpoint_is_complete(checkpoint):
         if not job.stage_done("transcribe"):
             finish_stage(
                 cfg, job, "transcribe", status=DONE, detail="resumed from checkpoint"

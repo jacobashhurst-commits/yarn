@@ -20,6 +20,7 @@ happens at all.
 from __future__ import annotations
 
 import logging
+import signal
 import time
 from pathlib import Path
 
@@ -35,9 +36,22 @@ from .transcribe import Transcriber
 log = logging.getLogger(__name__)
 
 
+def _stop_for_resume(signum, _frame) -> None:
+    log.info(
+        "watcher stopping (signal %s); an in-flight meeting resumes from its checkpoint",
+        signum,
+    )
+    raise SystemExit(0)
+
+
 def run(cfg: Config, interval: float = 5.0, once: bool = False) -> None:
     cfg.ensure_dirs()
     resources.nice_background()
+    # Sleep freezes this process; opening the lid continues the same Whisper
+    # or diarize call. Shutdown sends SIGTERM. Leaving the meeting queued,
+    # with whatever slices are already on disk, is what lets the next launch
+    # pick up where this one stopped instead of quarantining the audio.
+    signal.signal(signal.SIGTERM, _stop_for_resume)
     jobs.recover_stale(cfg)
     transcriber = Transcriber(cfg.whisper)
     diarizer = Diarizer(cfg.diarize)

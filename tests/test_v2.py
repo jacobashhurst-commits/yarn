@@ -208,6 +208,37 @@ def test_recover_stale_reclaims_processing_and_keeps_whisper_checkpoint(cfg):
     assert jobs.whisper_checkpoint_path(cfg, meeting_id).exists()
 
 
+def test_a_partial_whisper_checkpoint_is_not_treated_as_finished(cfg):
+    meeting_id = "2026-09-17T13-50-00"
+    pipeline._write_whisper_checkpoint(
+        cfg,
+        meeting_id,
+        [Segment(ROOM, 0.0, 1.0, "hello")],
+        model="tiny",
+        engine="test",
+        partial=True,
+        channels={
+            ROOM: {
+                "complete": False,
+                "through_s": 30.0,
+                "segments": [Segment(ROOM, 0.0, 1.0, "hello").to_dict()],
+            }
+        },
+    )
+    path = jobs.whisper_checkpoint_path(cfg, meeting_id)
+    assert jobs.whisper_checkpoint_is_complete(path) is False
+    job = jobs.enqueue(cfg, meeting_id)
+    jobs.begin_stage(cfg, job, "transcribe")
+    job = jobs.load(cfg, meeting_id)
+    job.worker_pid = 2_000_000_003
+    jobs.save(cfg, job)
+    assert jobs.recover_stale(cfg) >= 1
+    loaded = jobs.load(cfg, meeting_id)
+    assert loaded.stage_done("transcribe") is False
+    assert loaded.state == jobs.QUEUED
+    assert path.exists()
+
+
 def test_recover_stale_completes_a_queued_job_that_already_has_a_transcript(cfg):
     write_transcript(cfg, "2026-09-17T14-00-00", [Turn(ROOM, 0.0, 1.0, "Hi")])
     jobs.enqueue(cfg, "2026-09-17T14-00-00", title="stale")

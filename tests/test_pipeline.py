@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from meeting_archive import audio, cli, pipeline, records, retention, watcher
+from meeting_archive import audio, cli, jobs, pipeline, records, retention, watcher
 from meeting_archive.audio import AudioError, pan_expression
 from meeting_archive.config import Config
 from meeting_archive.diarize import DiarizationUnavailable
@@ -583,6 +583,93 @@ def test_process_reports_progress_phases_and_clears_when_done(cfg, monkeypatch):
 
 
 @needs_ffmpeg
+def test_a_long_file_is_transcribed_in_slices_and_timestamps_stay_on_the_clock(cfg, tmp_path):
+    meeting_id = "2026-10-23T08-00-00"
+    wav = make_wav(cfg.processing_dir / f"{meeting_id}__room.wav", [True], duration=4.0)
+    manifest = Manifest(
+        meeting_id=meeting_id,
+        channels={ROOM: wav.name},
+        duration_s=4.0,
+    )
+
+    class Slices:
+        def __init__(self):
+            self.calls = 0
+
+        def transcribe_file(self, path, channel, duration_s=0.0, progress=None):
+            self.calls += 1
+            if progress:
+                progress(1.0)
+            return [Segment(channel, 0.1, 0.4, f"slice-{self.calls}")]
+
+    slicer = Slices()
+    segments = pipeline._transcribe_channels(
+        cfg,
+        meeting_id,
+        manifest,
+        slicer,
+        jobs.whisper_checkpoint_path(cfg, meeting_id),
+        chunk_s=2.0,
+    )
+    assert slicer.calls == 2
+    assert [segment.text for segment in segments] == ["slice-1", "slice-2"]
+    assert segments[0].start == pytest.approx(0.1)
+    assert segments[1].start == pytest.approx(2.1)
+    progress = pipeline._load_channel_progress(jobs.whisper_checkpoint_path(cfg, meeting_id))
+    assert progress[ROOM]["complete"] is True
+    assert progress[ROOM]["through_s"] == pytest.approx(4.0)
+
+
+def test_a_long_transcription_resumes_after_the_last_saved_slice(cfg):
+    """Closing the laptop mid-whisper keeps the slices already finished."""
+    meeting_id = "2026-10-23T09-00-00"
+    make_wav(cfg.inbox_dir / f"{meeting_id}__room.wav", [True], duration=4.0)
+    manifest = Manifest(
+        meeting_id=meeting_id,
+        channels={ROOM: f"{meeting_id}__room.wav"},
+        duration_s=4.0,
+    )
+    manifest.write(cfg.inbox_dir / f"{meeting_id}.json")
+    kept = Segment(ROOM, 0.0, 1.0, "kept")
+    pipeline._write_whisper_checkpoint(
+        cfg,
+        meeting_id,
+        [kept],
+        model="tiny",
+        engine="test",
+        partial=True,
+        channels={
+            ROOM: {
+                "complete": False,
+                "through_s": 2.0,
+                "segments": [kept.to_dict()],
+            }
+        },
+    )
+
+    class Tail:
+        def __init__(self):
+            self.calls = 0
+
+        def transcribe_file(self, path, channel, duration_s=0.0, progress=None):
+            self.calls += 1
+            assert path.name != f"{meeting_id}__room.wav"
+            if progress:
+                progress(1.0)
+            return [Segment(channel, 0.0, 0.4, "rest")]
+
+    tail = Tail()
+    pipeline.process(cfg, cfg.inbox_dir / f"{meeting_id}.json", tail, FakeStore())
+    assert tail.calls == 1
+    transcript = Transcript.read(cfg.transcript_json(meeting_id))
+    texts = [segment.text for segment in transcript.segments]
+    assert texts == ["kept", "rest"]
+    assert transcript.segments[1].start == pytest.approx(2.0)
+    assert jobs.whisper_checkpoint_is_complete(jobs.whisper_checkpoint_path(cfg, meeting_id)) is False
+    # The finished meeting deletes its checkpoint once the transcript is saved.
+    assert not jobs.whisper_checkpoint_path(cfg, meeting_id).exists()
+
+
 def test_process_quarantines_a_failed_meeting_and_keeps_its_audio(cfg):
     raw = make_wav(cfg.in_progress_dir / "2026-09-11T15-00-00__raw.wav", [True, False, False])
     manifest = pipeline.finalize(cfg, raw)

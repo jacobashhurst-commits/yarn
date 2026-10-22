@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import subprocess
+import wave
 from pathlib import Path
 
 
@@ -208,6 +209,35 @@ def extract_mono(
     if proc.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise AudioError(f"ffmpeg channel extraction failed: {proc.stderr.strip()}")
+    tmp.replace(dst)
+    return dst
+
+
+def slice_wav(src: Path, dst: Path, start_s: float, end_s: float) -> Path:
+    """Copy a time range out of a PCM wav. Used to resume a long transcription.
+
+    The slice is its own file, so Whisper's timestamps start at zero and the
+    caller adds ``start_s`` back. A closed laptop can then continue from the
+    last finished slice instead of transcribing the meeting again.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(src), "rb") as inp:
+        rate = inp.getframerate() or 1
+        start = max(0, int(float(start_s) * rate))
+        end = min(inp.getnframes(), int(float(end_s) * rate))
+        if end <= start:
+            end = min(inp.getnframes(), start + 1)
+        inp.setpos(start)
+        frames = inp.readframes(end - start)
+        channels = inp.getnchannels()
+        width = inp.getsampwidth()
+        rate = inp.getframerate()
+    tmp = dst.with_suffix(dst.suffix + ".partial")
+    with wave.open(str(tmp), "wb") as out:
+        out.setnchannels(channels)
+        out.setsampwidth(width)
+        out.setframerate(rate)
+        out.writeframes(frames)
     tmp.replace(dst)
     return dst
 

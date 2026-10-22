@@ -126,6 +126,22 @@ struct Person: Decodable {
     }
 }
 
+struct NameChoice {
+    let name: String
+    let title: String
+    let company: String
+
+    /// What the menu shows. Title and company are how two people who share a
+    /// first name are told apart before one of them is selected.
+    var label: String {
+        let role = [title, company].filter { !$0.isEmpty }.joined(separator: ", ")
+        if role.isEmpty { return name }
+        return "\(name) — \(role)"
+    }
+
+    var showsRole: Bool { label != name }
+}
+
 struct Payload: Decodable {
     let meeting_id: String
     let banner: String
@@ -279,6 +295,8 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     let distinguishHint = WrapLabel(size: 13, weight: .regular, color: YarnColor.slate)
     var titles: [String: String] = [:]
     var companies: [String: String] = [:]
+    var choices: [NameChoice] = []
+    var applyingChoice = false
     var distinctKeys: Set<String> = []
     var askedToDistinguish = false
     var showingVoice = false
@@ -361,6 +379,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
 
         nameBox.isEditable = true
         nameBox.completes = true
+        nameBox.numberOfVisibleItems = 14
         nameBox.controlSize = .large
         nameBox.placeholderString = "Name, or leave blank if you don't know"
         nameBox.font = NSFont.systemFont(ofSize: 15)
@@ -568,9 +587,8 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
     func loaded(_ payload: Payload) {
         self.payload = payload
         applyBanner(payload.banner)
-        nameBox.removeAllItems()
-        nameBox.addItems(withObjectValues: payload.names)
-        // A voice under a second is not a person to name.
+        buildChoices()
+        // A voice under ten seconds is not a person to name.
         let unnamed = payload.voices.filter { $0.named.isEmpty }
         let meaningful = unnamed.filter { !$0.isCrumb }
         queue = meaningful.isEmpty ? unnamed : meaningful
@@ -661,7 +679,7 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         let shownName = answer ?? (v.named.isEmpty ? v.guess : v.named)
         nameBox.stringValue = shownName
         if titles[v.key] == nil {
-            let person = knownPerson(shownName)
+            let person = uniquePerson(shownName)
             titles[v.key] = person?.title ?? ""
             companies[v.key] = person?.company ?? ""
         }
@@ -850,8 +868,37 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         statusLabel.textColor = YarnColor.slate
     }
 
+    func buildChoices() {
+        choices = []
+        var seen = Set<String>()
+        for person in payload.people {
+            let choice = NameChoice(name: person.name, title: person.title, company: person.company)
+            let key = fold(choice.label)
+            guard !key.isEmpty, !seen.contains(key) else { continue }
+            seen.insert(key)
+            choices.append(choice)
+        }
+        for name in payload.names {
+            let key = fold(name)
+            guard !key.isEmpty else { continue }
+            if choices.contains(where: { fold($0.name) == key }) { continue }
+            choices.append(NameChoice(name: name, title: "", company: ""))
+        }
+        nameBox.removeAllItems()
+        nameBox.addItems(withObjectValues: choices.map(\.label))
+    }
+
     func record() {
         let typed = nameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let picked = choices.first(where: { $0.showsRole && $0.label == typed }) {
+            answers[voice.key] = picked.name
+            titles[voice.key] = picked.title
+            companies[voice.key] = picked.company
+            nameBox.stringValue = picked.name
+            titleBox.stringValue = picked.title
+            companyBox.stringValue = picked.company
+            return
+        }
         answers[voice.key] = typed
         titles[voice.key] = titleBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         companies[voice.key] = companyBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -863,20 +910,39 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         return payload?.people.first { fold($0.name) == key }
     }
 
+    /// One saved person with this name. Two Jacobs stay unresolved until the
+    /// menu row that includes a title or company is chosen.
+    func uniquePerson(_ name: String) -> Person? {
+        let key = fold(name)
+        guard !key.isEmpty else { return nil }
+        let matches = payload?.people.filter { fold($0.name) == key } ?? []
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     func roleLine(_ name: String) -> String {
-        guard let person = knownPerson(name) else { return "" }
+        guard let person = uniquePerson(name) else { return "" }
         return [person.title, person.company].filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     @objc func namePicked() {
-        if showingVoice { return }
-        let name = nameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let person = knownPerson(name) else { return }
-        if titleBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            titleBox.stringValue = person.title
+        if showingVoice || applyingChoice { return }
+        let typed = nameBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let picked = choices.first(where: { $0.showsRole && $0.label == typed }) {
+            applyingChoice = true
+            nameBox.stringValue = picked.name
+            titleBox.stringValue = picked.title
+            companyBox.stringValue = picked.company
+            applyingChoice = false
+            record()
+            return
         }
-        if companyBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            companyBox.stringValue = person.company
+        if let person = uniquePerson(typed) {
+            if titleBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                titleBox.stringValue = person.title
+            }
+            if companyBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                companyBox.stringValue = person.company
+            }
         }
         record()
     }

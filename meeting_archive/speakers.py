@@ -1096,10 +1096,12 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
         guess, reason = dialog_prediction(ranked, conversation)
         index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
-        # Under a second in total is a cough or a clipped word, not a person
-        # to name. New meetings drop these before they become a speaker.
-        # This still hides them on a meeting that was already transcribed.
-        crumb = float(profile.speaking_s or 0.0) < 1.0
+        # Under ten seconds in a real meeting is a fragment, not a person to
+        # name. New meetings fold these into a longer voice before they become
+        # a speaker. This still hides them on a meeting already transcribed.
+        from .diarize import MIN_NOTABLE_SPEAKER_S
+
+        crumb = float(profile.speaking_s or 0.0) < MIN_NOTABLE_SPEAKER_S
         voices.append(
             {
                 "key": profile.speaker,

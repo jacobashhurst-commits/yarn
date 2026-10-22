@@ -24,8 +24,10 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import tempfile
 import threading
 import time
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from .languages import resolve_spoken, uses_english_names
 from .diarize import (
     Diarizer,
     DiarizationUnavailable,
+    absorb_short_voices,
     assign_speakers,
 )
 from .merge import merge_segments, split_long_turns
@@ -59,6 +62,11 @@ from .summarize import (
 from .transcribe import Transcriber
 
 log = logging.getLogger(__name__)
+
+# A killed Whisper run loses at most one slice. Fifteen minutes is long enough
+# that a word cut on the boundary is rare, and short enough that closing the
+# laptop during a three-hour meeting does not mean starting the transcript over.
+WHISPER_CHUNK_S = 15 * 60
 
 
 def _about(cfg: Config, meeting_id: str) -> str:
@@ -906,6 +914,109 @@ def consolidate_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int
     return absorbed
 
 
+def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
+    """Attach voices under ten seconds to a longer voice, without re-diarizing.
+
+    A long meeting can already be transcribed when this rule changes. The
+    spans on disk are enough: a fragment is moved onto the longer voice it
+    sounds like, and a name already confirmed for that longer voice stays.
+    Returns how many fragments were folded in.
+    """
+    import wave
+
+    import numpy as np
+
+    transcript_path = cfg.transcript_json(meeting_id)
+    transcript = Transcript.read(transcript_path)
+    if not transcript.speaker_spans:
+        return 0
+
+    by_channel: dict[str, list] = {}
+    for span in transcript.speaker_spans:
+        by_channel.setdefault(span.channel, []).append(span)
+
+    mapping: dict[str, str] = {}
+    rewritten: list[SpeakerSpan] = []
+    for channel, spans in by_channel.items():
+        wav_path = cfg.audio_archive_dir / f"{meeting_id}__{channel}.wav"
+        samples = None
+        sample_rate = None
+        if wav_path.exists():
+            with wave.open(str(wav_path), "rb") as wav:
+                frames = wav.readframes(wav.getnframes())
+                sample_rate = wav.getframerate()
+            samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        before = {span.speaker for span in spans}
+        folded = absorb_short_voices(spans, samples, sample_rate, cfg.diarize)
+        after = {span.speaker for span in folded}
+        for speaker in before - after:
+            # The fragment's spans now carry the longer voice's key.
+            target = next(
+                (
+                    span.speaker
+                    for old, span in zip(spans, folded)
+                    if old.speaker == speaker
+                ),
+                speaker,
+            )
+            if target != speaker:
+                mapping[speaker] = target
+        rewritten.extend(folded)
+
+    if not mapping:
+        return 0
+
+    def canon(speaker: str | None) -> str | None:
+        if not speaker:
+            return speaker
+        seen = set()
+        while speaker in mapping and speaker not in seen:
+            seen.add(speaker)
+            speaker = mapping[speaker]
+        return speaker
+
+    transcript.speaker_spans = rewritten
+    assign_speakers(transcript.segments, rewritten)
+    for segment in transcript.segments:
+        segment.speaker = canon(segment.speaker)
+    turns = merge_segments(
+        transcript.segments,
+        coalesce_gap_s=cfg.chunk.coalesce_gap_s,
+        max_turn_s=cfg.chunk.max_turn_s,
+    )
+    transcript.turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
+    for turn in transcript.raw_turns:
+        turn.speaker = canon(turn.speaker)
+    for guess in transcript.speaker_guesses:
+        guess.speaker = canon(guess.speaker) or guess.speaker
+    transcript.speaker_profiles = profile_speakers(transcript.turns)
+    apply_guesses(transcript.speaker_profiles, speaker_guess_map(transcript.speaker_guesses))
+
+    notes_path = cfg.notes_json(meeting_id)
+    notes = records.read_notes(notes_path)
+    roster = dict(notes.get("speakers") or {})
+    kept: dict[str, str] = {}
+    for speaker, name in roster.items():
+        root = canon(speaker) or speaker
+        if root == speaker and name:
+            kept[root] = name
+    for speaker, name in roster.items():
+        root = canon(speaker) or speaker
+        if name and root not in kept:
+            kept[root] = name
+    notes["speakers"] = kept
+    records.write_json_atomic(notes_path, notes)
+    transcript.write(transcript_path)
+    ingest(cfg, meeting_id, store)
+    log.info(
+        "folded %d short voice(s) into longer ones in %s (%d voices remain)",
+        len(mapping),
+        meeting_id,
+        len({span.speaker for span in rewritten}),
+    )
+    return len(mapping)
+
+
 # ---------------------------------------------------------------------------
 # processing
 # ---------------------------------------------------------------------------
@@ -974,11 +1085,12 @@ def process(
         requested_language = manifest.language or "en"
         detected_language = ""
         skip_whisper = job.stage_done("transcribe") and (
-            checkpoint_path.exists() or cfg.transcript_json(meeting_id).exists()
+            jobs.whisper_checkpoint_is_complete(checkpoint_path)
+            or cfg.transcript_json(meeting_id).exists()
         )
         if skip_whisper:
             segments = _load_whisper_segments(cfg, meeting_id, checkpoint_path)
-            if not segments:
+            if not segments and not jobs.whisper_checkpoint_is_complete(checkpoint_path):
                 skip_whisper = False
         if skip_whisper:
             detected_language = _checkpoint_language(checkpoint_path)
@@ -992,48 +1104,16 @@ def process(
                 transcriber.set_language(requested_language)
             jobs.begin_stage(cfg, job, "transcribe")
             transcribe_started = time.perf_counter()
-            channels = sorted(manifest.channels.items())
-            last_progress = -1
-            n_channels = max(len(channels), 1)
-            for channel_index, (channel, filename) in enumerate(channels):
-                path = cfg.processing_dir / filename
-
-                def report(
-                    fraction: float, *, name=channel, index=channel_index
-                ) -> None:
-                    nonlocal last_progress
-                    overall = (index + fraction) / n_channels
-                    percent = int(overall * 100)
-                    if percent <= last_progress:
-                        return
-                    last_progress = percent
-                    position = overall * (manifest.duration_s or 0.0)
-                    detail = f"{name} audio"
-                    if manifest.duration_s:
-                        detail = (
-                            f"{_fmt_clock(position)} / "
-                            f"{_fmt_clock(manifest.duration_s)} {name}"
-                        )
-                    _processing_status(
-                        cfg,
-                        meeting_id,
-                        "Transcribing",
-                        percent,
-                        detail,
-                        audio_position_s=position,
-                        audio_duration_s=manifest.duration_s or None,
-                    )
-
-                report(0.0)
-                segments.extend(
-                    transcriber.transcribe_file(
-                        path,
-                        channel,
-                        duration_s=manifest.duration_s,
-                        progress=report,
-                    )
-                )
+            segments = _transcribe_channels(
+                cfg,
+                meeting_id,
+                manifest,
+                transcriber,
+                checkpoint_path,
+            )
             detected_language = str(getattr(transcriber, "detected_language", "") or "")
+            if not detected_language:
+                detected_language = _checkpoint_language(checkpoint_path)
             jobs.finish_stage(cfg, job, "transcribe")
             # Persist before the long diarize stage so a reboot / kill can
             # skip Whisper and pick up at Separate voices.
@@ -1296,6 +1376,22 @@ def process(
         return meeting_id
 
     except Exception as exc:
+        checkpoint = jobs.whisper_checkpoint_path(cfg, meeting_id)
+        # A closed lid usually only freezes this process, and it carries on
+        # when the Mac wakes. If the process is actually killed mid-whisper,
+        # the slices already saved are enough to continue. Quarantining that
+        # meeting would throw away hours of transcript.
+        if checkpoint.exists():
+            log.exception(
+                "processing interrupted for meeting=%s; it will resume",
+                meeting_id,
+            )
+            _park_for_resume(cfg, job, claimed)
+            _clear_processing_status(cfg, meeting_id)
+            from . import queue as queue_mod
+
+            queue_mod.refresh(cfg)
+            raise
         jobs.fail(cfg, job, str(exc), stage=job.current_stage)
         _clear_processing_status(cfg, meeting_id)
         from . import queue as queue_mod
@@ -1304,6 +1400,197 @@ def process(
         log.exception("processing failed for meeting=%s, moving to failed/", meeting_id)
         _move_all(claimed, cfg.failed_dir)
         raise
+
+
+def _park_for_resume(cfg: Config, job: jobs.Job, claimed: list[Path]) -> None:
+    """Put an interrupted meeting back in the inbox without marking it failed.
+
+    Whisper slices already on disk stay there. The next watcher pass claims
+    the audio again and continues from the last finished slice.
+    """
+    checkpoint = jobs.whisper_checkpoint_path(cfg, job.meeting_id)
+    if jobs.whisper_checkpoint_is_complete(checkpoint) and not job.stage_done("transcribe"):
+        jobs.finish_stage(
+            cfg, job, "transcribe", status=jobs.DONE, detail="resumed from checkpoint"
+        )
+    for name in jobs.STAGE_ORDER:
+        stage = job.stages[name]
+        if stage.status == jobs.RUNNING:
+            stage.status = jobs.PENDING
+            stage.started_at = ""
+            stage.ended_at = ""
+            stage.duration_s = 0.0
+            stage.error = ""
+    job.state = jobs.QUEUED
+    job.worker_pid = 0
+    job.current_stage = job.next_pending() or "transcribe"
+    job.error = "interrupted; will resume"
+    jobs.save(cfg, job)
+    _move_all(claimed, cfg.inbox_dir)
+
+
+def _wav_duration(path: Path) -> float | None:
+    try:
+        with wave.open(str(path), "rb") as wav:
+            rate = wav.getframerate() or 0
+            if rate <= 0:
+                return None
+            return wav.getnframes() / float(rate)
+    except (wave.Error, OSError, EOFError):
+        return None
+
+
+def _load_channel_progress(checkpoint_path: Path) -> dict:
+    if not checkpoint_path.exists():
+        return {}
+    try:
+        data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    channels = data.get("channels") or {}
+    return channels if isinstance(channels, dict) else {}
+
+
+def _transcribe_channels(
+    cfg: Config,
+    meeting_id: str,
+    manifest: Manifest,
+    transcriber,
+    checkpoint_path: Path,
+    *,
+    chunk_s: float = WHISPER_CHUNK_S,
+) -> list[Segment]:
+    """Transcribe each channel, saving a slice at a time so a kill can resume.
+
+    A file shorter than one slice is transcribed in a single call, which is
+    the path every existing meeting already used. A longer file is cut into
+    slices. Closing the laptop loses at most the slice that was in progress.
+    """
+    saved = _load_channel_progress(checkpoint_path)
+    channels = sorted(manifest.channels.items())
+    n_channels = max(len(channels), 1)
+    last_progress = -1
+    segments: list[Segment] = []
+    channel_state: dict[str, dict] = {}
+
+    def report(fraction: float, *, name: str, index: int, origin: float, length: float) -> None:
+        nonlocal last_progress
+        overall = (index + fraction) / n_channels
+        percent = int(overall * 100)
+        if percent <= last_progress:
+            return
+        last_progress = percent
+        position = origin + max(0.0, fraction) * length
+        detail = f"{name} audio"
+        if manifest.duration_s:
+            detail = (
+                f"{_fmt_clock(position)} / "
+                f"{_fmt_clock(manifest.duration_s)} {name}"
+            )
+        _processing_status(
+            cfg,
+            meeting_id,
+            "Transcribing",
+            percent,
+            detail,
+            audio_position_s=position,
+            audio_duration_s=manifest.duration_s or None,
+        )
+
+    for channel_index, (channel, filename) in enumerate(channels):
+        path = cfg.processing_dir / filename
+        prior = saved.get(channel) or {}
+        if prior.get("complete"):
+            segments.extend(
+                Segment.from_dict(item) for item in (prior.get("segments") or [])
+            )
+            channel_state[channel] = prior
+            log.info(
+                "channel=%s already transcribed (%.0fs), skipping",
+                channel,
+                float(prior.get("through_s") or 0.0),
+            )
+            continue
+
+        carried = [
+            Segment.from_dict(item) for item in (prior.get("segments") or [])
+        ]
+        start = float(prior.get("through_s") or 0.0)
+        file_s = _wav_duration(path)
+        if file_s is None or file_s <= 0:
+            file_s = float(manifest.duration_s or 0.0)
+
+        def remember(done_through: float, complete: bool) -> None:
+            channel_state[channel] = {
+                "complete": complete,
+                "through_s": round(done_through, 3),
+                "segments": [segment.to_dict() for segment in carried],
+            }
+            _write_whisper_checkpoint(
+                cfg,
+                meeting_id,
+                segments + carried,
+                model=cfg.whisper.model,
+                engine=_whisper_engine(transcriber),
+                language=str(getattr(transcriber, "detected_language", "") or ""),
+                partial=not complete or channel_index < n_channels - 1,
+                channels=channel_state,
+            )
+
+        # One call for a short file, or for the tail when it fits in a slice.
+        # Slicing a two-second test wav would change nothing and would hand
+        # the transcriber a different path than the one the tests assert on.
+        whole = file_s <= 0 or (start <= 0.05 and file_s <= chunk_s + 0.05)
+        if whole or file_s - start <= chunk_s + 0.05:
+            piece_path = path
+            origin = 0.0
+            if start > 0.05 and file_s > start:
+                piece_path = _slice_channel(path, start, file_s)
+                origin = start
+            length = max(file_s - origin, 0.0) or float(manifest.duration_s or 0.0)
+            report(0.0, name=channel, index=channel_index, origin=origin, length=length)
+            piece = transcriber.transcribe_file(
+                piece_path,
+                channel,
+                duration_s=length,
+                progress=lambda fraction, name=channel, index=channel_index, origin=origin, length=length: report(
+                    fraction, name=name, index=index, origin=origin, length=length
+                ),
+            )
+            for segment in piece:
+                segment.start += origin
+                segment.end += origin
+            carried.extend(piece)
+            remember(file_s, True)
+        else:
+            while start < file_s - 0.05:
+                end = min(file_s, start + chunk_s)
+                piece_path = _slice_channel(path, start, end)
+                length = max(end - start, 0.0)
+                report(0.0, name=channel, index=channel_index, origin=start, length=length)
+                piece = transcriber.transcribe_file(
+                    piece_path,
+                    channel,
+                    duration_s=length,
+                    progress=lambda fraction, name=channel, index=channel_index, origin=start, length=length: report(
+                        fraction, name=name, index=index, origin=origin, length=length
+                    ),
+                )
+                for segment in piece:
+                    segment.start += start
+                    segment.end += start
+                carried.extend(piece)
+                start = end
+                remember(start, start >= file_s - 0.05)
+        segments.extend(carried)
+
+    return segments
+
+
+def _slice_channel(path: Path, start_s: float, end_s: float) -> Path:
+    directory = Path(tempfile.mkdtemp(prefix="yarn-whisper-slice-"))
+    dest = directory / f"{path.stem}-{int(start_s)}.wav"
+    return audio.slice_wav(path, dest, start_s, end_s)
 
 
 def _checkpoint_language(checkpoint_path: Path) -> str:
@@ -1324,17 +1611,26 @@ def _write_whisper_checkpoint(
     model: str,
     engine: str,
     language: str = "",
+    partial: bool = False,
+    channels: dict | None = None,
 ) -> Path:
-    """Save Whisper output before diarize so sleep/reboot can skip re-ASR."""
+    """Save Whisper output so a closed lid or a reboot can continue.
+
+    ``partial`` means at least one channel still has audio left. The watcher
+    keeps that file and transcribes only the remainder.
+    """
     path = jobs.whisper_checkpoint_path(cfg, meeting_id)
     payload = {
         "meeting_id": meeting_id,
         "model": model,
         "whisper_engine": engine,
         "language": language,
+        "partial": partial,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "segments": [segment.to_dict() for segment in segments],
     }
+    if channels:
+        payload["channels"] = channels
     records.write_json_atomic(path, payload)
     return path
 
