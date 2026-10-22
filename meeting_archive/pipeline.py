@@ -324,6 +324,39 @@ def discard_aborted_starts(cfg: Config) -> list[str]:
     return removed
 
 
+def _take_call_audio(call_path: Path, sys_path: Path, sample_rate: int) -> bool:
+    """Copy a headphone recording of system audio into the sys channel.
+
+    The file is written by the video-call recorder while the headphones stay
+    on. Missing, unreadable, or digital silence means the aggregate device is
+    the fallback, which only hears a call that was routed into BlackHole.
+    """
+    if not call_path.is_file():
+        return False
+    try:
+        silent = audio.is_silent(call_path)
+        info = audio.probe(call_path)
+    except audio.AudioError:
+        log.info(
+            "call recording %s could not be read; using the aggregate device",
+            call_path.name,
+        )
+        return False
+    if silent or float(info["duration"]) < 0.2 or int(info["channels"]) < 1:
+        log.info(
+            "call recording %s has no system audio; using the aggregate device",
+            call_path.name,
+        )
+        return False
+    audio.extract_mono(
+        call_path,
+        sys_path,
+        list(range(int(info["channels"]))),
+        sample_rate,
+    )
+    return True
+
+
 def finalize(
     cfg: Config,
     raw_path: Path,
@@ -392,7 +425,24 @@ def finalize(
         mic_path = cfg.inbox_dir / f"{meeting_id}__mic.wav"
         sys_path = cfg.inbox_dir / f"{meeting_id}__sys.wav"
         audio.extract_mono(raw_path, mic_path, cfg.audio.mic_channels, cfg.audio.sample_rate)
-        audio.extract_mono(raw_path, sys_path, cfg.audio.sys_channels, cfg.audio.sample_rate)
+        # Headphones keep the call out of BlackHole. `rec start call` records
+        # what the Mac is playing into a sibling __call.wav; that file is the
+        # far side. The aggregate-device channels remain the fallback.
+        call_path = raw_path.with_name(f"{meeting_id}__call.wav")
+        if not _take_call_audio(call_path, sys_path, cfg.audio.sample_rate):
+            audio.extract_mono(raw_path, sys_path, cfg.audio.sys_channels, cfg.audio.sample_rate)
+            call_path.unlink(missing_ok=True)
+        else:
+            call_path.unlink(missing_ok=True)
+        if audio.is_silent(sys_path):
+            log.warning(
+                "CALL_AUDIO_SILENT %s: the other side of the video call was "
+                "silent. Yarn records that from the audio the Mac is playing, "
+                "so headphones can stay on. Allow Yarn System Audio under "
+                "System Settings, Privacy & Security, Screen & System Audio "
+                "Recording, and keep the call playing on this Mac.",
+                meeting_id,
+            )
         channels[MIC] = mic_path.name
         channels[SYS] = sys_path.name
 

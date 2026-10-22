@@ -11,8 +11,8 @@
 #   room  everyone in a physical room on your microphone. This is the default.
 #         One channel, and every turn is labelled "Unknown" until you name
 #         voices after transcription.
-#   call  a video call (hidden from the menu bar). Your mic is you, system
-#         audio is everyone else. Needs a multi-channel aggregate device.
+#   call  a video call. Your mic is you. Everyone else is what the Mac is
+#         playing, so headphones can stay on and the speakers can stay quiet.
 #
 # Bind `rec toggle` to a hotkey (Raycast, Alfred, Shortcuts, skhd) or run it
 # from a terminal. Recording only ever starts because you asked it to.
@@ -60,7 +60,15 @@ alert() {
   disown 2>/dev/null || true
 }
 
-die() { log_line "$*"; alert "$*"; echo "rec: $*" >&2; exit 1; }
+die() {
+  # A failed start must not leave the video-call recorder running. Stopping
+  # when it was never started is a no-op.
+  stop_call_audio
+  log_line "$*"
+  alert "$*"
+  echo "rec: $*" >&2
+  exit 1
+}
 
 is_recording() {
   [[ -f "$STATE_FILE" ]] || return 1
@@ -87,6 +95,13 @@ do_start() {
   meeting_id="$(date +%Y-%m-%dT%H-%M-%S)"
   raw="$MA_IN_PROGRESS/${meeting_id}__raw.wav"
 
+  # Headphones are the output, so the call never reaches BlackHole. Start the
+  # system-audio recorder first and only let it write once the microphone is
+  # actually running, so the two files begin together.
+  if [[ "$mode" == "call" ]]; then
+    start_call_audio "$MA_IN_PROGRESS/${meeting_id}__call.wav"
+  fi
+
   local required_channels
   required_channels="$MA_MIC_REQUIRED_CHANNELS"
   [[ "$mode" == "call" ]] && required_channels="$MA_CALL_REQUIRED_CHANNELS"
@@ -101,6 +116,10 @@ do_start() {
     pid="$(start_directly "$raw" "$required_channels")" || exit 1
   fi
   [[ -n "$pid" ]] || die "recording did not start"
+
+  if [[ "$mode" == "call" ]]; then
+    release_call_audio "$MA_IN_PROGRESS/${meeting_id}__call.wav"
+  fi
 
   # Start time means "ffmpeg is now receiving samples", not "the user
   # clicked". The device probe and launchd startup take a few seconds; counting
@@ -232,6 +251,130 @@ start_via_launchd() {
 }
 
 
+# Video-call audio is what the Mac is playing, not a BlackHole loopback.
+# The helper is its own app so macOS can grant it system-audio permission
+# without changing the output device or turning the speakers up.
+CALL_AUDIO_SRC="$SCRIPT_DIR/../ui/capture/YarnSystemAudio.swift"
+CALL_AUDIO_APP="$HOME/Library/Application Support/Yarn/Yarn System Audio.app"
+CALL_AUDIO_BIN="$CALL_AUDIO_APP/Contents/MacOS/YarnSystemAudio"
+CALL_AUDIO_PID="$MA_ROOT/.call-audio"
+
+ensure_call_audio_bin() {
+  if [[ -x "$CALL_AUDIO_BIN" && -f "$CALL_AUDIO_APP/Contents/Info.plist" \
+        && "$CALL_AUDIO_SRC" -ot "$CALL_AUDIO_BIN" ]]; then
+    printf '%s\n' "$CALL_AUDIO_BIN"
+    return 0
+  fi
+  command -v swiftc >/dev/null 2>&1 || return 1
+  mkdir -p "$CALL_AUDIO_APP/Contents/MacOS" "$MA_LOGS" || return 1
+  cat > "$CALL_AUDIO_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.systemaudio</string>
+  <key>CFBundleName</key><string>Yarn System Audio</string>
+  <key>CFBundleDisplayName</key><string>Yarn System Audio</string>
+  <key>CFBundleExecutable</key><string>YarnSystemAudio</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.2</string>
+  <key>LSUIElement</key><true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Yarn records a video call while you wear headphones. It records what this Mac is playing, on this Mac only.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Yarn records a video call while you wear headphones. It records the call audio, not the screen.</string>
+</dict>
+</plist>
+PLIST
+  if ! swiftc -target arm64-apple-macos14.2 -swift-version 5 -O \
+      -o "$CALL_AUDIO_BIN.partial" "$CALL_AUDIO_SRC" \
+      -framework CoreAudio -framework AudioToolbox -framework Foundation \
+      >>"$MA_LOGS/call-audio.log" 2>&1; then
+    rm -f "$CALL_AUDIO_BIN.partial"
+    return 1
+  fi
+  mv -f "$CALL_AUDIO_BIN.partial" "$CALL_AUDIO_BIN"
+  codesign --force --sign - "$CALL_AUDIO_APP" >>"$MA_LOGS/call-audio.log" 2>&1 || true
+  printf '%s\n' "$CALL_AUDIO_BIN"
+}
+
+start_call_audio() {
+  local wav="$1"
+  local bin err_file ready_file
+  bin="$(ensure_call_audio_bin)" || die "Yarn could not prepare the video-call recorder. See $MA_LOGS/call-audio.log"
+  err_file="${wav}.error"
+  ready_file="${wav}.ready"
+  rm -f "$err_file" "$ready_file" "${wav}.go" "$wav"
+  mkdir -p "$(dirname "$wav")"
+  nohup "$bin" "$wav" >>"$MA_LOGS/call-audio.log" 2>&1 &
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+  printf '%s\n%s\n' "$pid" "$wav" > "$CALL_AUDIO_PID"
+
+  local waited=0
+  while (( waited < 900 )); do
+    if [[ -s "$err_file" ]]; then
+      local message
+      message="$(cat "$err_file")"
+      rm -f "$err_file"
+      stop_call_audio
+      die "$message"
+    fi
+    if [[ -s "$ready_file" ]]; then
+      log_line "video-call audio ready"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      sleep 0.2
+      if [[ -s "$err_file" ]]; then
+        local late
+        late="$(cat "$err_file")"
+        rm -f "$err_file"
+        stop_call_audio
+        die "$late"
+      fi
+      stop_call_audio
+      die "the video-call recorder exited before it started. See $MA_LOGS/call-audio.log"
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  stop_call_audio
+  die "Yarn could not hear the video call. Open System Settings, go to Privacy & Security, then Screen & System Audio Recording, and turn on Yarn System Audio. Then start the recording again."
+}
+
+stop_call_audio() {
+  [[ -f "$CALL_AUDIO_PID" ]] || return 0
+  local pid wav
+  pid="$(sed -n 1p "$CALL_AUDIO_PID")"
+  wav="$(sed -n 2p "$CALL_AUDIO_PID")"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill -INT "$pid" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 40 ]]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      log_line "video-call recorder pid $pid ignored SIGINT; sending SIGKILL"
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 0.2
+    fi
+  fi
+  rm -f "$CALL_AUDIO_PID"
+  if [[ -n "$wav" ]]; then
+    rm -f "${wav}.ready" "${wav}.go" "${wav}.error"
+  fi
+}
+
+release_call_audio() {
+  local wav="$1"
+  [[ -f "$CALL_AUDIO_PID" ]] || return 0
+  : > "${wav}.go"
+}
+
+
 # Used from a terminal, where the terminal itself holds the microphone
 # permission and launchd is unnecessary.
 start_directly() {
@@ -293,6 +436,9 @@ do_stop() {
       sleep 1
     fi
   fi
+  # Finish the video-call wav before finalize reads it. The microphone stop
+  # above already returned, so this only waits out the last buffers.
+  stop_call_audio
   rm -f "$STATE_FILE"
 
   [[ -s "$raw" ]] || die "capture file is empty: $raw"
@@ -308,6 +454,9 @@ do_stop() {
   if finalized="$("$MA" finalize "$raw" --started-at "$started_at" --mode "$mode" \
       --expected-duration "$expected_duration" 2>"$errors")"; then
     cat "$errors" >> "$MA_LOGS/rec.log"
+    if [[ "$mode" == "call" ]] && grep -q "CALL_AUDIO_SILENT" "$errors"; then
+      alert "The recording was saved, but Yarn did not hear anyone else on the call. Headphones can stay on. Allow Yarn System Audio under System Settings, Privacy & Security, Screen & System Audio Recording, and start the video call recording again."
+    fi
     rm -f "$errors"
     log_line "saved $finalized"
     echo "saved: $finalized"

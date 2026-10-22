@@ -373,6 +373,40 @@ def test_finalize_accepts_a_capture_where_only_one_channel_is_silent(cfg):
 
 
 @needs_ffmpeg
+def test_finalize_call_uses_headphone_audio_when_blackhole_is_silent(cfg):
+    """A video call in headphones never reaches BlackHole. The sibling
+    recording of what the Mac played is the far side."""
+    cfg.audio.mic_channels = [2]
+    cfg.audio.sys_channels = [0, 1]
+    raw = make_wav(
+        cfg.in_progress_dir / "2026-10-23T09-24-44__raw.wav",
+        [False, False, True],
+    )
+    call = make_wav(cfg.in_progress_dir / "2026-10-23T09-24-44__call.wav", [True])
+    manifest = pipeline.finalize(cfg, raw, mode="call")
+    mic = cfg.inbox_dir / manifest.channels[MIC]
+    sys_ = cfg.inbox_dir / manifest.channels[SYS]
+    assert mean_volume_db(mic) > -50
+    assert mean_volume_db(sys_) > -50
+    assert not call.exists()
+
+
+@needs_ffmpeg
+def test_finalize_call_falls_back_to_blackhole_when_the_tap_is_silent(cfg):
+    cfg.audio.mic_channels = [2]
+    cfg.audio.sys_channels = [0, 1]
+    raw = make_wav(
+        cfg.in_progress_dir / "2026-10-23T09-30-00__raw.wav",
+        [True, False, False],
+    )
+    call = make_wav(cfg.in_progress_dir / "2026-10-23T09-30-00__call.wav", [False])
+    manifest = pipeline.finalize(cfg, raw, mode="call")
+    sys_ = cfg.inbox_dir / manifest.channels[SYS]
+    assert mean_volume_db(sys_) > -50
+    assert not call.exists()
+
+
+@needs_ffmpeg
 def test_finalize_rejects_audio_duration_that_disagrees_with_wall_time(cfg):
     raw = make_wav(
         cfg.in_progress_dir / "2026-09-11T16-21-31__raw.wav",

@@ -10,7 +10,7 @@ own that something is worth capturing.
 ## How it works
 
 ```
-rec start ──▶ CoreAudio captures the aggregate device (mic + system audio)
+rec start ──▶ microphone from the aggregate device; a video call also records what the Mac is playing
 rec stop  ──▶ splits the channels, publishes a manifest to inbox/, offers a popup
                 │                                       │
                 ▼                                       ▼
@@ -35,12 +35,14 @@ distinguishes `Speaker 1:`, `Speaker 2:`, and so on. Until you confirm their
 names the system never guesses labels. If diarization is unavailable, every
 turn safely falls back to `Unknown:`.
 
-**`rec start`** (separate-channel call mode) — your microphone is you and
-BlackHole system audio is everyone else. Use this with headphones after
-configuring a Multi-Output Device. Your channel reads `Jacob:`; system audio is
-diarized into meeting-local speakers. Without routing into BlackHole the system
-channel is silent, and without headphones speaker leakage duplicates far-side
-speech on both channels.
+**`rec start call`** — a video call while you wear headphones. Your
+microphone is you. Everyone else is recorded from the audio this Mac is
+playing, so the speakers can stay quiet and the headphones can stay the output
+device. The first time, macOS asks you to allow Yarn System Audio under
+Privacy & Security → Screen & System Audio Recording. Your channel reads
+`Jacob:`; the call is diarized into meeting-local speakers. Wear headphones so
+the microphone does not also hear the far side and the transcript says
+everything twice.
 
 Room mode is not just call mode with a quiet second channel. If it were, every
 word your colleagues said would be attributed to you — which is worse than no
@@ -86,37 +88,43 @@ pip install -e .
 cp config.example.toml ~/.config/meeting-archive/config.toml
 ```
 
-### 2. Capture system audio (optional separate-channel mode)
+### 2. Capture system audio (video call)
 
-macOS cannot record its own output. Install [BlackHole
-2ch](https://github.com/ExistentialAudio/BlackHole) (free, open source), then
-build an aggregate device so one recording contains both you and the call:
+`rec start call` hears the other people from the audio this Mac is playing,
+including audio that is only going to headphones. You do not build a
+Multi-Output Device, and you do not turn the speakers up. The first recording
+asks for permission: System Settings → Privacy & Security → Screen & System
+Audio Recording → Yarn System Audio.
 
-Skip this section when using the recommended laptop-mic mode: `rec start room`
-captures an in-room meeting or speaker call through the microphone alone.
+Skip the aggregate-device steps when you only use `rec start room`. That mode
+captures an in-room meeting, or a call played on the laptop speakers, through
+the microphone alone.
+
+The microphone for a video call still comes from the aggregate device below.
+BlackHole can stay in that device. Yarn no longer reads the call from it. An
+older Multi-Output Device that included BlackHole remains a fallback if the
+system-audio recorder is missing, and it is silent whenever the headphones are
+the only output.
 
 1. Open **Audio MIDI Setup**
 2. `+` at the bottom left → **Create Aggregate Device**
 3. Tick your microphone and **BlackHole 2ch**
 4. Tick **Drift Correction** on the microphone row, but *not* on BlackHole.
-   BlackHole is the clock source, so it is the reference everything else is
-   corrected to. This is the entire reason for using an aggregate device
-   instead of two recorders: without it the two channels drift apart over an
-   hour, and since the transcript is merged on timestamps, drift scrambles who
-   said what.
+   This is how the microphone recording stays on one clock. The other people
+   on a video call are recorded separately, from the audio the Mac is playing.
 5. Check the **Subdevices** strip at the top and note the order. It follows the
    order you ticked, not the order shown in the list.
 6. Name it something like `Meeting Capture`
-7. In **System Settings → Sound**, set output to a **Multi-Output Device**
-   containing both BlackHole and your headphones, so you can still hear the
-   call while BlackHole captures it
+
+Leave the Mac's output on your headphones. Yarn records the call from there.
 
 The Subdevices order is what `mic_channels` and `sys_channels` refer to.
 BlackHole first gives `sys = [0, 1]` and `mic = [2]`; the mic first gives
-`mic = [0]` and `sys = [1, 2]`.
+`mic = [0]` and `sys = [1, 2]`. `sys_channels` is only the fallback.
 
-**Wear headphones.** On speakers your microphone also picks up the far side, so
-both channels transcribe the same words and the transcript doubles up.
+**Wear headphones** for a video call. On speakers your microphone also picks up
+the far side, so both channels transcribe the same words and the transcript
+doubles up.
 
 ### 3. Point the config at the device
 
