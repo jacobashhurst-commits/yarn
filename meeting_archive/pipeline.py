@@ -1816,7 +1816,7 @@ def _diarize_channels(
     )
     if expected_speakers:
         log.info(
-            "meeting=%s lists %d speaker(s); clustering stays automatic",
+            "meeting=%s lists %d speaker(s) for diarization",
             manifest.meeting_id,
             expected_speakers,
         )

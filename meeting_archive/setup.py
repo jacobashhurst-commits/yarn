@@ -1437,7 +1437,7 @@ def allow_call_audio(ma: Path) -> None:
             {
                 "type": "log",
                 "id": "menubar",
-                "text": "Video calls need Yarn in Applications. Recording in the room does not ask.",
+                "text": "Headphones need Yarn in Applications.",
             }
         )
         return
@@ -1456,8 +1456,8 @@ def allow_call_audio(ma: Path) -> None:
             "type": "log",
             "id": "menubar",
             "text": (
-                "If the Mac asks Yarn to record the screen, click Allow. "
-                "That is so a video call can be heard. It does not record the screen."
+                "If your Mac asks, click Allow. This lets Yarn hear calls "
+                "while you wear headphones. It does not record the screen."
             ),
         }
     )
@@ -1474,7 +1474,7 @@ def allow_call_audio(ma: Path) -> None:
             {
                 "type": "log",
                 "id": "menubar",
-                "text": "Yarn can hear a video call. Recording in the room does not ask.",
+                "text": "Yarn can hear calls while you wear headphones.",
             }
         )
         return
@@ -1496,7 +1496,7 @@ def allow_call_audio(ma: Path) -> None:
             "id": "menubar",
             "text": (
                 f"Turn on Yarn under Privacy & Security, {row}. "
-                "Then click Open Yarn. Recording in the room does not ask."
+                "Then click Open Yarn."
             ),
         }
     )

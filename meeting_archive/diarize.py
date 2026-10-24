@@ -67,6 +67,17 @@ MIN_NOTABLE_SPEAKER_S = 10.0
 # mutual: A’s closest voice is B and B’s closest voice is A.
 SAME_VOICE_COSINE = 0.58
 
+# sherpa's distance cut. Smaller means more clusters. 0.9, the cautious
+# setting, still glued two different people on a 47s headphone recording
+# into one voice: their embeddings sat just under that distance. 0.5 is
+# sherpa's own default, and it separated them. It is only used when the
+# cautious cut came back with a single voice.
+RETRY_CLUSTER_THRESHOLD = 0.5
+
+# A single returned voice shorter than this is a short remark, not evidence
+# that two people were merged. Below it, the second pass is not worth running.
+SINGLE_VOICE_RETRY_S = 8.0
+
 
 class DiarizationUnavailable(RuntimeError):
     """Diarization cannot run at all: missing package or model files."""
@@ -85,7 +96,7 @@ class Diarizer:
         # sherpa stores it in the pipeline configuration. Cache one pipeline
         # per count so meetings with 2, 8, or an unknown number of voices all
         # remain supported without reloading models every time.
-        self._pipelines: dict[int, object] = {}
+        self._pipelines: dict[tuple[int, float], object] = {}
         self._unavailable: str | None = None
 
     @property
@@ -106,9 +117,16 @@ class Diarizer:
         """The automatic/default pipeline, retained for compatibility."""
         return self._pipeline_for(None)
 
-    def _pipeline_for(self, expected_speakers: int | None):
+    def _pipeline_for(
+        self,
+        expected_speakers: int | None,
+        threshold: float | None = None,
+    ):
         if self._unavailable:
             raise DiarizationUnavailable(self._unavailable)
+        distance = (
+            self.config.cluster_threshold if threshold is None else float(threshold)
+        )
         cluster_count = (
             expected_speakers
             if expected_speakers is not None and expected_speakers > 0
@@ -119,8 +137,9 @@ class Diarizer:
                 else -1
             )
         )
-        if cluster_count in self._pipelines:
-            return self._pipelines[cluster_count]
+        key = (cluster_count, round(distance, 3))
+        if key in self._pipelines:
+            return self._pipelines[key]
 
         try:
             import sherpa_onnx
@@ -154,7 +173,7 @@ class Diarizer:
                 ),
                 clustering=sherpa_onnx.FastClusteringConfig(
                     num_clusters=cluster_count,
-                    threshold=self.config.cluster_threshold,
+                    threshold=distance,
                 ),
                 min_duration_on=self.config.min_span_s,
                 min_duration_off=0.5,
@@ -166,7 +185,7 @@ class Diarizer:
             self._unavailable = f"could not load local diarization models: {exc}"
             raise DiarizationUnavailable(self._unavailable) from exc
 
-        self._pipelines[cluster_count] = pipeline
+        self._pipelines[key] = pipeline
         return pipeline
 
     def diarize_file(
@@ -199,16 +218,76 @@ class Diarizer:
         import numpy as np
 
         samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
-        # Attendee count is not a cluster count. Asking sherpa for exactly N
-        # speakers merges people the model can already tell apart — a Japanese
-        # speaker of English and the local voice became one cluster — and it
-        # does nothing to stop one clear voice being cut into many tracks.
+        # The cautious distance is the first answer. A listed count is not
+        # forced on top of it: asking sherpa for exactly N speakers merged
+        # people it could already tell apart. The count is only a reason to
+        # look again when that first answer found fewer people than were named.
+        spans = self._collapse(
+            self._raw_spans(samples, pipeline, channel),
+            samples,
+            sample_rate,
+            channel,
+        )
+        found = substantive_voices(spans)
+        if expected_speakers and found < expected_speakers:
+            # One spare cluster. Exact N spent a slot on a sub-2s outlier and
+            # hid a real person; N+1 recovers them, and the outlier is dropped
+            # only when it is the single tiny extra.
+            over = self._collapse(
+                self._raw_spans(
+                    samples,
+                    self._pipeline_for(expected_speakers + 1),
+                    channel,
+                ),
+                samples,
+                sample_rate,
+                channel,
+            )
+            cleaned = drop_tiny_extra_cluster(over, expected_speakers)
+            spans = choose_richer_split(spans, cleaned if cleaned is not None else over)
+        elif (
+            found <= 1
+            and sum(span.duration for span in spans) >= SINGLE_VOICE_RETRY_S
+            and self.config.cluster_threshold > RETRY_CLUSTER_THRESHOLD
+        ):
+            # No list of names. Two people through the headphones still have
+            # to come back as two voices. The cautious cut merges them when
+            # they sit just inside it, which is what a short clip did.
+            alt = self._collapse(
+                self._raw_spans(
+                    samples,
+                    self._pipeline_for(None, threshold=RETRY_CLUSTER_THRESHOLD),
+                    channel,
+                ),
+                samples,
+                sample_rate,
+                channel,
+            )
+            spans = choose_richer_split(spans, alt)
+
+        log.info(
+            "channel=%s speakers=%d spans=%d",
+            channel,
+            len({s.speaker for s in spans}),
+            len(spans),
+        )
+        return spans
+
+    def _raw_spans(self, samples, pipeline, channel: str) -> list[SpeakerSpan]:
         result = pipeline.process(samples)
         raw = [
             (float(segment.start), float(segment.end), str(segment.speaker))
             for segment in result.sort_by_start_time()
         ]
-        spans = to_spans(raw, channel, min_span_s=self.config.min_span_s)
+        return to_spans(raw, channel, min_span_s=self.config.min_span_s)
+
+    def _collapse(
+        self,
+        spans: list[SpeakerSpan],
+        samples,
+        sample_rate: int,
+        channel: str,
+    ) -> list[SpeakerSpan]:
         before = len({span.speaker for span in spans})
         spans = merge_same_voices(spans, samples, sample_rate, self.config)
         after = len({span.speaker for span in spans})
@@ -240,13 +319,6 @@ class Diarizer:
                 after_brief,
                 channel,
             )
-
-        log.info(
-            "channel=%s speakers=%d spans=%d",
-            channel,
-            len({s.speaker for s in spans}),
-            len(spans),
-        )
         return spans
 
 
@@ -255,6 +327,30 @@ def _speaker_durations(spans: list[SpeakerSpan]) -> dict[str, float]:
     for span in spans:
         totals[span.speaker] = totals.get(span.speaker, 0.0) + span.duration
     return totals
+
+
+def substantive_voices(
+    spans: list[SpeakerSpan],
+    min_speaking_s: float = MIN_SUBSTANTIVE_SPEAKER_S,
+) -> int:
+    """How many voices spoke for long enough to be a person, not a blip."""
+    totals = _speaker_durations(spans)
+    return sum(1 for total in totals.values() if total >= min_speaking_s)
+
+
+def choose_richer_split(
+    automatic: list[SpeakerSpan],
+    retry: list[SpeakerSpan],
+) -> list[SpeakerSpan]:
+    """Keep a second clustering only when it separated real voices.
+
+    The first pass stays when the retry found the same people, or only an
+    extra blip. A headphone recording of two people has to be allowed to
+    replace a single merged voice.
+    """
+    if substantive_voices(retry) > substantive_voices(automatic):
+        return retry
+    return automatic
 
 
 def _smallest_speaker_duration(spans: list[SpeakerSpan]) -> float:
@@ -617,6 +713,68 @@ def to_spans(
     ]
 
 
+def _exclusive_overlap(
+    segment: Segment,
+    spans: list[SpeakerSpan],
+) -> dict[str, float]:
+    """Time each voice holds once a shorter overlapping voice has claimed its own.
+
+    Spans are already sorted by start. A span that begins after the segment
+    cannot overlap it, and nothing later can either.
+    """
+    pieces: list[tuple[float, str, float, float]] = []
+    for span in spans:
+        if span.start >= segment.end:
+            break
+        start = max(segment.start, span.start)
+        end = min(segment.end, span.end)
+        if end > start:
+            pieces.append((end - start, span.speaker, start, end))
+    # Shortest claim first, so an interruption is not credited to the voice
+    # whose span happens to cover the whole stretch.
+    pieces.sort()
+    claimed: list[tuple[float, float]] = []
+    totals: dict[str, float] = {}
+    for _, speaker, start, end in pieces:
+        amount = 0.0
+        for begin, stop in _subtract_intervals([(start, end)], claimed):
+            amount += stop - begin
+        if amount > 0:
+            totals[speaker] = totals.get(speaker, 0.0) + amount
+        claimed = _merge_intervals(claimed + [(start, end)])
+    return totals
+
+
+def _subtract_intervals(
+    pieces: list[tuple[float, float]],
+    claimed: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    free = pieces
+    for begin, stop in claimed:
+        nxt: list[tuple[float, float]] = []
+        for start, end in free:
+            if stop <= start or begin >= end:
+                nxt.append((start, end))
+                continue
+            if start < begin:
+                nxt.append((start, begin))
+            if end > stop:
+                nxt.append((stop, end))
+        free = nxt
+    return free
+
+
+def _merge_intervals(pieces: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    ordered = sorted(pieces)
+    merged: list[tuple[float, float]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def assign_speakers(
     segments: list[Segment],
     spans: list[SpeakerSpan],
@@ -624,10 +782,10 @@ def assign_speakers(
     """Attach a speaker to each segment by greatest temporal overlap, in place.
 
     A segment that straddles a speaker change goes to whoever holds more of it.
-    That is occasionally wrong at the boundary, and it is still much better than
-    the alternatives: splitting Whisper's text on a timestamp cuts sentences in
-    half, and leaving the segment unattributed drops a line out of the
-    transcript entirely.
+    When the model has marked both people at once, the shorter span is the
+    reply and keeps that moment. Otherwise a long span swallows the other
+    person's line. Splitting Whisper's text on a timestamp would cut sentences
+    in half, and leaving the segment unattributed would drop a line.
 
     Segments with no overlapping span at all are left alone rather than guessed
     into the nearest speaker. Returns how many were attributed.
@@ -647,14 +805,7 @@ def assign_speakers(
         if not candidates:
             continue
 
-        totals: dict[str, float] = {}
-        for span in candidates:
-            if span.start >= segment.end:
-                break  # sorted by start: nothing later can overlap either
-            overlap = min(segment.end, span.end) - max(segment.start, span.start)
-            if overlap > 0:
-                totals[span.speaker] = totals.get(span.speaker, 0.0) + overlap
-
+        totals = _exclusive_overlap(segment, candidates)
         if totals:
             # Tie broken by speaker key so the result is deterministic across
             # runs; an arbitrary dict order here would make tests flap.

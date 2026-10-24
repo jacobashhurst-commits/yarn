@@ -66,15 +66,14 @@ Privacy & Security, then Open Anyway. After that, it stays open.
 
    • Your password. That’s fine
    • Microphone access. Click Allow
-   • A video call. If the Mac asks Yarn to record the screen, click Allow.
-     It records the call audio, not the screen.
-     If it does not ask, turn on Yarn under Privacy & Security.
-     The row is called Screen Recording.
-     On a newer Mac it is called Screen & System Audio Recording.
-     Recording in the room does not ask.
+   • If your Mac asks, click Allow. This only lets Yarn hear calls
+     while you’re wearing headphones, and it doesn’t record your screen.
+     No prompt? Turn on Yarn under Privacy & Security,
+     Screen & System Audio Recording.
+     On an older Mac that row is called Screen Recording.
    • To open Ollama. Click Open
 
-   When it says you're all set, click Open Yarn.
+   When it says you’re almost there, click Open Yarn.
    You are done with this note.
    The zip in Downloads can be deleted after that. Yarn now lives on this Mac.
 

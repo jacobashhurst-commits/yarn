@@ -338,7 +338,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             statusLabel.stringValue = "RECORDING"
             bigLabel.stringValue = snap.elapsed
             bigLabel.isHidden = false
-            metaLabel.stringValue = snap.mode == "call" ? "On a call" : "In the room"
+            metaLabel.stringValue = snap.mode == "call" ? "Headphones" : "In the room"
             metaLabel.isHidden = false
             startRow?.isHidden = true
             recordButton.isHidden = false

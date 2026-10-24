@@ -199,13 +199,13 @@ final class Controller: NSObject, NSWindowDelegate {
         doneBox.spacing = 10
         doneBox.translatesAutoresizingMaskIntoConstraints = false
         doneBox.isHidden = true
-        doneBox.addArrangedSubview(label("You're all set.", size: 26, weight: .semibold, color: navy))
+        doneBox.addArrangedSubview(label("You\u{2019}re almost there.", size: 26, weight: .semibold, color: navy))
         doneBox.addArrangedSubview(label(
-            "Yarn is ready to remember the things you won't.",
+            "One setting and Yarn is ready to remember the things you won\u{2019}t.",
             size: 15, weight: .regular, color: ink
         ))
         doneBox.addArrangedSubview(label(
-            "If the Mac asked, click Allow. That lets a video call be heard, and it does not record the screen. If it did not ask, turn on Yarn under Privacy & Security, \(screenRecordingRow). Then click Open Yarn. Recording in the room does not ask.",
+            "If your Mac asks, click Allow. This only lets Yarn hear calls while you\u{2019}re wearing headphones, and it doesn\u{2019}t record your screen. No prompt? Turn on Yarn under Privacy & Security, \(screenRecordingRow). Yarn runs only on this Mac, and everything it records is yours. Don\u{2019}t need this? No hard feelings, just continue.",
             size: 13, weight: .regular, color: ink
         ))
         openButton.target = self

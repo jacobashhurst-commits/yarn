@@ -275,14 +275,14 @@ echo "Recording | size=12 color=#888888"
 if $recording; then
   echo "Recording since ${started_at:-unknown} | size=11 color=#888888"
   if [[ "$mode" == "call" ]]; then
-    echo "On a call | size=11 color=#888888"
+    echo "Headphones | size=11 color=#888888"
   else
     echo "In the room | size=11 color=#888888"
   fi
   echo "Stop recording | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" stop' terminal=false refresh=true"
 else
   echo "Start recording, in the room | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start room' terminal=false refresh=true"
-  echo "Start recording, video call | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start call' terminal=false refresh=true"
+  echo "Start recording, headphones | bash=/bin/bash param1=-c param2='export MA_BIN=\"$MA\"; exec \"$REC\" start call' terminal=false refresh=true"
 fi
 
 echo "---"

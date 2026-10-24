@@ -34,6 +34,7 @@ from meeting_archive.diarize import (
     assign_speakers,
     absorb_short_voices,
     drop_brief_voices,
+    choose_richer_split,
     drop_tiny_extra_cluster,
     group_same_voices,
     speaker_keys,
@@ -269,6 +270,17 @@ def test_segments_go_to_the_speaker_holding_most_of_them():
     ]
     assert assign_speakers(segments, spans) == 2
     assert [s.speaker for s in segments] == ["room-1", "room-2"]
+
+
+def test_a_short_reply_inside_a_longer_voice_keeps_its_speaker():
+    """Headphone audio marks both people at once. The reply is the short span."""
+    segment = Segment(SYS, 3.96, 5.74, "Oh, my pleasure, glad you had a good time.")
+    spans = [
+        SpeakerSpan(SYS, 0.03, 12.74, "sys-1"),
+        SpeakerSpan(SYS, 4.43, 5.87, "sys-2"),
+    ]
+    assign_speakers([segment], spans)
+    assert segment.speaker == "sys-2"
 
 
 def test_straddling_segment_goes_to_the_majority_holder():
@@ -833,3 +845,21 @@ def test_listed_speakers_accepts_commas_and_newlines():
     assert records.listed_speakers(
         {"attendees": "Jacob, Bert\nTeddy,  Leanne "}
     ) == ["Jacob", "Bert", "Teddy", "Leanne"]
+
+
+def test_a_split_that_finds_a_second_person_replaces_one_merged_voice():
+    merged = [SpeakerSpan(SYS, 0.0, 34.0, "sys-1")]
+    split = [
+        SpeakerSpan(SYS, 0.0, 22.0, "sys-1"),
+        SpeakerSpan(SYS, 4.0, 20.0, "sys-2"),
+    ]
+    assert choose_richer_split(merged, split) is split
+
+
+def test_a_second_pass_that_only_adds_a_blip_keeps_the_first():
+    first = [SpeakerSpan(SYS, 0.0, 30.0, "sys-1")]
+    blip = [
+        SpeakerSpan(SYS, 0.0, 30.0, "sys-1"),
+        SpeakerSpan(SYS, 30.0, 30.4, "sys-2"),
+    ]
+    assert choose_richer_split(first, blip) is first
