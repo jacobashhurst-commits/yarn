@@ -1451,6 +1451,12 @@ def allow_call_audio(ma: Path) -> None:
         time.sleep(0.2)
     result = home / "Library/Application Support/Yarn/call-audio-access"
     result.unlink(missing_ok=True)
+    # Reinstalling keeps the previous copy's permission. macOS then hides
+    # Yarn from the list and will not ask again, because this copy is not
+    # the one it remembers. Clearing that decision lets this copy appear.
+    # A new Mac has no decision to clear.
+    for service in ("ScreenCapture", "AudioCapture"):
+        run(["tccutil", "reset", service, "com.meetingarchive.yarn"], timeout=20)
     emit(
         {
             "type": "log",
@@ -1490,13 +1496,15 @@ def allow_call_audio(ma: Path) -> None:
             ],
             timeout=15,
         )
+    run(["open", str(Path.home() / "Applications")], timeout=15)
     emit(
         {
             "type": "log",
             "id": "menubar",
             "text": (
-                f"Turn on Yarn under Privacy & Security, {row}. "
-                "Then click Open Yarn."
+                f"If Yarn is not in the list, click + under Privacy & Security, {row}, "
+                "choose Yarn, and turn it on. It is in the Applications folder "
+                "in your home folder. Then click Open Yarn."
             ),
         }
     )

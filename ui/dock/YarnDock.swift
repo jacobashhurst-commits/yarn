@@ -146,11 +146,11 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func prepareCallAudioAndQuit() {
-        // The system Allow button, on the macOS versions that still show one.
-        // Newer macOS does not show it. Setup then opens the right Settings row.
+        // One ScreenCaptureKit attempt puts Yarn in Settings. Setup then opens
+        // that row when the user still needs to flip the switch.
         NSApp.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            let granted = CGRequestScreenCaptureAccess()
+        Task { @MainActor in
+            let granted = await CallAudio.prepareAccess()
             let dir = NSHomeDirectory() + "/Library/Application Support/Yarn"
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             let body = granted ? "granted\n" : "needs-switch\n"

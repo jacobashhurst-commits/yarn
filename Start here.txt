@@ -68,8 +68,9 @@ Privacy & Security, then Open Anyway. After that, it stays open.
    • Microphone access. Click Allow
    • If your Mac asks, click Allow. This only lets Yarn hear calls
      while you’re wearing headphones, and it doesn’t record your screen.
-     No prompt? Turn on Yarn under Privacy & Security,
-     Screen & System Audio Recording.
+     No prompt? Under Privacy & Security, Screen & System Audio Recording,
+     click +, choose Yarn, and turn it on.
+     Yarn is in the Applications folder in your home folder.
      On an older Mac that row is called Screen Recording.
    • To open Ollama. Click Open
 

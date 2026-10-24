@@ -205,7 +205,7 @@ final class Controller: NSObject, NSWindowDelegate {
             size: 15, weight: .regular, color: ink
         ))
         doneBox.addArrangedSubview(label(
-            "If your Mac asks, click Allow. This only lets Yarn hear calls while you\u{2019}re wearing headphones, and it doesn\u{2019}t record your screen. No prompt? Turn on Yarn under Privacy & Security, \(screenRecordingRow). Yarn runs only on this Mac, and everything it records is yours. Don\u{2019}t need this? No hard feelings, just continue.",
+            "If your Mac asks, click Allow. This only lets Yarn hear calls while you\u{2019}re wearing headphones, and it doesn\u{2019}t record your screen. No prompt? Under Privacy & Security, \(screenRecordingRow), click +, choose Yarn, and turn it on. Yarn is in the Applications folder in your home folder. Yarn runs only on this Mac, and everything it records is yours. Don\u{2019}t need this? No hard feelings, just continue.",
             size: 13, weight: .regular, color: ink
         ))
         openButton.target = self

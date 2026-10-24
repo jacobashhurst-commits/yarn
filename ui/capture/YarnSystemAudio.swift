@@ -477,6 +477,32 @@ final class CallAudio {
         callAudioLogPath = archiveRoot + "/logs/call-audio.log"
     }
 
+    /// Register Yarn in Privacy & Security and learn whether capture can start.
+    ///
+    /// `CGRequestScreenCaptureAccess()` is the Allow button on older macOS.
+    /// On current macOS it returns without listing the app. The row appears
+    /// only after this app asks ScreenCaptureKit for the audio it is playing.
+    static func prepareAccess() async -> Bool {
+        if CGRequestScreenCaptureAccess() {
+            return true
+        }
+        let probe = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("yarn-permission-probe.wav")
+        let engine = Engine(wavPath: probe)
+        do {
+            try await engine.openCapture()
+            await engine.stopStreams()
+            try? FileManager.default.removeItem(atPath: probe + readySuffix)
+            try? FileManager.default.removeItem(atPath: probe)
+            return true
+        } catch {
+            await engine.stopStreams()
+            try? FileManager.default.removeItem(atPath: probe + errorSuffix)
+            try? FileManager.default.removeItem(atPath: probe)
+            return false
+        }
+    }
+
     func poll() {
         guard !root.isEmpty else { return }
         if let engine, FileManager.default.fileExists(atPath: engine.wavPath + doneSuffix) {
