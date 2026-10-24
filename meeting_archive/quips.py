@@ -18,6 +18,8 @@ Lisbon on Thursday" identifies exactly one person in the room.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from pathlib import Path
 
 from .models import SpeakerProfile, Turn
 
@@ -147,31 +149,74 @@ def pick_quip(turns: list[Turn], max_chars: int = 110) -> str:
     return trim(best, max_chars) if best else ""
 
 
-def profile_speakers(
-    turns: list[Turn],
-    guesses: dict[str, str] | None = None,
-    max_chars: int = 110,
-) -> list[SpeakerProfile]:
-    """Build a profile per diarized voice, ordered by who spoke first.
-
-    Turns with no speaker key are ignored: the mic channel is already known to
-    be Jacob, and an undiarized channel has nothing to identify.
-    """
-    guesses = guesses or {}
+def _grouped_turns(turns: list[Turn]) -> dict[str, list[Turn]]:
     grouped: dict[str, list[Turn]] = {}
     for turn in turns:
         if turn.speaker:
             grouped.setdefault(turn.speaker, []).append(turn)
+        elif turn.channel == "mic":
+            grouped.setdefault("mic", []).append(turn)
+    return grouped
+
+
+def speaking_seconds(turns: list[Turn], wav: Path | None = None) -> float:
+    """Time this voice was audible.
+
+    Without the recording, that is the transcript span. With it, the quiet
+    Whisper leaves around the words is left out. An unreadable recording
+    keeps the span, so a meeting whose audio has already been deleted does
+    not suddenly show zero.
+    """
+    span = sum(max(turn.end - turn.start, 0.0) for turn in turns)
+    if wav is None:
+        return span
+    from .audio import spoken_seconds
+
+    measured = spoken_seconds(wav, [(turn.start, turn.end) for turn in turns])
+    if measured is None:
+        return span
+    return round(min(span, measured), 2)
+
+
+def apply_spoken_durations(transcript, wavs: Mapping[str, Path]) -> None:
+    """Rewrite stored speaking times from the channel recordings, when they exist."""
+    if not wavs:
+        return
+    grouped = _grouped_turns(transcript.turns)
+    for profile in transcript.speaker_profiles:
+        wav = wavs.get(profile.channel)
+        speaker_turns = grouped.get(profile.speaker)
+        if wav is None or not speaker_turns:
+            continue
+        profile.speaking_s = speaking_seconds(speaker_turns, wav)
+
+
+def profile_speakers(
+    turns: list[Turn],
+    guesses: dict[str, str] | None = None,
+    max_chars: int = 110,
+    audio: Mapping[str, Path] | None = None,
+) -> list[SpeakerProfile]:
+    """Build a profile per voice, ordered by who spoke first.
+
+    Diarized voices keep their speaker key. The microphone has no key because
+    it is already one known person, and dropping those turns made a headphone
+    call look like a single speaker: Who spoke and the summary listed only
+    the computer audio. An undiarized room stays out. Nobody in it is known.
+    """
+    guesses = guesses or {}
+    grouped = _grouped_turns(turns)
 
     profiles: list[SpeakerProfile] = []
     for speaker, speaker_turns in grouped.items():
         ordered = sorted(speaker_turns, key=lambda t: t.start)
+        wav = None if audio is None else audio.get(ordered[0].channel)
         profiles.append(
             SpeakerProfile(
                 speaker=speaker,
                 channel=ordered[0].channel,
                 turns=len(ordered),
-                speaking_s=sum(max(t.end - t.start, 0.0) for t in ordered),
+                speaking_s=speaking_seconds(ordered, wav),
                 first_at=ordered[0].start,
                 quip=pick_quip(ordered, max_chars=max_chars),
                 guess=guesses.get(speaker, ""),

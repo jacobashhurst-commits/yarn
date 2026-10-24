@@ -1402,6 +1402,53 @@ def _prefetch_search_embedder(repo: Path) -> None:
     emit({"type": "log", "id": "ollama", "text": "Search is ready on this Mac"})
 
 
+def allow_call_audio(ma: Path) -> None:
+    """Video-call audio is recorded by Yarn itself.
+
+    macOS does not show an Allow button for this. The switch under Screen &
+    System Audio Recording is the grant, and it is tied to this exact copy of
+    Yarn. A second app used to ask on every recording. Recording in the room
+    does not use the switch.
+    """
+    del ma
+    home = Path.home()
+    uid = os.getuid()
+    run(["launchctl", "bootout", f"gui/{uid}/com.meetingarchive.systemaudio"], timeout=15)
+    (home / "Library/LaunchAgents/com.meetingarchive.systemaudio.plist").unlink(missing_ok=True)
+    helper = home / "Library/Application Support/Yarn/Yarn System Audio.app"
+    if helper.exists():
+        shutil.rmtree(helper, ignore_errors=True)
+    # The login item may already have opened Yarn, before the switch was set.
+    # Screen recording is read when the app opens, so this copy has to quit.
+    run(["osascript", "-e", 'tell application "Yarn" to quit'], timeout=20)
+    marker = home / "Library/Application Support/Yarn/screen-recording-changed"
+    changed = marker.is_file()
+    marker.unlink(missing_ok=True)
+    if changed:
+        run(["tccutil", "reset", "ScreenCapture", "com.meetingarchive.yarn"], timeout=20)
+        run(["tccutil", "reset", "ScreenCapture", "com.meetingarchive.systemaudio"], timeout=20)
+        opened = run(
+            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
+            timeout=15,
+        )
+        if opened.returncode != 0:
+            run(
+                ["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"],
+                timeout=15,
+            )
+    emit(
+        {
+            "type": "log",
+            "id": "menubar",
+            "text": (
+                "For a video call, turn on Yarn under Screen & System Audio Recording. "
+                "If Yarn is already on, turn it off and on again. "
+                "Then click Open Yarn. Recording in the room does not ask."
+            ),
+        }
+    )
+
+
 def step_menubar(repo: Path) -> None:
     py = venv_python(repo)
     ma = repo / ".venv" / "bin" / "ma"
@@ -1460,9 +1507,8 @@ def step_menubar(repo: Path) -> None:
                 "text": "Allow Microphone for Yarn the first time you record.",
             }
         )
+    allow_call_audio(ma)
     emit({"type": "log", "id": "menubar", "text": f"Command is {ma}"})
-    if (dock / "Contents" / "MacOS" / "Yarn").is_file():
-        subprocess.Popen(["open", str(dock)])
 
 
 _PULL: list[str] = []

@@ -324,6 +324,40 @@ def discard_aborted_starts(cfg: Config) -> list[str]:
     return removed
 
 
+def _channels_in_file(wanted: list[int], channel_count: int) -> list[int]:
+    return [channel for channel in wanted if 0 <= channel < channel_count]
+
+
+def _call_mic_channels(cfg: Config, channel_count: int) -> list[int]:
+    """Channels of the microphone file for a video call.
+
+    The saved layout indexes the aggregate device. A headset microphone is
+    one channel, and applying that layout would look for a channel that is
+    not there.
+    """
+    present = _channels_in_file(cfg.audio.mic_channels, channel_count)
+    if present:
+        return present
+    if channel_count > 0:
+        return list(range(channel_count))
+    return [0]
+
+
+def _call_sys_fallback(cfg: Config, channel_count: int) -> list[int]:
+    """Aggregate channels that are the far side, and not the microphone.
+
+    When the microphone file is only the headset, there is no second channel
+    to fall back on. Returning nothing stops the wearer's voice being copied
+    into the "everyone else" channel.
+    """
+    mic = set(_call_mic_channels(cfg, channel_count))
+    return [
+        channel
+        for channel in cfg.audio.sys_channels
+        if 0 <= channel < channel_count and channel not in mic
+    ]
+
+
 def _take_call_audio(call_path: Path, sys_path: Path, sample_rate: int) -> bool:
     """Copy a headphone recording of system audio into the sys channel.
 
@@ -424,23 +458,36 @@ def finalize(
     else:
         mic_path = cfg.inbox_dir / f"{meeting_id}__mic.wav"
         sys_path = cfg.inbox_dir / f"{meeting_id}__sys.wav"
-        audio.extract_mono(raw_path, mic_path, cfg.audio.mic_channels, cfg.audio.sample_rate)
-        # Headphones keep the call out of BlackHole. `rec start call` records
-        # what the Mac is playing into a sibling __call.wav; that file is the
-        # far side. The aggregate-device channels remain the fallback.
+        channel_count = int(info["channels"])
+        audio.extract_mono(
+            raw_path,
+            mic_path,
+            _call_mic_channels(cfg, channel_count),
+            cfg.audio.sample_rate,
+        )
+        # The far side is the audio sent to the headphones, recorded beside
+        # the microphone. An aggregate device that still contains BlackHole
+        # is only a fallback, and only when it has channels that are not the
+        # microphone. Otherwise a silent tap must stay silent: copying the
+        # headset microphone into sys would name the wearer as everybody else.
         call_path = raw_path.with_name(f"{meeting_id}__call.wav")
         if not _take_call_audio(call_path, sys_path, cfg.audio.sample_rate):
-            audio.extract_mono(raw_path, sys_path, cfg.audio.sys_channels, cfg.audio.sample_rate)
+            fallback = _call_sys_fallback(cfg, channel_count)
+            if fallback:
+                audio.extract_mono(raw_path, sys_path, fallback, cfg.audio.sample_rate)
+            else:
+                audio.write_silence(sys_path, float(info["duration"]), cfg.audio.sample_rate)
             call_path.unlink(missing_ok=True)
         else:
             call_path.unlink(missing_ok=True)
         if audio.is_silent(sys_path):
             log.warning(
                 "CALL_AUDIO_SILENT %s: the other side of the video call was "
-                "silent. Yarn records that from the audio the Mac is playing, "
-                "so headphones can stay on. Allow Yarn System Audio under "
-                "System Settings, Privacy & Security, Screen & System Audio "
-                "Recording, and keep the call playing on this Mac.",
+                "silent. Yarn records that from the audio going to the "
+                "headphones. Turn on Yarn under System Settings, "
+                "Privacy & Security, Screen & System Audio Recording. "
+                "If it is already on, turn it off and on again, then quit "
+                "Yarn and open it again.",
                 meeting_id,
             )
         channels[MIC] = mic_path.name
@@ -480,6 +527,18 @@ def finalize(
 # indexing
 # ---------------------------------------------------------------------------
 
+def _channel_wavs(cfg: Config, meeting_id: str, turns) -> dict[str, Path]:
+    """Recordings still on disk for these turns. Empty once audio is pruned."""
+    from .speakers import find_channel_audio
+
+    wavs: dict[str, Path] = {}
+    for channel in {turn.channel for turn in turns}:
+        found = find_channel_audio(cfg, meeting_id, channel)
+        if found is not None:
+            wavs[channel] = found
+    return wavs
+
+
 def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     """(Re)index a meeting from its stored transcript and notes."""
     transcript_path = cfg.transcript_json(meeting_id)
@@ -490,9 +549,13 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
 
     transcript = Transcript.read(transcript_path)
     from .glossary import apply_glossary_to_transcript
+    from .quips import apply_spoken_durations
 
     if apply_glossary_to_transcript(transcript, cfg.glossary.replacements):
         transcript.write(transcript_path)
+    # Who spoke was using Whisper's padded span. Measure the recording while
+    # it is still on disk, so a later reindex shows how long each person spoke.
+    apply_spoken_durations(transcript, _channel_wavs(cfg, meeting_id, transcript.turns))
     notes = records.read_notes(cfg.notes_json(meeting_id))
     previous_md = cfg.transcript_md(meeting_id)
     transcript.title = records.meeting_title(notes, transcript)
@@ -788,6 +851,7 @@ def rediarize(
         transcript.speaker_profiles = profile_speakers(
             transcript.turns,
             guesses=speaker_guess_map(transcript.speaker_guesses),
+            audio=_channel_wavs(cfg, meeting_id, transcript.turns),
         )
         # Rediarizing renumbers the voices, so any known-speaker match has to
         # be recomputed against the new keys rather than carried over. Kept
@@ -947,7 +1011,10 @@ def consolidate_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int
     transcript.turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
     from .quips import profile_speakers
 
-    transcript.speaker_profiles = profile_speakers(transcript.turns)
+    transcript.speaker_profiles = profile_speakers(
+        transcript.turns,
+        audio=_channel_wavs(cfg, meeting_id, transcript.turns),
+    )
     notes_path = cfg.notes_json(meeting_id)
     notes = records.read_notes(notes_path)
     roster = dict(notes.get("speakers") or {})
@@ -1039,7 +1106,10 @@ def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
         turn.speaker = canon(turn.speaker)
     for guess in transcript.speaker_guesses:
         guess.speaker = canon(guess.speaker) or guess.speaker
-    transcript.speaker_profiles = profile_speakers(transcript.turns)
+    transcript.speaker_profiles = profile_speakers(
+        transcript.turns,
+        audio=_channel_wavs(cfg, meeting_id, transcript.turns),
+    )
     apply_guesses(transcript.speaker_profiles, speaker_guess_map(transcript.speaker_guesses))
 
     notes_path = cfg.notes_json(meeting_id)
@@ -1248,7 +1318,11 @@ def process(
             if cfg.names.enabled and english_names and spans
             else []
         )
-        profiles = profile_speakers(turns, guesses=speaker_guess_map(guesses))
+        profiles = profile_speakers(
+            turns,
+            guesses=speaker_guess_map(guesses),
+            audio=_channel_wavs(cfg, meeting_id, turns),
+        )
 
         if cfg.speakers_memory.recognise_known:
             jobs.begin_stage(cfg, job, "recognise")

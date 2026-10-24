@@ -188,6 +188,13 @@ if [[ -x "$REPO_DIR/bin/yarn-dock" ]]; then
   fi
 fi
 
+# Video-call audio is recorded by Yarn itself. An older install started a
+# second app for it, and that app asked for permission on every recording.
+AUDIO_LABEL="com.meetingarchive.systemaudio"
+launchctl bootout "gui/$(id -u)/$AUDIO_LABEL" >/dev/null 2>&1 || true
+rm -f "$HOME/Library/LaunchAgents/$AUDIO_LABEL.plist"
+rm -rf "$HOME/Library/Application Support/Yarn/Yarn System Audio.app"
+
 # Keep a brew-prefix `rec` symlink when `ma` lives there, so an older plugin
 # that still points at /opt/homebrew/bin/rec keeps working after reinstall.
 MA_PREFIX="$(cd "$(dirname "$MA_BIN")" && pwd)"

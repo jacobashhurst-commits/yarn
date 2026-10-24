@@ -36,9 +36,9 @@ device_index = -1
 # by playing back the two split files before trusting it.
 #
 # In room mode only mic_channels is used; system audio is ignored entirely.
-# A video call records the other people from the audio the Mac is playing,
-# headphones included. sys_channels is the fallback for a Multi-Output Device
-# that still includes BlackHole.
+# A video call does not use this layout. It records the headset microphone
+# and the audio going to the headphones. sys_channels is only a fallback
+# when an older aggregate device still has a separate BlackHole channel.
 mic_channels = [2]
 sys_channels = [0, 1]
 sample_rate = 16000

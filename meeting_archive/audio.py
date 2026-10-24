@@ -1,21 +1,25 @@
 """ffmpeg wrappers for device discovery, probing and channel splitting.
 
-Recording captures ONE file from a macOS aggregate device that combines the
-microphone and BlackHole. That matters: two separate ffmpeg processes reading
-two separate devices drift apart over a long meeting, and since the whole
-transcript is merged on timestamps, drift would slowly scramble the ordering of
-who said what. One device, one clock, sample-aligned channels.
+A room recording is one microphone file. A video call is two files that start
+together: the headset microphone, and the audio being sent to the headphones.
+Those are different devices. BlackHole never hears a call that is only playing
+in the headphones, and the laptop microphone saved at setup is not the
+microphone in the headset.
 
 The channels are split apart only after recording stops.
 """
 
 from __future__ import annotations
 
+import array
 import json
+import math
 import re
 import shutil
 import subprocess
+import sys
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -88,6 +92,200 @@ def audio_device_index(name: str) -> int | None:
     except AudioError:
         return None
     return next((index for index, current in devices.items() if current == name), None)
+
+
+# A video call has to follow the devices in use right now. The name saved at
+# setup stays the laptop microphone, which is the wrong place to listen once
+# the headphones are on.
+_HEADSET_WORDS = (
+    "airpod",
+    "headphone",
+    "headset",
+    "earpod",
+    "earphone",
+    "buds",
+    "beats",
+)
+
+
+def shell_quote(value: str) -> str:
+    """Single-quote a value for `eval` in bin/rec. Names contain apostrophes."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+@dataclass(frozen=True)
+class CoreDevice:
+    name: str
+    transport: str
+    input_channels: int = 0
+    output_channels: int = 0
+    default_input: bool = False
+    default_output: bool = False
+    output_source: str = ""
+
+
+@dataclass(frozen=True)
+class CallRoute:
+    """Where a video call is recorded from, by device name.
+
+    The far side is everything the Mac is playing, not one output device.
+    `microphone` is the laptop microphone when the headphones are Bluetooth.
+    Opening the AirPods microphone drops them from music quality to phone
+    quality, and the audio that was already playing then never reaches the
+    recording.
+    """
+
+    microphone: str
+    playback: tuple[str, ...] = ()
+
+
+def _transport_kind(raw: str) -> str:
+    text = (raw or "").lower()
+    for kind in (
+        "bluetoothle",
+        "bluetooth",
+        "builtin",
+        "usb",
+        "virtual",
+        "aggregate",
+        "hdmi",
+        "displayport",
+        "thunderbolt",
+        "unknown",
+    ):
+        if kind in text:
+            return kind
+    return "other"
+
+
+def _is_headset(device: CoreDevice) -> bool:
+    if device.transport in {"virtual", "aggregate", "unknown"}:
+        return False
+    blob = f"{device.name} {device.output_source}".lower()
+    if any(word in blob for word in _HEADSET_WORDS):
+        return True
+    # AirPods and most Bluetooth headsets do not have "headphone" in the name.
+    # A USB dock does, in the transport only, so USB alone is not enough.
+    return device.transport in {"bluetooth", "bluetoothle"}
+
+
+def parse_coreaudio_devices(payload: str) -> list[CoreDevice]:
+    """Turn `system_profiler SPAudioDataType -json` into devices."""
+    data = json.loads(payload or "{}")
+    items: list[dict] = []
+    for group in data.get("SPAudioDataType") or []:
+        items.extend(group.get("_items") or [])
+    devices: list[CoreDevice] = []
+    for item in items:
+        name = str(item.get("_name") or "").strip()
+        if not name:
+            continue
+        devices.append(
+            CoreDevice(
+                name=name,
+                transport=_transport_kind(str(item.get("coreaudio_device_transport") or "")),
+                input_channels=int(item.get("coreaudio_device_input") or 0),
+                output_channels=int(item.get("coreaudio_device_output") or 0),
+                default_input=item.get("coreaudio_default_audio_input_device") == "spaudio_yes",
+                default_output=item.get("coreaudio_default_audio_output_device") == "spaudio_yes",
+                output_source=str(item.get("coreaudio_output_source") or ""),
+            )
+        )
+    return devices
+
+
+def _is_bluetooth(device: CoreDevice) -> bool:
+    return device.transport in {"bluetooth", "bluetoothle"}
+
+
+def _laptop_microphone(inputs: list[CoreDevice], configured_mic: str) -> str:
+    """A microphone that does not pull Bluetooth headphones down to phone quality."""
+    builtin = [device for device in inputs if device.transport == "builtin"]
+    if builtin:
+        preferred = next((device for device in builtin if device.default_input), builtin[0])
+        return preferred.name
+    for device in inputs:
+        if device.name == configured_mic and not _is_bluetooth(device):
+            return device.name
+    for device in inputs:
+        if not _is_bluetooth(device):
+            return device.name
+    if inputs:
+        return inputs[0].name
+    return configured_mic
+
+
+def _headset_microphone(playback: CoreDevice, inputs: list[CoreDevice]) -> str:
+    if playback.input_channels > 0:
+        return playback.name
+    headset_inputs = [device for device in inputs if _is_headset(device)]
+    play = playback.name.casefold()
+    for device in headset_inputs:
+        name = device.name.casefold()
+        if play in name or name in play:
+            return device.name
+    if len(headset_inputs) == 1:
+        return headset_inputs[0].name
+    return ""
+
+
+def choose_call_route(devices: list[CoreDevice], configured_mic: str) -> CallRoute:
+    """Pick the headset microphone and the headphone outputs for a video call."""
+    outputs = [device for device in devices if device.output_channels > 0]
+    inputs = [device for device in devices if device.input_channels > 0]
+    headsets = [device for device in outputs if _is_headset(device)]
+    if headsets:
+        seen: list[str] = []
+        for device in headsets:
+            if device.name not in seen:
+                seen.append(device.name)
+        playback = tuple(seen)
+        chosen = next((device for device in headsets if device.default_output), headsets[0])
+    else:
+        default_out = next((device for device in outputs if device.default_output), None)
+        playback = (default_out.name,) if default_out is not None else ()
+        chosen = default_out
+
+    # Bluetooth first. Its microphone and its high-quality output cannot be
+    # used together: opening the microphone retunes the headphones to 24 kHz
+    # and a recording of what was playing comes back silent.
+    microphone = ""
+    wired = [device for device in headsets if not _is_bluetooth(device)]
+    if wired:
+        microphone = _headset_microphone(wired[0], inputs)
+    if not microphone and any(_is_bluetooth(device) for device in headsets):
+        microphone = _laptop_microphone(inputs, configured_mic)
+    if not microphone and chosen is not None and _is_headset(chosen):
+        microphone = _headset_microphone(chosen, inputs)
+    if not microphone:
+        default_in = next((device for device in inputs if device.default_input), None)
+        if default_in is not None and not (
+            any(_is_bluetooth(device) for device in headsets) and _is_bluetooth(default_in)
+        ):
+            microphone = default_in.name
+    if not microphone:
+        microphone = _laptop_microphone(inputs, configured_mic) if inputs else configured_mic
+    return CallRoute(microphone=microphone, playback=playback)
+
+
+def call_route(configured_mic: str) -> CallRoute:
+    """Devices for a video call on this Mac. A profiler failure keeps the mic."""
+    try:
+        proc = subprocess.run(
+            ["system_profiler", "SPAudioDataType", "-json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return CallRoute(microphone=configured_mic)
+    if proc.returncode != 0:
+        return CallRoute(microphone=configured_mic)
+    try:
+        devices = parse_coreaudio_devices(proc.stdout)
+    except (ValueError, TypeError):
+        return CallRoute(microphone=configured_mic)
+    return choose_call_route(devices, configured_mic)
 
 
 def probe(path: Path) -> dict:
@@ -211,6 +409,160 @@ def extract_mono(
         raise AudioError(f"ffmpeg channel extraction failed: {proc.stderr.strip()}")
     tmp.replace(dst)
     return dst
+
+
+def write_silence(dst: Path, duration_s: float, sample_rate: int) -> Path:
+    """Write a mono wav of digital silence.
+
+    A video call whose far side never arrived still needs a sys channel, so
+    the manifest shape does not change. Copying the microphone into that
+    channel would label the wearer as everyone else.
+    """
+    require_tool("ffmpeg")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".partial")
+    duration = max(float(duration_s), 0.05)
+    cmd = [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", f"anullsrc=r={int(sample_rate)}:cl=mono",
+        "-t", f"{duration:.3f}",
+        "-c:a", "pcm_s16le",
+        "-f", "wav",
+        str(tmp),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise AudioError(f"could not write silence: {proc.stderr.strip()}")
+    tmp.replace(dst)
+    return dst
+
+
+# Whisper's segment starts at the last pause and ends at the next one, so a
+# short sentence in the middle of a recording is credited with the whole quiet
+# stretch around it. Speech here is whatever sits above the quiet parts of
+# that same stretch. A fixed loudness gate does not work: this microphone
+# idles around -40 dB, and a quiet room idles around -60 dB.
+_FRAME_S = 0.02
+_SPEECH_MARGIN_DB = 6.0
+_SPEECH_FLOOR_DB = -50.0
+_SPEECH_LOUD_DB = -26.0
+_SPEECH_BRIDGE_S = 0.30
+_SPEECH_MIN_S = 0.08
+_LEVEL_CACHE: dict[tuple[str, int, int], list[float]] = {}
+
+
+def _frame_levels(path: Path) -> list[float] | None:
+    """RMS of each 20ms frame, in dBFS. None when the file is not 16-bit PCM."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _LEVEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        with wave.open(str(path), "rb") as inp:
+            if inp.getsampwidth() != 2 or inp.getnchannels() < 1:
+                return None
+            rate = inp.getframerate() or 16000
+            channels = inp.getnchannels()
+            frame_n = max(1, int(rate * _FRAME_S))
+            levels: list[float] = []
+            while True:
+                raw = inp.readframes(frame_n)
+                count = len(raw) // (2 * channels)
+                if count <= 0:
+                    break
+                samples = array.array("h")
+                samples.frombytes(raw[: count * channels * 2])
+                if sys.byteorder != "little":
+                    samples.byteswap()
+                if channels == 1:
+                    energy = sum(sample * sample for sample in samples)
+                else:
+                    energy = 0.0
+                    step = channels
+                    for index in range(0, count * channels, step):
+                        mixed = sum(samples[index : index + step]) / channels
+                        energy += mixed * mixed
+                rms = math.sqrt(energy / count) if energy > 0 else 0.0
+                levels.append(20.0 * math.log10(rms / 32768.0) if rms else -120.0)
+                if count < frame_n:
+                    break
+    except (wave.Error, OSError, EOFError):
+        return None
+    if not levels:
+        return None
+    if len(_LEVEL_CACHE) > 8:
+        _LEVEL_CACHE.clear()
+    _LEVEL_CACHE[key] = levels
+    return levels
+
+
+def _spoken_frames(levels: list[float]) -> float:
+    """Seconds of frames that are speech, closing gaps shorter than a breath."""
+    if not levels:
+        return 0.0
+    span = len(levels) * _FRAME_S
+    quiet = sorted(levels)[len(levels) // 5]
+    # The stretch is already speech from start to finish. Measuring it would
+    # only trim the breaths inside a sentence the turn already covers.
+    if quiet > _SPEECH_LOUD_DB:
+        return span
+    threshold = max(quiet + _SPEECH_MARGIN_DB, _SPEECH_FLOOR_DB)
+    flags = [level >= threshold for level in levels]
+    bridge = int(round(_SPEECH_BRIDGE_S / _FRAME_S))
+    index = 0
+    while index < len(flags):
+        if flags[index]:
+            index += 1
+            continue
+        end = index
+        while end < len(flags) and not flags[end]:
+            end += 1
+        if index > 0 and flags[index - 1] and end < len(flags) and (end - index) <= bridge:
+            for gap in range(index, end):
+                flags[gap] = True
+        index = end
+    minimum = int(round(_SPEECH_MIN_S / _FRAME_S))
+    index = 0
+    while index < len(flags):
+        if not flags[index]:
+            index += 1
+            continue
+        end = index
+        while end < len(flags) and flags[end]:
+            end += 1
+        if end - index < minimum:
+            for blip in range(index, end):
+                flags[blip] = False
+        index = end
+    return sum(flags) * _FRAME_S
+
+
+def spoken_seconds(path: Path, ranges: list[tuple[float, float]]) -> float | None:
+    """How long `ranges` actually contain speech, or None if the file can't be read.
+
+    Each range is one transcript turn. The quiet padding Whisper leaves around
+    the words does not count. A missing or unreadable file returns None so the
+    caller can keep the turn span.
+    """
+    levels = _frame_levels(path)
+    if levels is None:
+        return None
+    total = 0.0
+    for start_s, end_s in ranges:
+        span = max(0.0, float(end_s) - float(start_s))
+        if span <= 0:
+            continue
+        first = max(0, int(float(start_s) / _FRAME_S))
+        last = min(len(levels), int(math.ceil(float(end_s) / _FRAME_S)))
+        if last <= first:
+            continue
+        total += min(span, _spoken_frames(levels[first:last]))
+    return total
 
 
 def slice_wav(src: Path, dst: Path, start_s: float, end_s: float) -> Path:

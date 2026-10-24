@@ -103,6 +103,10 @@ cat > "$YARN/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>0.3</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Yarn records a video call while you wear headphones. It records what this Mac is playing, on this Mac only. Recording in the room does not use this.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Yarn records a video call while you wear headphones. It records the call audio, not the screen. Recording in the room does not use this.</string>
 </dict>
 </plist>
 PLIST
@@ -113,9 +117,15 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
   "$REPO_DIR/ui/dock/YarnChat.swift" \
   "$REPO_DIR/ui/dock/YarnMenu.swift" \
   "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
-  -framework AppKit
+  "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
+  -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
+  -framework CoreAudio -framework Foundation
 "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$YARN"
+# Sign the bundle, not the temporary linker output, so macOS treats this as
+# Yarn. A linker signature names the file that was compiled and the screen
+# recording grant then does not apply.
 xattr -cr "$YARN" 2>/dev/null || true
+codesign --force --sign - "$YARN"
 
 rm -f "$OUT"
 COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$ROOT" "$OUT"

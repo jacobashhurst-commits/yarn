@@ -41,6 +41,11 @@ SAMPLE_WIDTH = 2  # int16, matching what the rest of the pipeline expects
 # short enough that a misconfigured device is caught before the meeting starts.
 PREFLIGHT_SECONDS = 0.5
 PREFLIGHT_TIMEOUT = 8.0
+# AirPods (and most Bluetooth headsets) deliver real zeros until the radio
+# link is up, which is longer than the half-second check. A missing
+# microphone permission stays zero the whole time, so the wait is bounded
+# and a permission fault is still refused.
+SIGNAL_WAIT_SECONDS = 3.0
 
 # How much audio to write between header rewrites. The header carries the
 # length, so refreshing it means a capture killed outright still leaves a
@@ -164,12 +169,16 @@ def resolve_device(name: str, required_channels: int):
             f"Run 'ma devices' and set audio.device_name."
         )
     if match["max_input_channels"] < required_channels:
+        # A channel layout wider than the device is the aggregate-device
+        # setup. A video call no longer asks for that: the headset microphone
+        # is its own device, and one channel is enough.
+        extra = ""
+        if required_channels > 1:
+            extra = " Use Start Room for the laptop microphone alone."
         raise CaptureError(
             f'device "{match["name"]}" offers {match["max_input_channels"]} '
-            f"input channel(s), but this mode needs {required_channels}. "
-            "Call mode records mic + computer audio and needs a multi-channel "
-            "Aggregate Device (BlackHole + microphone). Use Start Room for "
-            "the laptop microphone alone."
+            f"input channel(s), but this recording needs {required_channels}."
+            f"{extra}"
         )
     return match
 
@@ -205,10 +214,14 @@ def capture(request: Request, stop: threading.Event) -> WavWriter:
         ):
             started = time.monotonic()
             preflight = _collect_preflight(blocks, sample_rate, channels, stop)
+            if preflight is not None and not any(preflight):
+                preflight = _wait_for_signal(blocks, preflight, stop)
             # macOS hands a process without microphone access a stream of
             # zeros rather than refusing, so a capture of literal silence means
             # the permission is missing, not that the room is quiet. Even an
-            # empty room produces some noise in the first half second.
+            # empty room produces some noise. A Bluetooth headset is the
+            # exception at the very start: it is silent until the link is up,
+            # and that wait happens above, before this refusal.
             if preflight is not None and not any(preflight):
                 raise CaptureError(
                     "the audio device is returning digital silence, so nothing "
@@ -279,6 +292,25 @@ def _collect_preflight(
             continue
     if not collected:
         return None
+    return collected
+
+
+def _wait_for_signal(
+    blocks: "Queue[bytes]", collected: bytearray, stop: threading.Event
+) -> bytearray:
+    """Keep the leading zeros until a sample arrives, or the wait runs out.
+
+    The opening half-second of an AirPods microphone is digital silence even
+    when the microphone is working. Refusing there made every headphone
+    recording look like a missing permission. Zeros that last the whole wait
+    are still a refusal: that is what macOS sends when access was not granted.
+    """
+    deadline = time.monotonic() + SIGNAL_WAIT_SECONDS
+    while not any(collected) and time.monotonic() < deadline and not stop.is_set():
+        try:
+            collected.extend(blocks.get(timeout=0.2))
+        except Empty:
+            continue
     return collected
 
 

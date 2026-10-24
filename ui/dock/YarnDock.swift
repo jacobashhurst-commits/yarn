@@ -1,9 +1,10 @@
 // Yarn in the Dock. The menu bar stays; this window is the place you look.
 //
 // It reads the same files the menu bar does, so the progress is the same
-// story. It does not record audio itself. Start and stop call `rec`, which
-// hands the microphone to the recorder job. A Dock app that captured sound
-// would be the process macOS asks, and this one must never be that process.
+// story. The microphone still belongs to the recorder job. The sound a
+// video call plays is recorded in this app, because that permission is
+// per app and a second helper kept asking after Yarn was already allowed.
+// Recording in the room never starts that capture.
 
 import AppKit
 import Darwin
@@ -14,7 +15,12 @@ struct Paths {
     let ma: String
 
     static func load() -> Paths {
-        let url = Bundle.main.url(forResource: "paths", withExtension: "plist")
+        // Paths sit outside the app. Writing them into the bundle would
+        // change its signature, and the screen-recording switch would stop
+        // matching the Yarn the user just turned on.
+        let external = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/Yarn/paths.plist")
+        let bundled = Bundle.main.url(forResource: "paths", withExtension: "plist")
+        let url = FileManager.default.fileExists(atPath: external.path) ? external : bundled
         let dict = (url.flatMap { NSDictionary(contentsOf: $0) as? [String: String] }) ?? [:]
         return Paths(
             root: dict["root"] ?? (NSHomeDirectory() + "/meeting-archive"),
@@ -76,7 +82,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let statusLabel = NSTextField(labelWithString: "Not recording")
     let bigLabel = NSTextField(labelWithString: "")
     let metaLabel = NSTextField(labelWithString: "")
-    let recordButton = NSButton(title: "Start", target: nil, action: nil)
+    let roomButton = NSButton(title: "In the room", target: nil, action: nil)
+    let headphonesButton = NSButton(title: "Headphones", target: nil, action: nil)
+    let recordButton = NSButton(title: "Stop", target: nil, action: nil)
+    var startRow: NSStackView?
     let progressTitle = NSTextField(labelWithString: "")
     let progressStep = NSTextField(wrappingLabelWithString: "")
     let progressDetail = NSTextField(wrappingLabelWithString: "")
@@ -117,11 +126,17 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         background = CommandLine.arguments.contains("--background")
         YarnStatus.shared.start()
+        CallAudio.shared.begin(archiveRoot: paths.root)
         if !background {
             show()
         }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.refresh()
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+            Task { @MainActor in
+                CallAudio.shared.poll()
+            }
         }
         refresh()
     }
@@ -188,17 +203,19 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         bigLabel.isHidden = true
         metaLabel.isHidden = true
 
-        recordButton.target = self
-        recordButton.action = #selector(toggleRecording)
-        recordButton.bezelStyle = .rounded
-        recordButton.bezelColor = YarnColor.blue
-        recordButton.contentTintColor = .white
-        recordButton.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        recordButton.keyEquivalent = "\r"
-        recordButton.setContentHuggingPriority(.required, for: .vertical)
-        recordButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        primeRecordButton(roomButton, action: #selector(startInRoom))
+        primeRecordButton(headphonesButton, action: #selector(startHeadphones))
+        primeRecordButton(recordButton, action: #selector(toggleRecording))
+        recordButton.isHidden = true
 
-        let recordingStack = stack([statusLabel, bigLabel, metaLabel, recordButton], spacing: 6)
+        let starts = NSStackView(views: [roomButton, headphonesButton])
+        starts.orientation = .horizontal
+        starts.distribution = .fillEqually
+        starts.spacing = 8
+        starts.translatesAutoresizingMaskIntoConstraints = false
+        startRow = starts
+
+        let recordingStack = stack([statusLabel, bigLabel, metaLabel, starts, recordButton], spacing: 6)
         recordingStack.detachesHiddenViews = true
         let now = card(recordingStack, owner: self)
 
@@ -294,20 +311,28 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func render(_ snap: Snapshot) {
+        let canRecord = FileManager.default.isExecutableFile(atPath: paths.rec)
         if snap.recording {
             statusLabel.stringValue = "RECORDING"
             bigLabel.stringValue = snap.elapsed
             bigLabel.isHidden = false
             metaLabel.stringValue = snap.mode == "call" ? "On a call" : "In the room"
             metaLabel.isHidden = false
+            startRow?.isHidden = true
+            recordButton.isHidden = false
             recordButton.title = "Stop"
+            recordButton.keyEquivalent = "\r"
         } else {
             statusLabel.stringValue = "NOT RECORDING"
             bigLabel.isHidden = true
             metaLabel.isHidden = true
-            recordButton.title = "Start"
+            startRow?.isHidden = false
+            recordButton.isHidden = true
+            recordButton.keyEquivalent = ""
         }
-        recordButton.isEnabled = FileManager.default.isExecutableFile(atPath: paths.rec)
+        recordButton.isEnabled = canRecord
+        roomButton.isEnabled = canRecord
+        headphonesButton.isEnabled = canRecord
 
         progressTitle.stringValue = snap.heading
         progressStep.stringValue = snap.step
@@ -457,13 +482,29 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return snap
     }
 
+    @objc func startInRoom() {
+        launch(paths.rec, ["start", "room"])
+    }
+
+    @objc func startHeadphones() {
+        launch(paths.rec, ["start", "call"])
+    }
+
     @objc func toggleRecording() {
-        let snap = read()
-        if snap.recording {
+        if read().recording {
             launch(paths.rec, ["stop"])
-        } else {
-            launch(paths.rec, ["start", "room"])
         }
+    }
+
+    private func primeRecordButton(_ button: NSButton, action: Selector) {
+        button.target = self
+        button.action = action
+        button.bezelStyle = .rounded
+        button.bezelColor = YarnColor.blue
+        button.contentTintColor = .white
+        button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        button.setContentHuggingPriority(.required, for: .vertical)
+        button.heightAnchor.constraint(equalToConstant: 32).isActive = true
     }
 
     @objc func processWaiting() { launch(paths.ma, ["process"]) }

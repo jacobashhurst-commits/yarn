@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from .config import Config
-from .models import SpeakerGuess, SpeakerProfile
+from .models import SpeakerGuess, SpeakerProfile, speaker_index
 from .records import write_json_atomic
 
 log = logging.getLogger(__name__)
@@ -301,6 +301,10 @@ def suggest_matches(
 
     scored: list[tuple[float, float, SpeakerProfile, KnownSpeaker]] = []
     for profile in profiles:
+        # The microphone is already the wearer. Matching it here would rename
+        # them to whoever they sound a bit like.
+        if speaker_index(profile.speaker) is None:
+            continue
         vector = embeddings.get(profile.speaker)
         if not vector:
             continue
@@ -402,9 +406,15 @@ def leftover_assignment(
     everyone else on the list he typed. A blank attendee list still means
     nothing is assumed.
     """
+    # The bare microphone profile is the wearer, not a voice still to name.
+    # Counting it would stop the last listed person being paired with the
+    # one remaining voice on the computer audio.
+    diarized = [
+        profile for profile in profiles if speaker_index(profile.speaker) is not None
+    ]
     unnamed = [
         profile
-        for profile in profiles
+        for profile in diarized
         if not str(roster.get(profile.speaker, "")).strip()
     ]
     if len(unnamed) != 1:
@@ -415,7 +425,7 @@ def leftover_assignment(
         if str(value).strip()
     }
     own = {name.casefold() for name in (own_names or [])}
-    channels = {profile.channel for profile in profiles}
+    channels = {profile.channel for profile in diarized}
     # On a call the mic is already Jacob, so his name is not a leftover sys voice.
     drop_own = bool(channels) and "room" not in channels and "mic" not in channels
     leftover_names = []
@@ -909,6 +919,8 @@ def embeddings_for_profiles(
     )
     out: dict[str, list[float]] = {}
     for profile in profiles:
+        if speaker_index(profile.speaker) is None:
+            continue
         vector = voice_embedding(cfg, holder, profile)
         if vector:
             out[profile.speaker] = vector
@@ -1086,6 +1098,8 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
     display = models.speaker_display_indices(transcript.speaker_profiles)
     voices = []
     for profile in transcript.speaker_profiles:
+        if models.speaker_index(profile.speaker) is None:
+            continue
         clips = identity_clips(transcript, profile)
         ranked: list[tuple[str, float]] = []
         if has_audio:

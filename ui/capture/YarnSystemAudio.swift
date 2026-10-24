@@ -1,55 +1,89 @@
-// Records what this Mac is playing into a wav, while headphones stay the
-// output device. A video call's far side never reaches BlackHole when the
-// headphones are the only output, so `rec start call` runs this beside the
-// microphone capture.
+// Records everything this Mac is playing into a wav. `rec start call` runs
+// this beside the microphone.
+//
+// A Core Audio process tap is the wrong listener. It delivered real samples
+// for a test tone and digital silence for a playback that was clearly
+// happening: meeting 2026-10-24T13-48-45 has Jacob on the microphone and
+// 32 seconds of zeros on the other side, and the tap never once logged a
+// sample above the noise floor. ScreenCaptureKit's audio stream is the mix
+// of application audio, the same mix a screen recording gets, which is the
+// audio actually leaving the Mac. It does not open the headphone microphone,
+// so a Bluetooth headset is not dropped from music quality to phone quality.
 //
 //   YarnSystemAudio /path/meeting__call.wav
 //
-// The process starts the tap immediately and writes `<wav>.ready` once macOS
-// has allowed it. Samples are discarded until `<wav>.go` exists, which `rec`
-// creates when the microphone file has started, so the two files line up.
-// SIGINT or SIGTERM finishes the wav header and exits.
+// The process writes `<wav>.ready` once it is listening. Samples are
+// discarded until `<wav>.go` exists, which `rec` creates when the microphone
+// file has started, so the two files line up. SIGINT or SIGTERM finishes the
+// wav header and exits.
 
-import AudioToolbox
 import CoreAudio
+import CoreMedia
 import Foundation
+import ScreenCaptureKit
 
 private let readySuffix = ".ready"
 private let goSuffix = ".go"
 private let errorSuffix = ".error"
 
-private func fourChar(_ status: OSStatus) -> String {
-    let value = UInt32(bitPattern: status)
-    let bytes = [
-        UInt8((value >> 24) & 0xff),
-        UInt8((value >> 16) & 0xff),
-        UInt8((value >> 8) & 0xff),
-        UInt8(value & 0xff),
-    ]
-    if bytes.allSatisfy({ $0 >= 32 && $0 < 127 }) {
-        return String(bytes: bytes, encoding: .utf8) ?? "\(status)"
-    }
-    return "\(status)"
+private let permissionDenied = """
+Turn on Yarn in System Settings, Privacy & Security, Screen & System Audio Recording. \
+If it is already on, turn it off and on again. Quit Yarn, open it again, then press Headphones.
+"""
+
+private let doneSuffix = ".stop"
+private let finishedSuffix = ".done"
+
+private struct CallAudioFailure: Error {
+    let message: String
 }
 
-private func permissionMessage(_ status: OSStatus) -> String {
-    """
-    Yarn could not hear the video call (\(fourChar(status))). macOS keeps that \
-    audio in your headphones unless Yarn is allowed to record it. Open System \
-    Settings, go to Privacy & Security, then Screen & System Audio Recording, \
-    and turn on Yarn System Audio. Then start the video call recording again.
-    """
-}
+private var callAudioLogPath = ""
 
-private func fail(_ wavPath: String, _ message: String) -> Never {
-    fputs(message + "\n", stderr)
+private func say(_ line: String) {
+    fputs(line + "\n", stderr)
     fflush(stderr)
+    guard !callAudioLogPath.isEmpty, let data = (line + "\n").data(using: .utf8) else {
+        return
+    }
+    if FileManager.default.fileExists(atPath: callAudioLogPath),
+       let handle = FileHandle(forWritingAtPath: callAudioLogPath) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        try? handle.close()
+    } else {
+        try? data.write(to: URL(fileURLWithPath: callAudioLogPath))
+    }
+}
+
+private func fail(_ wavPath: String, _ message: String) throws -> Never {
+    say(message)
     try? message.write(
         toFile: wavPath + errorSuffix,
         atomically: true,
         encoding: .utf8
     )
-    exit(1)
+    throw CallAudioFailure(message: message)
+}
+
+private func isPermission(_ error: Error) -> Bool {
+    let ns = error as NSError
+    if ns.domain.contains("ScreenCaptureKit") && ns.code == -3801 {
+        return true
+    }
+    let lowered = String(describing: error).lowercased()
+    return lowered.contains("permission") || lowered.contains("authoriz")
+        || lowered.contains("tcc") || lowered.contains("not allowed")
+        || lowered.contains("declined") || lowered.contains("denied")
+}
+
+private func report(_ error: Error) -> String {
+    let detail = String(describing: error)
+    let message = isPermission(error)
+        ? permissionDenied
+        : "Yarn could not record the audio this Mac is playing. \(detail)"
+    say(message)
+    return message
 }
 
 private final class WavFile {
@@ -165,81 +199,100 @@ private final class SampleRing {
     }
 }
 
-private final class Engine {
+private final class Listen: NSObject, SCStreamOutput, SCStreamDelegate {
+    weak var engine: Engine?
+
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
+        guard type == .audio else { return }
+        engine?.take(sampleBuffer)
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        // Stopping the process also stops the stream. That is not a failure,
+        // and it must not discard a wav that already has the call in it.
+        guard let engine, !engine.stopFlag else { return }
+        fputs("system audio stopped: \(error)\n", stderr)
+        fflush(stderr)
+        engine.stopFlag = true
+    }
+}
+
+private final class Engine: @unchecked Sendable {
     let wavPath: String
     let ring = SampleRing()
+    let listen = Listen()
+    let samples = DispatchQueue(label: "com.meetingarchive.systemaudio.samples")
     let scratch: UnsafeMutablePointer<Int16>
     let scratchCapacity = 16_384
+    var streams: [SCStream] = []
     var stopFlag = false
-    var tapID = AudioObjectID(kAudioObjectUnknown)
-    var aggregateID = AudioObjectID(kAudioObjectUnknown)
-    var procID: AudioDeviceIOProcID?
     var sampleRate: Double = 48_000
-    var channelCount: Int = 0
-    var bytesPerFrame: Int = 0
     var isFloat = true
-    var isNonInterleaved = false
     var bitsPerChannel = 32
+    var heardSignal = false
+    var loggedFormat = false
+    var peak: Float = 0
 
     init(wavPath: String) {
         self.wavPath = wavPath
         scratch = .allocate(capacity: scratchCapacity)
+        listen.engine = self
     }
 
-    func prepare() throws {
-        var excluded: [AudioObjectID] = []
-        if let objectID = Self.processObjectID(pid: getpid()),
-           objectID != AudioObjectID(kAudioObjectUnknown) {
-            excluded = [objectID]
-        }
-        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
-        description.name = "Yarn System Audio"
-        description.uuid = UUID()
-        description.isPrivate = true
-        description.muteBehavior = .unmuted
+    func start() async throws {
+        // One attempt. Asking again in a loop is what kept the permission
+        // dialog on screen after the user had already answered it.
+        if stopFlag { return }
+        try await openCapture()
+    }
 
-        var created = AudioObjectID(kAudioObjectUnknown)
-        let tapStatus = AudioHardwareCreateProcessTap(description, &created)
-        guard tapStatus == noErr, created != AudioObjectID(kAudioObjectUnknown) else {
-            fail(wavPath, permissionMessage(tapStatus))
+    func stopStreams() async {
+        let current = streams
+        streams = []
+        for stream in current {
+            try? await stream.stopCapture()
         }
-        tapID = created
+    }
 
-        let uid = Self.tapUID(tapID) ?? description.uuid.uuidString
-        let aggregate: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Yarn System Audio",
-            kAudioAggregateDeviceUIDKey: UUID().uuidString,
-            kAudioAggregateDeviceIsPrivateKey: NSNumber(value: 1),
-            kAudioAggregateDeviceIsStackedKey: NSNumber(value: 0),
-            kAudioAggregateDeviceTapAutoStartKey: NSNumber(value: 0),
-            kAudioAggregateDeviceTapListKey: [
-                [
-                    kAudioSubTapUIDKey: uid,
-                    kAudioSubTapDriftCompensationKey: NSNumber(value: 1),
-                ],
-            ],
-        ]
-        var aggregateDevice = AudioObjectID(kAudioObjectUnknown)
-        let aggregateStatus = AudioHardwareCreateAggregateDevice(
-            aggregate as CFDictionary, &aggregateDevice
+    func openCapture() async throws {
+        for stream in streams {
+            try? await stream.stopCapture()
+        }
+        streams.removeAll()
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false
         )
-        guard aggregateStatus == noErr else {
-            fail(wavPath, permissionMessage(aggregateStatus))
+        let displays = content.displays
+        guard !displays.isEmpty else {
+            try fail(wavPath, "Yarn could not see a display, so it cannot record the audio this Mac is playing.")
         }
-        aggregateID = aggregateDevice
-        readFormat()
-
-        var proc: AudioDeviceIOProcID?
-        let procStatus = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregateID, nil) { _, inputData, _, _, _ in
-            engine?.consume(inputData)
+        fputs("system audio displays \(displays.count)\n", stderr)
+        fflush(stderr)
+        for display in displays {
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            // Audio is the point. The stream still wants a frame size, and a
+            // full-screen size would spend the recording copying pixels that
+            // are thrown away.
+            config.width = 2
+            config.height = 2
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            config.showsCursor = false
+            config.capturesAudio = true
+            config.excludesCurrentProcessAudio = true
+            config.sampleRate = 48_000
+            config.channelCount = 2
+            let stream = SCStream(filter: filter, configuration: config, delegate: listen)
+            try stream.addStreamOutput(listen, type: .audio, sampleHandlerQueue: samples)
+            try await stream.startCapture()
+            streams.append(stream)
         }
-        guard procStatus == noErr, let proc else {
-            fail(wavPath, "Yarn could not listen to the video call (\(fourChar(procStatus))).")
-        }
-        procID = proc
-        let startStatus = AudioDeviceStart(aggregateID, proc)
-        guard startStatus == noErr else {
-            fail(wavPath, "Yarn could not start listening to the video call (\(fourChar(startStatus))).")
+        guard !streams.isEmpty else {
+            try fail(wavPath, permissionDenied)
         }
         try "ok\n".write(
             toFile: wavPath + readySuffix,
@@ -248,24 +301,22 @@ private final class Engine {
         )
         fputs(
             String(
-                format: "system audio ready at %.0f Hz, %d channel(s)\n",
-                sampleRate,
-                channelCount
+                format: "system audio ready at %.0f Hz, application audio\n",
+                sampleRate
             ),
             stderr
         )
         fflush(stderr)
     }
 
-    func recordUntilStopped() {
+    func recordUntilStopped() throws {
         let goPath = wavPath + goSuffix
+        let stopPath = wavPath + doneSuffix
         while !stopFlag && !FileManager.default.fileExists(atPath: goPath) {
-            usleep(20_000)
+            if FileManager.default.fileExists(atPath: stopPath) { stopFlag = true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
-        if stopFlag {
-            shutdown(writeWav: false)
-            return
-        }
+        if stopFlag { return }
         // Samples from before the microphone file exists would put the other
         // side of the call ahead of you. Drop them and start together.
         ring.clear()
@@ -273,16 +324,17 @@ private final class Engine {
         do {
             wav = try WavFile(path: wavPath, sampleRate: UInt32(sampleRate.rounded()))
         } catch {
-            fail(wavPath, "Yarn could not open the video-call recording: \(error.localizedDescription)")
+            try fail(wavPath, "Yarn could not open the video-call recording: \(error.localizedDescription)")
         }
         let output = UnsafeMutablePointer<Int16>.allocate(capacity: 4096)
         defer { output.deallocate() }
         var loggedFirst = false
         while true {
+            if FileManager.default.fileExists(atPath: stopPath) { stopFlag = true }
             let count = ring.pop(into: output, max: 4096)
             if count == 0 {
                 if stopFlag { break }
-                usleep(10_000)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
                 continue
             }
             if !loggedFirst {
@@ -293,40 +345,84 @@ private final class Engine {
             wav.append(output, count: count)
         }
         wav.finish()
-        shutdown(writeWav: true)
+        say(String(format: "system audio peak %.4f", peak))
     }
 
-    func consume(_ listPointer: UnsafePointer<AudioBufferList>) {
-        let buffers = UnsafeMutableAudioBufferListPointer(
-            UnsafeMutablePointer(mutating: listPointer)
-        )
-        guard channelCount > 0, let first = buffers.first, first.mData != nil else { return }
-        if isNonInterleaved {
-            let width = max(bitsPerChannel / 8, 1)
-            let frames = Int(first.mDataByteSize) / width
-            push(frames: frames) { frame in
-                var sum: Float = 0
-                var heard = 0
-                for buffer in buffers {
-                    guard let pointer = buffer.mData else { continue }
-                    sum += self.sample(pointer, index: frame)
-                    heard += 1
+    func take(_ sampleBuffer: CMSampleBuffer) {
+        noteFormat(sampleBuffer)
+        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frameCount > 0 else { return }
+        do {
+            try sampleBuffer.withAudioBufferList { buffers, _ in
+                guard let first = buffers.first, let data = first.mData else { return }
+                let floatsInFirst = Int(first.mDataByteSize) / MemoryLayout<Float>.size
+                let frames = frameCount
+                if buffers.count > 1 || floatsInFirst <= frames {
+                    push(frames: frames) { frame in
+                        var loudest: Float = 0
+                        for buffer in buffers {
+                            guard let pointer = buffer.mData else { continue }
+                            let value = self.number(pointer, index: frame)
+                            if abs(value) > abs(loudest) { loudest = value }
+                        }
+                        return loudest
+                    }
+                    return
                 }
-                return heard > 0 ? sum / Float(heard) : 0
+                let channels = max(floatsInFirst / frames, 1)
+                push(frames: frames) { frame in
+                    var loudest: Float = 0
+                    for channel in 0..<channels {
+                        let value = self.number(data, index: frame * channels + channel)
+                        if abs(value) > abs(loudest) { loudest = value }
+                    }
+                    return loudest
+                }
             }
+        } catch {
+            fputs("system audio buffer: \(error)\n", stderr)
+            fflush(stderr)
+        }
+    }
+
+    private func noteFormat(_ sampleBuffer: CMSampleBuffer) {
+        guard !loggedFormat,
+              let description = sampleBuffer.formatDescription,
+              let basic = description.audioStreamBasicDescription else {
             return
         }
-        guard let data = first.mData else { return }
-        let frameBytes = max(bytesPerFrame, channelCount * max(bitsPerChannel / 8, 1))
-        guard frameBytes > 0 else { return }
-        let frames = Int(first.mDataByteSize) / frameBytes
-        push(frames: frames) { frame in
-            var sum: Float = 0
-            for channel in 0..<self.channelCount {
-                sum += self.sample(data, index: frame * self.channelCount + channel)
-            }
-            return sum / Float(max(self.channelCount, 1))
+        loggedFormat = true
+        let format = basic
+        if format.mSampleRate > 0 {
+            sampleRate = format.mSampleRate
         }
+        isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        if format.mBitsPerChannel > 0 {
+            bitsPerChannel = Int(format.mBitsPerChannel)
+        }
+        fputs(
+            String(
+                format: "system audio format %.0f Hz, %d channel(s), %d-bit %@\n",
+                format.mSampleRate,
+                format.mChannelsPerFrame,
+                format.mBitsPerChannel,
+                isFloat ? "float" : "integer"
+            ),
+            stderr
+        )
+        fflush(stderr)
+    }
+
+    private func number(_ data: UnsafeMutableRawPointer, index: Int) -> Float {
+        if isFloat {
+            return data.assumingMemoryBound(to: Float.self)[index]
+        }
+        if bitsPerChannel <= 16 {
+            let value = data.assumingMemoryBound(to: Int16.self)[index]
+            return Float(value) / 32_768
+        }
+        let value = data.assumingMemoryBound(to: Int32.self)[index]
+        return Float(value) / 2_147_483_648
     }
 
     private func push(frames: Int, _ sampleAt: (Int) -> Float) {
@@ -335,146 +431,84 @@ private final class Engine {
         while offset < frames {
             let count = min(scratchCapacity, frames - offset)
             for index in 0..<count {
-                scratch[index] = Self.floatToInt16(sampleAt(offset + index))
+                let value = sampleAt(offset + index)
+                let magnitude = abs(value)
+                if magnitude > peak { peak = magnitude }
+                if !heardSignal && magnitude > 0.02 {
+                    heardSignal = true
+                    fputs("system audio heard the headphones\n", stderr)
+                    fflush(stderr)
+                }
+                scratch[index] = Self.floatToInt16(value)
             }
             ring.push(scratch, count: count)
             offset += count
         }
     }
 
-    private func shutdown(writeWav: Bool) {
-        if let procID {
-            AudioDeviceStop(aggregateID, procID)
-            AudioDeviceDestroyIOProcID(aggregateID, procID)
-        }
-        if aggregateID != AudioObjectID(kAudioObjectUnknown) {
-            AudioHardwareDestroyAggregateDevice(aggregateID)
-        }
-        if tapID != AudioObjectID(kAudioObjectUnknown) {
-            AudioHardwareDestroyProcessTap(tapID)
-        }
-        _ = writeWav
-        exit(0)
-    }
-
-    private func readFormat() {
-        var format = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamFormat,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var status = AudioObjectGetPropertyData(aggregateID, &address, 0, nil, &size, &format)
-        if status != noErr || format.mChannelsPerFrame == 0 {
-            address.mScope = kAudioObjectPropertyScopeOutput
-            size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            status = AudioObjectGetPropertyData(aggregateID, &address, 0, nil, &size, &format)
-        }
-        if status != noErr || format.mSampleRate == 0 {
-            address = AudioObjectPropertyAddress(
-                mSelector: kAudioTapPropertyFormat,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &format)
-        }
-        guard status == noErr, format.mChannelsPerFrame > 0 else {
-            fail(wavPath, "Yarn could not read the video-call audio format (\(fourChar(status))).")
-        }
-        sampleRate = format.mSampleRate > 0 ? format.mSampleRate : 48_000
-        channelCount = Int(format.mChannelsPerFrame)
-        bytesPerFrame = Int(format.mBytesPerFrame)
-        bitsPerChannel = Int(format.mBitsPerChannel == 0 ? 32 : format.mBitsPerChannel)
-        isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0
-        isNonInterleaved = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
-    }
-
-    private func sample(_ data: UnsafeMutableRawPointer, index: Int) -> Float {
-        if isFloat {
-            return data.assumingMemoryBound(to: Float.self)[index]
-        }
-        if bitsPerChannel <= 16 {
-            let value = data.assumingMemoryBound(to: Int16.self)[index]
-            return Float(value) / 32768
-        }
-        let value = data.assumingMemoryBound(to: Int32.self)[index]
-        return Float(value) / 2_147_483_648
-    }
-
     private static func floatToInt16(_ value: Float) -> Int16 {
         let clamped = min(1, max(-1, value))
         return Int16(clamped * 32_767)
     }
+}
 
-    private static func processObjectID(pid: pid_t) -> AudioObjectID? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var pid = pid
-        var objectID = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        let status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            UInt32(MemoryLayout<pid_t>.size),
-            &pid,
-            &size,
-            &objectID
-        )
-        guard status == noErr else { return nil }
-        return objectID
+// Screen-recording permission belongs to the app that calls ScreenCaptureKit.
+// A helper with its own name is a second grant, and launching it again is
+// what put the dialog back up. This runs inside Yarn, which is the app the
+// user allows. Recording in the room never calls it.
+@MainActor
+final class CallAudio {
+    static let shared = CallAudio()
+    private var running = false
+    private var engine: Engine?
+    private var root = ""
+
+    func begin(archiveRoot: String) {
+        root = archiveRoot
+        callAudioLogPath = archiveRoot + "/logs/call-audio.log"
     }
 
-    private static func tapUID(_ tapID: AudioObjectID) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyUID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var unmanaged: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        let status = withUnsafeMutablePointer(to: &unmanaged) { pointer in
-            AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, pointer)
+    func poll() {
+        guard !root.isEmpty else { return }
+        if let engine, FileManager.default.fileExists(atPath: engine.wavPath + doneSuffix) {
+            engine.stopFlag = true
         }
-        guard status == noErr, let unmanaged else { return nil }
-        return unmanaged.takeRetainedValue() as String
+        guard !running else { return }
+        let request = root + "/.call-audio-request"
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: request),
+              let modified = attrs[.modificationDate] as? Date,
+              Date().timeIntervalSince(modified) < 30,
+              let text = try? String(contentsOfFile: request, encoding: .utf8),
+              let wav = text.split(whereSeparator: \.isNewline).first.map(String.init),
+              wav.hasSuffix(".wav") else { return }
+        if FileManager.default.fileExists(atPath: wav + doneSuffix)
+            || FileManager.default.fileExists(atPath: wav + ".ready")
+            || FileManager.default.fileExists(atPath: wav + ".error")
+            || FileManager.default.fileExists(atPath: wav + finishedSuffix) {
+            return
+        }
+        running = true
+        let recorder = Engine(wavPath: wav)
+        engine = recorder
+        say("system audio starting \(wav)")
+        Task.detached {
+            var failed: Error?
+            do {
+                try await recorder.start()
+                try recorder.recordUntilStopped()
+            } catch {
+                failed = error
+            }
+            await recorder.stopStreams()
+            if let failed, !FileManager.default.fileExists(atPath: wav + ".error") {
+                let message = report(failed)
+                try? message.write(toFile: wav + ".error", atomically: true, encoding: .utf8)
+            }
+            try? "done\n".write(toFile: wav + finishedSuffix, atomically: true, encoding: .utf8)
+            await MainActor.run {
+                CallAudio.shared.engine = nil
+                CallAudio.shared.running = false
+            }
+        }
     }
 }
-
-// The IO callback only needs the engine, and the signal source lives for the
-// whole process. A global keeps both reachable without a run-loop owner.
-private var engine: Engine?
-
-private func requestStop() {
-    engine?.stopFlag = true
-}
-
-let arguments = CommandLine.arguments
-guard arguments.count >= 2 else {
-    fputs("usage: YarnSystemAudio <wav>\n", stderr)
-    exit(2)
-}
-
-private let recorder = Engine(wavPath: arguments[1])
-engine = recorder
-
-signal(SIGINT, SIG_IGN)
-signal(SIGTERM, SIG_IGN)
-let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-interrupt.setEventHandler { requestStop() }
-interrupt.resume()
-let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-terminate.setEventHandler { requestStop() }
-terminate.resume()
-
-do {
-    try recorder.prepare()
-} catch {
-    fail(arguments[1], "Yarn could not record the video call: \(error.localizedDescription)")
-}
-
-recorder.recordUntilStopped()

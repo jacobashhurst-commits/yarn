@@ -3,6 +3,7 @@
     ma doctor                 check the machine is set up correctly
     ma devices                list audio devices and their channel counts
     ma rec-config             emit shell vars for bin/rec (internal)
+    ma call-devices           headset mic and headphone outputs (internal)
     ma finalize <raw.wav>     split channels, publish to inbox (internal)
     ma recover [<id>]         publish or discard a capture that was refused
     ma notes <id> ...         save popup output (internal)
@@ -387,6 +388,19 @@ def cmd_rec_config(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_call_devices(cfg: Config, args) -> int:
+    """Shell variables describing the headset for `rec start call`.
+
+    Printed for `eval`. Nothing else may go to stdout.
+    """
+    route = audio.call_route(cfg.audio.device_name)
+    print(f"MA_CALL_INPUT={audio.shell_quote(route.microphone)}")
+    print(f"MA_CALL_OUTPUT_COUNT={len(route.playback)}")
+    for index, name in enumerate(route.playback, start=1):
+        print(f"MA_CALL_OUTPUT_{index}={audio.shell_quote(name)}")
+    return 0
+
+
 def cmd_finalize(cfg: Config, args) -> int:
     manifest = pipeline.finalize(
         cfg,
@@ -724,7 +738,10 @@ def cmd_speakers(cfg: Config, args) -> int:
     for profile in profiles:
         index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
         named = roster.get(profile.speaker, "")
-        who = named or f"Speaker {index} (unidentified)"
+        if models.speaker_index(profile.speaker) is None and profile.channel == "mic":
+            who = named or cfg.own_label
+        else:
+            who = named or f"Speaker {index} (unidentified)"
         print(
             f"  [{profile.speaker}] {who} -- "
             f"{models.format_duration(profile.speaking_s)}, {profile.turns} turn(s), "
@@ -1244,6 +1261,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("rec-config", help="shell vars for bin/rec").set_defaults(
         func=cmd_rec_config
     )
+    sub.add_parser(
+        "call-devices", help="headset microphone and headphone outputs"
+    ).set_defaults(func=cmd_call_devices)
 
     p = sub.add_parser("finalize", help="split channels and publish to the inbox")
     p.add_argument("raw", help="path to the raw multi-channel capture")
@@ -1512,8 +1532,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = load_config(args.config)
-    # rec-config is eval'd by the shell, so it must emit nothing but variables.
-    if args.command != "rec-config":
+    # These two are eval'd by the shell, so they must emit nothing but variables.
+    if args.command not in ("rec-config", "call-devices"):
         setup_logging(cfg, args.verbose)
     try:
         return args.func(cfg, args)

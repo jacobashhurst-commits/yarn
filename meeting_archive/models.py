@@ -61,8 +61,15 @@ def speaker_display_indices(profiles: list) -> dict[str, int]:
     merges absorb other clusters. The identify window and transcript must not
     show that raw suffix when only five distinct voices remain.
     """
+    # The microphone profile uses the bare channel id. Numbering it would
+    # steal "Speaker 1" from the first person on the computer audio and
+    # rename them in every summary already written.
     ordered = sorted(
-        profiles,
+        (
+            profile
+            for profile in profiles
+            if speaker_index(str(getattr(profile, "speaker", "") or "")) is not None
+        ),
         key=lambda profile: (
             float(getattr(profile, "first_at", 0.0) or 0.0),
             str(getattr(profile, "speaker", "")),

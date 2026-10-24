@@ -24,6 +24,7 @@ from meeting_archive.capture import (
     Request,
     WavWriter,
     _collect_preflight,
+    _wait_for_signal,
     resolve_device,
 )
 from meeting_archive.config import Config
@@ -153,7 +154,7 @@ def test_resolve_device_finds_an_exact_name(monkeypatch):
 
 
 def test_resolve_device_refuses_too_few_channels(monkeypatch):
-    """Call mode needs the mic and system audio; one channel cannot carry both."""
+    """A channel layout wider than the device is a broken aggregate, not a headset."""
     install_fake_devices(monkeypatch, [MIC, AGGREGATE])
     with pytest.raises(CaptureError, match="needs 3") as caught:
         resolve_device("MacBook Pro Microphone", 3)
@@ -210,6 +211,21 @@ def test_preflight_recognises_digital_silence():
     blocks.put(bytes(2 * 16000))
     collected = _collect_preflight(blocks, 16000, 1, threading.Event())
     assert collected is not None
+    assert not any(collected)
+
+
+def test_a_headset_that_wakes_after_the_opening_silence_is_kept():
+    """AirPods are digital silence for the first moment, then a real signal."""
+    blocks: Queue[bytes] = Queue()
+    blocks.put(b"\x01\x00\x00\x00")
+    collected = _wait_for_signal(blocks, bytearray(32000), threading.Event())
+    assert any(collected)
+
+
+def test_silence_that_never_ends_is_still_refused(monkeypatch):
+    """A missing microphone permission does not start producing samples later."""
+    monkeypatch.setattr("meeting_archive.capture.SIGNAL_WAIT_SECONDS", 0.2)
+    collected = _wait_for_signal(Queue(), bytearray(32000), threading.Event())
     assert not any(collected)
 
 

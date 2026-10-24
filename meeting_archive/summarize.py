@@ -377,6 +377,12 @@ def _summary_prompt(
 Use only facts explicitly present below. Do not infer identities, motives,
 decisions, or action items. If speech is unclear, omit it.
 
+Each label before a colon is a person who spoke. When more than one person
+speaks, the overview and the key points must say what each of them said.
+The person on the microphone and a person heard from the computer are
+different people. Do not leave either of them out, and do not turn one
+person's words into a description of the meeting instead of something they said.
+
 Distinguish, and never mix:
 - Decision (agreed in the meeting)
 - Suggestion (proposed, not agreed)

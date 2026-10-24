@@ -332,6 +332,42 @@ def test_markdown_collapses_duplicate_names_and_coalesces_turns(cfg):
     assert "**[0:00:00–0:00:04] Charles**" in markdown
 
 
+def test_a_call_page_lists_the_microphone_and_the_computer(cfg):
+    """Who spoke and Voices include the wearer, not only the computer audio."""
+    turns = [
+        Turn(SYS, 0.0, 4.0, "pixels to hide the camera", speaker="sys-1"),
+        Turn(MIC, 1.0, 8.0, "This is Headphone Test 3, and this is Jacob."),
+    ]
+    transcript = Transcript(
+        meeting_id="2026-10-24T14-24-42",
+        turns=turns,
+        speaker_profiles=profile_speakers(turns),
+        duration_s=14.0,
+        title="Headphone test 3",
+        summary=(
+            "**Key points**\n"
+            "- Speaker 1 talked about the camera.\n"
+            "- Jacob said this is a test."
+        ),
+        diarize_model="test-model",
+    )
+    notes = {"speakers": {"sys-1": "Marquess"}, "attendees": "Jacob, Marquess"}
+    roster = {"sys-1": "Marquess"}
+    markdown = records.render_markdown(
+        transcript, cfg.turn_labeller(roster), notes=notes
+    )
+    assert "- **Marquess**" in markdown
+    assert "- **Jacob**" in markdown
+    assert "(2 voices)" in markdown
+    assert transcript.unnamed_speakers(roster) == []
+    html = records.render_transcript_html(
+        transcript, cfg.turn_labeller(roster), notes=notes
+    )
+    who = html.split("Who spoke", 1)[1].split("Voices", 1)[0]
+    assert "Marquess" in who
+    assert "Jacob" in who
+
+
 @needs_ffmpeg
 def test_peak_dbfs_separates_digital_silence_from_signal(tmp_path):
     loud = make_wav(tmp_path / "loud.wav", [True])
@@ -403,6 +439,23 @@ def test_finalize_call_falls_back_to_blackhole_when_the_tap_is_silent(cfg):
     manifest = pipeline.finalize(cfg, raw, mode="call")
     sys_ = cfg.inbox_dir / manifest.channels[SYS]
     assert mean_volume_db(sys_) > -50
+    assert not call.exists()
+
+
+@needs_ffmpeg
+def test_finalize_call_keeps_a_headset_mic_and_does_not_copy_it_to_the_far_side(cfg):
+    """The microphone file is the headset, one channel. The saved aggregate
+    layout indexes a channel that file does not have. A silent headphone
+    recording must not be replaced with the wearer's own voice."""
+    cfg.audio.mic_channels = [2]
+    cfg.audio.sys_channels = [0]
+    raw = make_wav(cfg.in_progress_dir / "2026-10-24T08-40-00__raw.wav", [True])
+    call = make_wav(cfg.in_progress_dir / "2026-10-24T08-40-00__call.wav", [False])
+    manifest = pipeline.finalize(cfg, raw, mode="call")
+    mic = cfg.inbox_dir / manifest.channels[MIC]
+    sys_ = cfg.inbox_dir / manifest.channels[SYS]
+    assert mean_volume_db(mic) > -50
+    assert audio.is_silent(sys_)
     assert not call.exists()
 
 

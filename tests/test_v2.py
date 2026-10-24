@@ -816,6 +816,34 @@ def test_leftover_assignment_does_not_guess_when_two_voices_remain():
     ) is None
 
 
+def test_leftover_assignment_ignores_the_known_microphone():
+    profiles = [
+        SpeakerProfile(speaker="mic", channel=MIC, speaking_s=12.0),
+        SpeakerProfile(speaker="sys-1", channel=SYS),
+        SpeakerProfile(speaker="sys-2", channel=SYS),
+    ]
+    result = leftover_assignment(
+        profiles,
+        {"sys-1": "Adam"},
+        ["Jacob", "Adam", "Marina"],
+        ["Jacob"],
+    )
+    assert result == ("sys-2", "Marina")
+
+
+def test_voice_match_does_not_rename_the_microphone():
+    people = [KnownSpeaker(name="Adam", confirmation_count=5, embedding=[1.0, 0.0])]
+    guesses = suggest_matches(
+        [
+            SpeakerProfile(speaker="mic", channel=MIC),
+            SpeakerProfile(speaker="sys-1", channel=SYS),
+        ],
+        people,
+        embeddings={"mic": [1.0, 0.0], "sys-1": [0.0, 1.0]},
+    )
+    assert [g.speaker for g in guesses] == []
+
+
 def test_leftover_assignment_ignores_own_name_on_a_call():
     profiles = [
         SpeakerProfile(speaker="sys-1", channel=SYS),

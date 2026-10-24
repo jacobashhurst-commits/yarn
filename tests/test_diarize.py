@@ -53,6 +53,7 @@ from meeting_archive.models import (
     speaker_key,
 )
 from meeting_archive.names import infer_speaker_names, speaker_guess_map
+from meeting_archive.audio import spoken_seconds
 from meeting_archive.quips import pick_quip, profile_speakers, score_sentence, trim
 from meeting_archive.records import Transcript
 
@@ -483,11 +484,66 @@ def test_profiles_are_ordered_by_first_appearance():
     ]
     profiles = profile_speakers(turns, guesses={"room-1": "Ana"})
 
-    assert [p.speaker for p in profiles] == ["room-1", "room-2"]
+    assert [p.speaker for p in profiles] == ["room-1", "mic", "room-2"]
     assert profiles[0].guess == "Ana"
-    assert profiles[1].turns == 2
-    assert profiles[1].speaking_s == pytest.approx(6.0)
-    assert "Brighton" in profiles[1].quip
+    assert profiles[2].turns == 2
+    assert profiles[2].speaking_s == pytest.approx(6.0)
+    assert "Brighton" in profiles[2].quip
+
+
+def test_a_headphone_call_profiles_both_sides():
+    """The microphone and the computer audio are two speakers, not one."""
+    turns = [
+        Turn(SYS, 0.0, 4.0, "pixels to hide the camera. That is so clean.", speaker="sys-1"),
+        Turn(MIC, 1.0, 8.0, "This is Headphone Test 3, and this is Jacob."),
+        Turn(SYS, 4.0, 7.0, "The indicator has become very easy to read.", speaker="sys-1"),
+    ]
+    profiles = profile_speakers(turns)
+    assert [p.speaker for p in profiles] == ["sys-1", "mic"]
+    assert profiles[0].channel == SYS
+    assert profiles[1].channel == MIC
+    assert "Jacob" in profiles[1].quip
+    # Numbering stays with the diarized voice, so an old "Speaker 1" summary
+    # still names the computer audio after the microphone is listed too.
+    assert speaker_display_indices(profiles) == {"sys-1": 1}
+
+
+def _pcm(path: Path, pieces: list[tuple[float, int]], rate: int = 16000) -> None:
+    """Mono 16-bit wav. Each piece is (seconds, sample value)."""
+    import array
+    import wave
+
+    frames = array.array("h")
+    for seconds, sample in pieces:
+        frames.extend([sample] * int(seconds * rate))
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(frames.tobytes())
+
+
+def test_speaking_time_ignores_the_quiet_around_the_words(tmp_path):
+    """A 12s Whisper span around a short sentence is not 12s of speech.
+
+    The microphone idles well above digital silence, so the quiet has to be
+    judged against this recording rather than a fixed loudness.
+    """
+    wav = tmp_path / "mic.wav"
+    _pcm(wav, [(2.0, 300), (0.4, 4000), (2.0, 300)])
+    measured = spoken_seconds(wav, [(0.0, 4.4)])
+    assert measured == pytest.approx(0.4, abs=0.06)
+
+    turns = [Turn(MIC, 0.0, 4.4, "This is Jacob.")]
+    profiles = profile_speakers(turns, audio={"mic": wav})
+    assert profiles[0].speaking_s == pytest.approx(0.4, abs=0.06)
+    assert profile_speakers(turns)[0].speaking_s == pytest.approx(4.4)
+
+
+def test_a_turn_that_is_all_speech_keeps_its_span(tmp_path):
+    wav = tmp_path / "sys.wav"
+    _pcm(wav, [(1.5, 5000)])
+    assert spoken_seconds(wav, [(0.0, 1.5)]) == pytest.approx(1.5, abs=0.04)
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +706,7 @@ def test_unnamed_speakers(tmp_path):
         [
             Turn(ROOM, 0.0, 5.0, "I handle the billing integrations.", speaker="room-1"),
             Turn(ROOM, 6.0, 9.0, "I came up from Brighton today.", speaker="room-2"),
+            Turn(MIC, 1.0, 3.0, "This is Jacob."),
         ]
     )
     pending = transcript.unnamed_speakers({"room-1": "Ana"})

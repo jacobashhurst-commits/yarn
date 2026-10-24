@@ -6,9 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-# GitHub ZIP downloads are quarantined. Once macOS has allowed this file to
-# run, strip that flag so the next click is quiet.
-xattr -cr "$ROOT" 2>/dev/null || true
+# GitHub ZIP downloads are quarantined. Remove only that flag. Stripping
+# every attribute is what made a signed app look damaged.
+xattr -dr com.apple.quarantine "$ROOT" 2>/dev/null || true
 
 # The release zip keeps the program in a hidden folder. A checkout keeps it here.
 # Moving only this command onto the Desktop leaves the program behind.

@@ -10,7 +10,7 @@ own that something is worth capturing.
 ## How it works
 
 ```
-rec start ──▶ microphone from the aggregate device; a video call also records what the Mac is playing
+rec start ──▶ room: the laptop microphone. video call: the laptop microphone and everything the Mac is playing
 rec stop  ──▶ splits the channels, publishes a manifest to inbox/, offers a popup
                 │                                       │
                 ▼                                       ▼
@@ -35,14 +35,18 @@ distinguishes `Speaker 1:`, `Speaker 2:`, and so on. Until you confirm their
 names the system never guesses labels. If diarization is unavailable, every
 turn safely falls back to `Unknown:`.
 
-**`rec start call`** — a video call while you wear headphones. Your
-microphone is you. Everyone else is recorded from the audio this Mac is
-playing, so the speakers can stay quiet and the headphones can stay the output
-device. The first time, macOS asks you to allow Yarn System Audio under
-Privacy & Security → Screen & System Audio Recording. Your channel reads
-`Jacob:`; the call is diarized into meeting-local speakers. Wear headphones so
-the microphone does not also hear the far side and the transcript says
-everything twice.
+**`rec start call`** — a video call while you wear headphones. Your voice
+is the laptop microphone. Everyone else is everything this Mac is playing,
+so a YouTube video or a call in the headphones is recorded and the speakers
+can stay quiet. The headphones stay in music quality: using a Bluetooth
+microphone at the same time drops them to phone quality and the recording of
+what you were hearing comes back silent. The first time you record a video
+call, turn on Yarn under Privacy & Security → Screen & System Audio
+Recording. If it is already on from an older copy, turn it off and on
+again, then quit Yarn and open it again. Recording in the room does not
+ask. Your channel reads `Jacob:`; the call is diarized into
+meeting-local speakers. Wear headphones so the laptop microphone does not
+also hear the far side and the transcript says everything twice.
 
 Room mode is not just call mode with a quiet second channel. If it were, every
 word your colleagues said would be attributed to you — which is worse than no
@@ -88,23 +92,27 @@ pip install -e .
 cp config.example.toml ~/.config/meeting-archive/config.toml
 ```
 
-### 2. Capture system audio (video call)
+### 2. A video call in headphones
 
-`rec start call` hears the other people from the audio this Mac is playing,
-including audio that is only going to headphones. You do not build a
-Multi-Output Device, and you do not turn the speakers up. The first recording
-asks for permission: System Settings → Privacy & Security → Screen & System
-Audio Recording → Yarn System Audio.
+`rec start call` records two things: your voice on the laptop microphone, and
+everything this Mac is playing, including audio that is only going to the
+headphones. You do not build a Multi-Output Device, and you do not turn the
+speakers up. The first video call needs one switch: System Settings →
+Privacy & Security → Screen & System Audio Recording → Yarn.
+If that switch is already on from an older copy of Yarn, turn it off and
+on again, then quit Yarn and open it again. Recording in the room does not ask.
+
+A Bluetooth headset cannot do both of its jobs at once. Opening its
+microphone drops the headphones from music quality to phone quality, and the
+audio that was already playing is then missing from the recording. Yarn
+leaves that microphone alone. A wired headset microphone is used when it has
+one, because that does not retune the headphones.
 
 Skip the aggregate-device steps when you only use `rec start room`. That mode
 captures an in-room meeting, or a call played on the laptop speakers, through
-the microphone alone.
-
-The microphone for a video call still comes from the aggregate device below.
-BlackHole can stay in that device. Yarn no longer reads the call from it. An
-older Multi-Output Device that included BlackHole remains a fallback if the
-system-audio recorder is missing, and it is silent whenever the headphones are
-the only output.
+the microphone alone. An older aggregate that still contains BlackHole is
+only a fallback for the far side, and it is silent whenever the headphones
+are the only output.
 
 1. Open **Audio MIDI Setup**
 2. `+` at the bottom left → **Create Aggregate Device**

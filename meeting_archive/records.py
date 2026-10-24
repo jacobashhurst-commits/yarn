@@ -300,7 +300,8 @@ class Transcript:
         return [
             p
             for p in self.speaker_profiles
-            if not str(roster.get(p.speaker, "")).strip()
+            if speaker_index(p.speaker) is not None
+            and not str(roster.get(p.speaker, "")).strip()
         ]
 
     @classmethod
@@ -358,6 +359,27 @@ def _role_text(
         )
         if bit
     )
+
+
+def _across(seconds, turns) -> str:
+    count = int(turns or 0)
+    word = "turn" if count == 1 else "turns"
+    return f"{format_duration(seconds)} across {count} {word}"
+
+
+def _voice_name(profile, roster: dict, label_turn) -> str:
+    """The name to show for one profile.
+
+    A confirmed name wins. The microphone has no speaker key and no dialog,
+    because that channel is already the wearer. Everyone else stays unnamed
+    until they are identified.
+    """
+    named = str((roster or {}).get(profile.speaker, "")).strip()
+    if named:
+        return named
+    if speaker_index(profile.speaker) is None and profile.channel == "mic":
+        return label_turn(Turn("mic", 0.0, 0.0, ""))
+    return ""
 
 
 def render_markdown(
@@ -451,7 +473,7 @@ def render_markdown(
         named: dict[str, dict] = {}
         unnamed: list = []
         for profile in transcript.speaker_profiles:
-            name = str(roster.get(profile.speaker, "")).strip()
+            name = _voice_name(profile, roster, label_turn)
             if not name:
                 unnamed.append(profile)
                 continue
@@ -467,9 +489,7 @@ def render_markdown(
                 bucket["quip"] = profile.quip
                 bucket["quip_s"] = speaking
         for bucket in named.values():
-            detail = (
-                f"{format_duration(bucket['speaking_s'])} across {bucket['turns']} turns"
-            )
+            detail = _across(bucket["speaking_s"], bucket["turns"])
             role = _role_text(bucket["name"], titles, companies)
             line = f"- **{bucket['name']}**"
             if role:
@@ -481,10 +501,7 @@ def render_markdown(
         display = speaker_display_indices(transcript.speaker_profiles)
         for profile in unnamed:
             index = display.get(profile.speaker) or speaker_index(profile.speaker) or "?"
-            detail = (
-                f"{format_duration(profile.speaking_s)} across {profile.turns} turns, "
-                "not yet identified"
-            )
+            detail = _across(profile.speaking_s, profile.turns) + ", not yet identified"
             line = f"- **Speaker {index}** ({detail})"
             if profile.quip:
                 line += f' said: "{profile.quip}"'
@@ -647,7 +664,7 @@ def render_transcript_html(
         named: dict[str, dict] = {}
         unnamed: list = []
         for profile in transcript.speaker_profiles:
-            name = str(roster.get(profile.speaker, "")).strip()
+            name = _voice_name(profile, roster, label_turn)
             if not name:
                 unnamed.append(profile)
                 continue
@@ -670,8 +687,8 @@ def render_transcript_html(
             )
             voice_rows.append(
                 f'<li><div class="item">{titled(bucket["name"])}</div>'
-                f'<div class="mono">{format_duration(bucket["speaking_s"])} '
-                f'across {bucket["turns"]} turns</div>{quip}</li>'
+                f'<div class="mono">{htmltheme.html_escape(_across(bucket["speaking_s"], bucket["turns"]))}'
+                f"</div>{quip}</li>"
             )
         display = speaker_display_indices(transcript.speaker_profiles)
         for profile in unnamed:
@@ -683,8 +700,8 @@ def render_transcript_html(
             )
             voice_rows.append(
                 f'<li><div class="item">Speaker {htmltheme.html_escape(str(index))}</div>'
-                f'<div class="mono">{format_duration(profile.speaking_s)} '
-                f"across {profile.turns} turns, not yet identified</div>{quip}</li>"
+                f'<div class="mono">{htmltheme.html_escape(_across(profile.speaking_s, profile.turns))}'
+                f", not yet identified</div>{quip}</li>"
             )
 
     attendees = str(notes.get("attendees") or "").strip()
@@ -720,7 +737,7 @@ def render_transcript_html(
         display = speaker_display_indices(transcript.speaker_profiles)
         totals: dict[str, float] = {}
         for profile in transcript.speaker_profiles:
-            name = str(roster.get(profile.speaker, "")).strip()
+            name = _voice_name(profile, roster, label_turn)
             if not name:
                 index = display.get(profile.speaker) or speaker_index(profile.speaker) or "?"
                 name = f"Speaker {index}"

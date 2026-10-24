@@ -204,6 +204,10 @@ final class Controller: NSObject, NSWindowDelegate {
             "Yarn is ready to remember the things you won't.",
             size: 15, weight: .regular, color: ink
         ))
+        doneBox.addArrangedSubview(label(
+            "For a video call, turn on Yarn under Privacy & Security, Screen & System Audio Recording. If Yarn is already on, turn it off and on again. Then click Open Yarn. Recording in the room does not ask.",
+            size: 13, weight: .regular, color: ink
+        ))
         openButton.target = self
         openButton.action = #selector(openYarn)
         openButton.keyEquivalent = "\r"
@@ -601,8 +605,16 @@ final class Controller: NSObject, NSWindowDelegate {
             doneNote.isHidden = false
             return
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: app))
-        NSApp.terminate(nil)
+        // Screen recording is read when Yarn opens. A copy left running from
+        // Setup started before the switch was turned on, so quit it first.
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "com.meetingarchive.yarn")
+        for process in running {
+            process.terminate()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: app))
+            NSApp.terminate(nil)
+        }
     }
 
     @objc private func cancelRun() {

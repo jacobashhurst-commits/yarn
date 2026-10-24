@@ -36,15 +36,40 @@ fi
 
 [[ -f "$MARK" ]] || { echo "yarn-dock: logo is missing at $MARK" >&2; exit 1; }
 # A normal Mac has no Swift compiler. The download includes Yarn.app already
-# built. Compiling is for this checkout, where the source may be newer.
+# built. Compiling a second copy here would be a different program, and the
+# screen-recording switch would still point at the one in the download.
 
 # Replacing a running binary fails, and a stale Dock icon would be the old app.
 osascript -e 'tell application "Yarn" to quit' >/dev/null 2>&1 || true
 sleep 0.4
 
-mkdir -p "$APP_DIR/Contents/MacOS" "$RES"
+SUPPORT="$HOME/Library/Application Support/Yarn"
+mkdir -p "$SUPPORT"
+# Outside the bundle on purpose. A path written into the app changes its
+# signature, and macOS then treats the screen-recording switch as a lie.
+cat > "$SUPPORT/paths.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>root</key><string>$MA_ROOT</string>
+  <key>rec</key><string>$REC</string>
+  <key>ma</key><string>$MA_BIN</string>
+</dict>
+</plist>
+PLIST
 
-cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+cdhash() {
+  codesign -dvvv "$1" 2>&1 | sed -n 's/^CDHash=//p' | head -1
+}
+OLD_HASH=""
+if [[ -d "$APP_DIR" ]]; then
+  OLD_HASH="$(cdhash "$APP_DIR")"
+fi
+
+write_info_plist() {
+  mkdir -p "$APP_DIR/Contents/MacOS" "$RES"
+  cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -59,39 +84,51 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>0.3</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Yarn records a video call while you wear headphones. It records what this Mac is playing, on this Mac only. Recording in the room does not use this.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Yarn records a video call while you wear headphones. It records the call audio, not the screen. Recording in the room does not use this.</string>
 </dict>
 </plist>
 PLIST
+  cp -f "$MARK" "$RES/yarn-mark.png"
+}
 
-cp -f "$MARK" "$RES/yarn-mark.png"
-cat > "$RES/paths.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>root</key><string>$MA_ROOT</string>
-  <key>rec</key><string>$REC</string>
-  <key>ma</key><string>$MA_BIN</string>
-</dict>
-</plist>
-PLIST
+seal_app() {
+  xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
+  if ! codesign --verify --deep --strict "$APP_DIR" >/dev/null 2>&1; then
+    codesign --force --sign - "$APP_DIR"
+  fi
+}
 
-BUNDLED="$REPO_DIR/Yarn.app/Contents/MacOS/Yarn"
-if command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
+BUNDLED_APP="$REPO_DIR/Yarn.app"
+if [[ -x "$BUNDLED_APP/Contents/MacOS/Yarn" ]]; then
+  rm -rf "$APP_DIR"
+  mkdir -p "$(dirname "$APP_DIR")"
+  ditto "$BUNDLED_APP" "$APP_DIR"
+  seal_app
+elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
+  write_info_plist
   "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
   swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP_BIN.partial" \
     "$SWIFT_SRC" "$(dirname "$SWIFT_SRC")/YarnChat.swift" \
     "$(dirname "$SWIFT_SRC")/YarnMenu.swift" \
-    "$REPO_DIR/ui/welcome/YarnWelcome.swift" -framework AppKit
+    "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
+    "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
+    -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
+    -framework CoreAudio -framework Foundation
   mv -f "$APP_BIN.partial" "$APP_BIN"
-elif [[ -x "$BUNDLED" ]]; then
-  cp -f "$BUNDLED" "$APP_BIN"
-  if [[ -f "$REPO_DIR/Yarn.app/Contents/Resources/Yarn.icns" ]]; then
-    cp -f "$REPO_DIR/Yarn.app/Contents/Resources/Yarn.icns" "$RES/Yarn.icns"
-  fi
+  # The linker signs the temporary filename, so TCC recorded this app as
+  # "Yarn.partial" and then refused the grant the user had given Yarn.
+  codesign --force --sign - "$APP_DIR"
 else
   echo "Yarn could not add an Applications icon on this Mac. The menu bar still works." >&2
   exit 0
+fi
+
+NEW_HASH="$(cdhash "$APP_DIR")"
+if [[ -n "$NEW_HASH" && "$NEW_HASH" != "$OLD_HASH" ]]; then
+  : > "$SUPPORT/screen-recording-changed"
 fi
 
 if [[ "${1:-}" == "--install" ]]; then
@@ -128,8 +165,11 @@ if [[ -x "$LSREGISTER" ]]; then
   "$LSREGISTER" -f "$APP_DIR" >/dev/null 2>&1 || true
 fi
 
-# A running Yarn keeps the old binary. Quit it so the menu bar icon is this build.
-osascript -e 'tell application "Yarn" to quit' >/dev/null 2>&1 || true
-sleep 0.4
-open "$APP_DIR"
+# Setup opens Yarn itself, after the screen-recording switch. Opening it
+# here would start the app before that switch applies.
+if [[ "${1:-}" != "--install" ]]; then
+  osascript -e 'tell application "Yarn" to quit' >/dev/null 2>&1 || true
+  sleep 0.4
+  open "$APP_DIR"
+fi
 echo "Yarn is in the Dock ($APP_DIR)"
