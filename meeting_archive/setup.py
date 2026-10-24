@@ -587,6 +587,23 @@ def adopt_python311() -> None:
     os.execv(found, [found, *sys.argv])
 
 
+def mac_major() -> int:
+    raw = platform.mac_ver()[0]
+    head = raw.split(".")[0] if raw else ""
+    return int(head) if head.isdigit() else 0
+
+
+def screen_recording_row() -> str:
+    """The Settings name for the video-call permission.
+
+    Ventura (13) and Sonoma (14) call the row Screen Recording. Sequoia (15)
+    renamed it, and that name is still used on a new Mac today.
+    """
+    if mac_major() >= 15:
+        return "Screen & System Audio Recording"
+    return "Screen Recording"
+
+
 def step_prereqs(repo: Path) -> None:
     if platform.system() != "Darwin":
         raise RuntimeError("This installer is Mac only for now.")
@@ -595,6 +612,10 @@ def step_prereqs(repo: Path) -> None:
             "Yarn runs on Apple Silicon Macs (M1 or newer). This Mac is Intel, so Yarn cannot install here."
         )
     mac = platform.mac_ver()[0] or "this Mac"
+    if mac_major() < 13:
+        raise RuntimeError(
+            f"Yarn needs macOS 13 (Ventura) or newer. This Mac is macOS {mac}."
+        )
     emit({"type": "log", "id": "prereqs", "text": f"macOS {mac}, Apple Silicon. New enough to run Yarn."})
     if which("brew"):
         emit({"type": "log", "id": "prereqs", "text": "Homebrew is already on this Mac."})
@@ -1403,46 +1424,78 @@ def _prefetch_search_embedder(repo: Path) -> None:
 
 
 def allow_call_audio(ma: Path) -> None:
-    """Video-call audio is recorded by Yarn itself.
+    """Ask the way a new Mac expects, on Ventura through the current macOS.
 
-    macOS does not show an Allow button for this. The switch under Screen &
-    System Audio Recording is the grant, and it is tied to this exact copy of
-    Yarn. A second app used to ask on every recording. Recording in the room
-    does not use the switch.
+    Older macOS shows an Allow button when Yarn asks. Newer macOS does not,
+    and the switch in Privacy & Security is the whole grant. Recording in
+    the room does not ask.
     """
     del ma
-    home = Path.home()
-    uid = os.getuid()
-    run(["launchctl", "bootout", f"gui/{uid}/com.meetingarchive.systemaudio"], timeout=15)
-    (home / "Library/LaunchAgents/com.meetingarchive.systemaudio.plist").unlink(missing_ok=True)
-    helper = home / "Library/Application Support/Yarn/Yarn System Audio.app"
-    if helper.exists():
-        shutil.rmtree(helper, ignore_errors=True)
-    # The login item may already have opened Yarn, before the switch was set.
-    # Screen recording is read when the app opens, so this copy has to quit.
-    run(["osascript", "-e", 'tell application "Yarn" to quit'], timeout=20)
-    marker = home / "Library/Application Support/Yarn/screen-recording-changed"
-    changed = marker.is_file()
-    marker.unlink(missing_ok=True)
-    if changed:
-        run(["tccutil", "reset", "ScreenCapture", "com.meetingarchive.yarn"], timeout=20)
-        run(["tccutil", "reset", "ScreenCapture", "com.meetingarchive.systemaudio"], timeout=20)
-        opened = run(
-            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
-            timeout=15,
+    app = Path.home() / "Applications" / "Yarn.app"
+    if not (app / "Contents" / "MacOS" / "Yarn").is_file():
+        emit(
+            {
+                "type": "log",
+                "id": "menubar",
+                "text": "Video calls need Yarn in Applications. Recording in the room does not ask.",
+            }
         )
-        if opened.returncode != 0:
-            run(
-                ["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"],
-                timeout=15,
-            )
+        return
+    home = Path.home()
+    # The login item may have just opened Yarn in the background. A second
+    # open would ignore the argument, so that copy has to be gone first.
+    run(["osascript", "-e", 'tell application "Yarn" to quit'], timeout=20)
+    for _ in range(25):
+        if run(["pgrep", "-x", "Yarn"], timeout=10).returncode != 0:
+            break
+        time.sleep(0.2)
+    result = home / "Library/Application Support/Yarn/call-audio-access"
+    result.unlink(missing_ok=True)
     emit(
         {
             "type": "log",
             "id": "menubar",
             "text": (
-                "For a video call, turn on Yarn under Screen & System Audio Recording. "
-                "If Yarn is already on, turn it off and on again. "
+                "If the Mac asks Yarn to record the screen, click Allow. "
+                "That is so a video call can be heard. It does not record the screen."
+            ),
+        }
+    )
+    run(
+        ["open", "-W", str(app), "--args", "--prepare-call-audio"],
+        timeout=300,
+    )
+    granted = False
+    if result.is_file():
+        granted = "granted" in result.read_text(encoding="utf-8")
+    row = screen_recording_row()
+    if granted:
+        emit(
+            {
+                "type": "log",
+                "id": "menubar",
+                "text": "Yarn can hear a video call. Recording in the room does not ask.",
+            }
+        )
+        return
+    opened = run(
+        ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
+        timeout=15,
+    )
+    if opened.returncode != 0:
+        run(
+            [
+                "open",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+            ],
+            timeout=15,
+        )
+    emit(
+        {
+            "type": "log",
+            "id": "menubar",
+            "text": (
+                f"Turn on Yarn under Privacy & Security, {row}. "
                 "Then click Open Yarn. Recording in the room does not ask."
             ),
         }

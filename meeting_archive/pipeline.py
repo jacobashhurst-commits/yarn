@@ -485,9 +485,8 @@ def finalize(
                 "CALL_AUDIO_SILENT %s: the other side of the video call was "
                 "silent. Yarn records that from the audio going to the "
                 "headphones. Turn on Yarn under System Settings, "
-                "Privacy & Security, Screen & System Audio Recording. "
-                "If it is already on, turn it off and on again, then quit "
-                "Yarn and open it again.",
+                "Privacy & Security, Screen Recording "
+                "(Screen & System Audio Recording on a newer Mac).",
                 meeting_id,
             )
         channels[MIC] = mic_path.name

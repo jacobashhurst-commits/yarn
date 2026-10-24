@@ -205,7 +205,7 @@ final class Controller: NSObject, NSWindowDelegate {
             size: 15, weight: .regular, color: ink
         ))
         doneBox.addArrangedSubview(label(
-            "For a video call, turn on Yarn under Privacy & Security, Screen & System Audio Recording. If Yarn is already on, turn it off and on again. Then click Open Yarn. Recording in the room does not ask.",
+            "If the Mac asked, click Allow. That lets a video call be heard, and it does not record the screen. If it did not ask, turn on Yarn under Privacy & Security, \(screenRecordingRow). Then click Open Yarn. Recording in the room does not ask.",
             size: 13, weight: .regular, color: ink
         ))
         openButton.target = self
@@ -262,6 +262,13 @@ final class Controller: NSObject, NSWindowDelegate {
     }
 
     private var textWidth: CGFloat { 464 }
+
+    private var screenRecordingRow: String {
+        if #available(macOS 15, *) {
+            return "Screen & System Audio Recording"
+        }
+        return "Screen Recording"
+    }
 
     private func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
         let field = NSTextField(wrappingLabelWithString: text)

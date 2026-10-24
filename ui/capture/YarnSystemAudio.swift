@@ -26,10 +26,19 @@ private let readySuffix = ".ready"
 private let goSuffix = ".go"
 private let errorSuffix = ".error"
 
-private let permissionDenied = """
-Turn on Yarn in System Settings, Privacy & Security, Screen & System Audio Recording. \
-If it is already on, turn it off and on again. Quit Yarn, open it again, then press Headphones.
-"""
+private func permissionDenied() -> String {
+    // Ventura and Sonoma call the row Screen Recording. Sequoia renamed it.
+    let row: String
+    if #available(macOS 15, *) {
+        row = "Screen & System Audio Recording"
+    } else {
+        row = "Screen Recording"
+    }
+    return """
+    Turn on Yarn in System Settings, Privacy & Security, \(row). \
+    Then quit Yarn, open it again, and press Headphones.
+    """
+}
 
 private let doneSuffix = ".stop"
 private let finishedSuffix = ".done"
@@ -80,7 +89,7 @@ private func isPermission(_ error: Error) -> Bool {
 private func report(_ error: Error) -> String {
     let detail = String(describing: error)
     let message = isPermission(error)
-        ? permissionDenied
+        ? permissionDenied()
         : "Yarn could not record the audio this Mac is playing. \(detail)"
     say(message)
     return message
@@ -292,7 +301,7 @@ private final class Engine: @unchecked Sendable {
             streams.append(stream)
         }
         guard !streams.isEmpty else {
-            try fail(wavPath, permissionDenied)
+            try fail(wavPath, permissionDenied())
         }
         try "ok\n".write(
             toFile: wavPath + readySuffix,

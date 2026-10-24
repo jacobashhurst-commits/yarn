@@ -124,6 +124,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--prepare-call-audio") {
+            prepareCallAudioAndQuit()
+            return
+        }
         background = CommandLine.arguments.contains("--background")
         YarnStatus.shared.start()
         CallAudio.shared.begin(archiveRoot: paths.root)
@@ -139,6 +143,24 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         refresh()
+    }
+
+    private func prepareCallAudioAndQuit() {
+        // The system Allow button, on the macOS versions that still show one.
+        // Newer macOS does not show it. Setup then opens the right Settings row.
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            let granted = CGRequestScreenCaptureAccess()
+            let dir = NSHomeDirectory() + "/Library/Application Support/Yarn"
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let body = granted ? "granted\n" : "needs-switch\n"
+            try? body.write(
+                toFile: dir + "/call-audio-access",
+                atomically: true,
+                encoding: .utf8
+            )
+            NSApp.terminate(nil)
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

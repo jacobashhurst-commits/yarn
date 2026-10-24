@@ -59,14 +59,6 @@ cat > "$SUPPORT/paths.plist" <<PLIST
 </plist>
 PLIST
 
-cdhash() {
-  codesign -dvvv "$1" 2>&1 | sed -n 's/^CDHash=//p' | head -1
-}
-OLD_HASH=""
-if [[ -d "$APP_DIR" ]]; then
-  OLD_HASH="$(cdhash "$APP_DIR")"
-fi
-
 write_info_plist() {
   mkdir -p "$APP_DIR/Contents/MacOS" "$RES"
   cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
@@ -124,11 +116,6 @@ elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
 else
   echo "Yarn could not add an Applications icon on this Mac. The menu bar still works." >&2
   exit 0
-fi
-
-NEW_HASH="$(cdhash "$APP_DIR")"
-if [[ -n "$NEW_HASH" && "$NEW_HASH" != "$OLD_HASH" ]]; then
-  : > "$SUPPORT/screen-recording-changed"
 fi
 
 if [[ "${1:-}" == "--install" ]]; then

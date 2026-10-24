@@ -65,7 +65,7 @@ alert() {
 # The Mac's own permission window is the ask. This is only the reminder if
 # that window was closed, and it is not an error.
 note_permission() {
-  local message="Turn on Yarn under Screen & System Audio Recording. If it is already on, turn it off and on again. Quit Yarn, open it again, then press Headphones."
+  local message="Turn on Yarn under Privacy & Security, Screen Recording. On a newer Mac that row is called Screen & System Audio Recording. Then press Headphones again."
   log_line "$message"
   if [[ -f "${STARTING_LOCK:-}" ]] && [[ "$(cat "$STARTING_LOCK" 2>/dev/null || true)" == "$$" ]]; then
     rm -f "$STARTING_LOCK"
@@ -557,7 +557,7 @@ do_stop() {
       --expected-duration "$expected_duration" 2>"$errors")"; then
     cat "$errors" >> "$MA_LOGS/rec.log"
     if [[ "$mode" == "call" ]] && grep -q "CALL_AUDIO_SILENT" "$errors"; then
-      alert "The recording was saved, but Yarn did not hear the audio this Mac was playing. Turn on Yarn under System Settings, Privacy & Security, Screen & System Audio Recording. If it is already on, turn it off and on again. Quit Yarn, open it again, and start the video call recording again."
+      alert "The recording was saved, but Yarn did not hear the audio this Mac was playing. Turn on Yarn under System Settings, Privacy & Security, Screen Recording. On a newer Mac that row is called Screen & System Audio Recording. Then start the video call recording again."
     fi
     rm -f "$errors"
     log_line "saved $finalized"
