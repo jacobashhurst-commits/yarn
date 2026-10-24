@@ -250,8 +250,18 @@ menu_title() {
     echo "${text:-Yarn}"
   fi
 }
+identifying=false
+if [[ -f "$MA_ROOT/.identify-wait" ]]; then
+  identify_pid="$(sed -n '1p' "$MA_ROOT/.identify-wait" 2>/dev/null)"
+  if [[ "$identify_pid" =~ ^[0-9]+$ ]] && kill -0 "$identify_pid" 2>/dev/null; then
+    identifying=true
+  fi
+fi
+
 if $recording; then
   menu_title "$(elapsed)"
+elif $identifying; then
+  menu_title "Waiting to identify speakers"
 elif $processing; then
   frac="$(fraction)"
   stage="$(short_phase)"
@@ -286,6 +296,9 @@ else
 fi
 
 echo "---"
+if $identifying; then
+  echo "Waiting to identify speakers | size=12 color=#cc8800"
+fi
 echo "Processing | size=12 color=#888888"
 if $processing; then
   frac="$(fraction)"

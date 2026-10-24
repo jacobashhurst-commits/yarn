@@ -34,6 +34,7 @@ struct Snapshot {
     var recording = false
     var elapsed = "0:00"
     var mode = "room"
+    var identifying = false
     var processing = false
     var paused = false
     var heading = ""
@@ -344,6 +345,14 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             recordButton.isHidden = false
             recordButton.title = "Stop"
             recordButton.keyEquivalent = "\r"
+        } else if snap.identifying {
+            statusLabel.stringValue = "WAITING"
+            bigLabel.isHidden = true
+            metaLabel.stringValue = "Waiting to identify speakers"
+            metaLabel.isHidden = false
+            startRow?.isHidden = false
+            recordButton.isHidden = true
+            recordButton.keyEquivalent = ""
         } else {
             statusLabel.stringValue = "NOT RECORDING"
             bigLabel.isHidden = true
@@ -414,6 +423,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 snap.elapsed = String(format: "%d:%02d", secs / 60, secs % 60)
             }
         }
+        snap.identifying = identifyWaitAlive(root + "/.identify-wait")
 
         let status = json(root + "/.processing-status.json")
         let now = Int(Date().timeIntervalSince1970)
@@ -647,6 +657,13 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         task.standardError = FileHandle.nullDevice
         try? task.run()
     }
+}
+
+private func identifyWaitAlive(_ path: String) -> Bool {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+    let pidText = text.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+    guard let pid = Int32(pidText), pid > 0 else { return false }
+    return kill(pid, 0) == 0
 }
 
 private func phaseBand(_ phase: String) -> (Int, Int) {

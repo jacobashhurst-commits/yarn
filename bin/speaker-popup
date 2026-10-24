@@ -142,7 +142,21 @@ play_clip() {
 }
 
 # Dismissing the dialog should not leave audio playing to an empty screen.
-trap stop_clip EXIT
+# The native window writes its own wait file. This path is the dialog
+# fallback, and it stays running until the last question is answered.
+identify_wait=""
+mark_identify_wait() {
+  local root
+  root="$("$MA" rec-config 2>/dev/null | sed -n 's/^MA_ROOT="//p' | sed 's/"$//')"
+  [[ -n "$root" ]] || return 0
+  identify_wait="$root/.identify-wait"
+  printf '%s\n%s\n' "$$" "$meeting_id" > "$identify_wait"
+}
+clear_identify_wait() {
+  stop_clip
+  [[ -n "$identify_wait" ]] && rm -f "$identify_wait"
+}
+trap clear_identify_wait EXIT
 
 notice() {
   osascript - "$1" "$2" <<'APPLESCRIPT' 2>/dev/null
@@ -173,6 +187,8 @@ on run argv
 end run
 APPLESCRIPT
 }
+
+mark_identify_wait
 
 banner="$("$MA" speakers "$meeting_id" --meeting-banner 2>/dev/null)"
 [[ -n "$banner" ]] || banner="$meeting_id"

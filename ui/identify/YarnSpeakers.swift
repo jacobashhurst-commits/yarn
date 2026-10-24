@@ -557,7 +557,32 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         window.contentView = content
     }
 
+    private var waitFile: String?
+
+    func beginWait() {
+        let (code, out, _) = runMA(ma, ["rec-config"])
+        guard code == 0 else { return }
+        guard let line = out.split(separator: "\n").first(where: { $0.hasPrefix("MA_ROOT=") }) else { return }
+        var root = String(line.dropFirst("MA_ROOT=".count))
+        if root.hasPrefix("\""), root.hasSuffix("\"") {
+            root = String(root.dropFirst().dropLast())
+        }
+        guard !root.isEmpty else { return }
+        let path = (root as NSString).appendingPathComponent(".identify-wait")
+        let body = "\(ProcessInfo.processInfo.processIdentifier)\n\(meetingID)\n"
+        try? body.write(toFile: path, atomically: true, encoding: .utf8)
+        waitFile = path
+    }
+
+    func endWait() {
+        if let path = waitFile {
+            try? FileManager.default.removeItem(atPath: path)
+            waitFile = nil
+        }
+    }
+
     func start() {
+        beginWait()
         titleLabel.show("Loading voices…")
         dateLabel.isHidden = true
         metaLabel.isHidden = true
@@ -1253,8 +1278,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         c.start()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        controller?.endWait()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        // Closing the window is the end of the question. Leaving the process
+        // up would keep "Waiting to identify speakers" on the menu.
+        true
     }
 }
 
