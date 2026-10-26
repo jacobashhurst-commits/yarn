@@ -157,12 +157,17 @@ private final class WavFile {
 }
 
 private final class SampleRing {
-    private let capacity = 48_000 * 12
+    // Half a minute. A napping writer used to fill a shorter ring and then
+    // throw away the rest of the call, so the headphone file ended early and
+    // the voices cut in and out.
+    private let capacity = 48_000 * 30
     private let storage: UnsafeMutablePointer<Int16>
     private let lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
     private var readIndex = 0
     private var writeIndex = 0
     private var stored = 0
+    private var pendingSilence = 0
+    var dropped = 0
 
     init() {
         storage = .allocate(capacity: capacity)
@@ -172,15 +177,35 @@ private final class SampleRing {
 
     func push(_ samples: UnsafePointer<Int16>, count: Int) {
         os_unfair_lock_lock(lock)
-        let take = min(count, capacity - stored)
+        var incoming = count
+        if stored + incoming > capacity {
+            let overflow = stored + incoming - capacity
+            dropped += overflow
+            let skip = min(overflow, stored)
+            readIndex += skip
+            if readIndex >= capacity { readIndex %= capacity }
+            stored -= skip
+            if stored + incoming > capacity {
+                incoming = capacity - stored
+            }
+        }
         var index = writeIndex
-        for offset in 0..<take {
+        for offset in 0..<incoming {
             storage[index] = samples[offset]
             index += 1
             if index == capacity { index = 0 }
         }
         writeIndex = index
-        stored += take
+        stored += incoming
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// A gap in the capture clock. Silence keeps the headphone file lined up
+    /// with the microphone instead of splicing the next word onto the last one.
+    func addSilence(_ count: Int) {
+        guard count > 0 else { return }
+        os_unfair_lock_lock(lock)
+        pendingSilence += count
         os_unfair_lock_unlock(lock)
     }
 
@@ -189,22 +214,32 @@ private final class SampleRing {
         readIndex = 0
         writeIndex = 0
         stored = 0
+        pendingSilence = 0
         os_unfair_lock_unlock(lock)
     }
 
     func pop(into destination: UnsafeMutablePointer<Int16>, max: Int) -> Int {
         os_unfair_lock_lock(lock)
-        let take = min(max, stored)
+        var offset = 0
+        if pendingSilence > 0 {
+            let zeros = min(pendingSilence, max)
+            for index in 0..<zeros {
+                destination[index] = 0
+            }
+            pendingSilence -= zeros
+            offset = zeros
+        }
+        let take = min(max - offset, stored)
         var index = readIndex
-        for offset in 0..<take {
-            destination[offset] = storage[index]
+        for sample in 0..<take {
+            destination[offset + sample] = storage[index]
             index += 1
             if index == capacity { index = 0 }
         }
         readIndex = index
         stored -= take
         os_unfair_lock_unlock(lock)
-        return take
+        return offset + take
     }
 }
 
@@ -234,7 +269,11 @@ private final class Engine: @unchecked Sendable {
     let wavPath: String
     let ring = SampleRing()
     let listen = Listen()
-    let samples = DispatchQueue(label: "com.meetingarchive.systemaudio.samples")
+    let samples = DispatchQueue(
+        label: "com.meetingarchive.systemaudio.samples",
+        qos: .userInteractive
+    )
+    let ready = DispatchSemaphore(value: 0)
     let scratch: UnsafeMutablePointer<Int16>
     let scratchCapacity = 16_384
     var streams: [SCStream] = []
@@ -245,6 +284,10 @@ private final class Engine: @unchecked Sendable {
     var heardSignal = false
     var loggedFormat = false
     var peak: Float = 0
+    var activity: NSObjectProtocol?
+    var lastPacket = CMTime.invalid
+    var reopening = false
+    var announcedDrops = 0
 
     init(wavPath: String) {
         self.wavPath = wavPath
@@ -329,27 +372,52 @@ private final class Engine: @unchecked Sendable {
         // Samples from before the microphone file exists would put the other
         // side of the call ahead of you. Drop them and start together.
         ring.clear()
+        lastPacket = .invalid
         let wav: WavFile
         do {
             wav = try WavFile(path: wavPath, sampleRate: UInt32(sampleRate.rounded()))
         } catch {
             try fail(wavPath, "Yarn could not open the video-call recording: \(error.localizedDescription)")
         }
+        // Yarn is a menu-bar app. Left alone, macOS naps it during a long
+        // call and the headphone recording stalls: short mutes, then the last
+        // part of the meeting never arrives.
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled, .latencyCritical],
+            reason: "Recording a video call"
+        )
+        defer {
+            if let activity {
+                ProcessInfo.processInfo.endActivity(activity)
+                self.activity = nil
+            }
+        }
         let output = UnsafeMutablePointer<Int16>.allocate(capacity: 4096)
         defer { output.deallocate() }
         var loggedFirst = false
+        var quietSince: Date?
         while true {
             if FileManager.default.fileExists(atPath: stopPath) { stopFlag = true }
             let count = ring.pop(into: output, max: 4096)
+            if ring.dropped > announcedDrops + 48_000 {
+                announcedDrops = ring.dropped
+                say("system audio fell behind and kept the newest sound")
+            }
             if count == 0 {
                 if stopFlag { break }
-                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+                if quietSince == nil { quietSince = Date() }
+                if let since = quietSince, Date().timeIntervalSince(since) > 2.5 {
+                    say("system audio stalled; listening again")
+                    reopen()
+                    quietSince = Date()
+                }
+                _ = ready.wait(timeout: .now() + 0.2)
                 continue
             }
+            quietSince = nil
             if !loggedFirst {
                 loggedFirst = true
-                fputs("system audio receiving samples\n", stderr)
-                fflush(stderr)
+                say("system audio receiving samples")
             }
             wav.append(output, count: count)
         }
@@ -357,10 +425,28 @@ private final class Engine: @unchecked Sendable {
         say(String(format: "system audio peak %.4f", peak))
     }
 
+    /// Start the headphone stream again without closing the wav. A stall used
+    /// to end the far side of the call while the microphone kept going.
+    private func reopen() {
+        if reopening || stopFlag { return }
+        reopening = true
+        lastPacket = .invalid
+        Task {
+            do {
+                try await self.openCapture()
+                say("system audio listening again")
+            } catch {
+                say("system audio could not listen again: \(report(error))")
+            }
+            self.reopening = false
+        }
+    }
+
     func take(_ sampleBuffer: CMSampleBuffer) {
         noteFormat(sampleBuffer)
         let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
         guard frameCount > 0 else { return }
+        noteClock(sampleBuffer, frames: frameCount)
         do {
             try sampleBuffer.withAudioBufferList { buffers, _ in
                 guard let first = buffers.first, let data = first.mData else { return }
@@ -451,7 +537,46 @@ private final class Engine: @unchecked Sendable {
                 scratch[index] = Self.floatToInt16(value)
             }
             ring.push(scratch, count: count)
+            ready.signal()
             offset += count
+        }
+    }
+
+    /// Keep the headphone file on the same clock as the microphone. A missing
+    /// packet becomes silence of that length instead of the next word jumping
+    /// forward, which is the cut heard while naming speakers.
+    private func noteClock(_ sampleBuffer: CMSampleBuffer, frames: Int) {
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let duration = CMSampleBufferGetDuration(sampleBuffer)
+        guard pts.isValid, sampleRate > 0 else { return }
+        if lastPacket.isValid {
+            var gap = CMTimeGetSeconds(CMTimeSubtract(pts, lastPacket))
+            if gap < -0.5 {
+                gap = 0
+            }
+            if gap > 0.08 {
+                let count = Int((gap * sampleRate).rounded())
+                let cap = Int(sampleRate) * 180
+                if count > 0 {
+                    ring.addSilence(min(count, cap))
+                    ready.signal()
+                    if gap > 0.5 {
+                        say(String(format: "system audio missed %.1f s; keeping the recording in time", gap))
+                    }
+                }
+                if gap > 2 {
+                    reopen()
+                }
+            }
+        }
+        if duration.isValid, duration.seconds > 0 {
+            lastPacket = CMTimeAdd(pts, duration)
+        } else {
+            let step = CMTime(
+                value: CMTimeValue(frames),
+                timescale: CMTimeScale(max(Int(sampleRate.rounded()), 1))
+            )
+            lastPacket = CMTimeAdd(pts, step)
         }
     }
 

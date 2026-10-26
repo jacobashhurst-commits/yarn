@@ -962,13 +962,63 @@ def voice_matches(
 _PREFILL_STRONG = 0.50
 _PREFILL_LIKELY = 0.38
 _PREFILL_MARGIN = 0.04
+# "Overwhelming" is stricter on purpose. A 0.50 with a coin-flip margin is a
+# suggestion to read, not a name to drop into the box. When the meeting list
+# already names the person, this is the bar that fills the box in.
+_PREFILL_OVERWHELMING = 0.58
+_PREFILL_ATTENDEE_MARGIN = 0.08
 
 
 def dialog_prediction(
     ranked: list[tuple[str, float]],
     conversation_guess: str = "",
+    attendees: list[str] | None = None,
 ) -> tuple[str, str]:
-    """(name to pre-fill, why) for one voice. Name is "" when nothing is credible."""
+    """(name to pre-fill, why) for one voice. Name is "" when nothing is credible.
+
+    If the meeting already lists who was there, the box is filled only for an
+    overwhelming voice match to one of those people. A strong match to someone
+    who was not in the meeting stays blank, and so does a near-tie between two
+    people who were.
+    """
+    attending = {
+        " ".join(str(name).split()).casefold()
+        for name in (attendees or [])
+        if str(name).strip()
+    }
+    if attending:
+        present = [
+            (name, score)
+            for name, score in ranked
+            if name.casefold() in attending
+        ]
+        if present:
+            name, score = present[0]
+            next_listed = present[1][1] if len(present) > 1 else 0.0
+            outsider = max(
+                (
+                    other
+                    for other_name, other in ranked
+                    if other_name.casefold() not in attending
+                ),
+                default=0.0,
+            )
+            if (
+                score >= _PREFILL_OVERWHELMING
+                and score - next_listed >= _PREFILL_ATTENDEE_MARGIN
+                and score - outsider >= 0.05
+            ):
+                return (
+                    name,
+                    f"sounds like {name} (strong voice match {score:.2f}), "
+                    "and they are in this meeting",
+                )
+        if conversation_guess and conversation_guess.casefold() in attending:
+            return (
+                conversation_guess,
+                f"named in the conversation as {conversation_guess}",
+            )
+        return "", "no confident voice match"
     if ranked:
         best_name, best = ranked[0]
         runner = ranked[1][1] if len(ranked) > 1 else 0.0
@@ -1104,11 +1154,13 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         ranked: list[tuple[str, float]] = []
         if has_audio:
             try:
-                ranked = voice_matches(voice_embedding(cfg, transcript, profile), library)
+                ranked = voice_matches(
+                    voice_embedding(cfg, transcript, profile), library, limit=12
+                )
             except Exception:
                 log.exception("voice match failed for %s in %s", profile.speaker, meeting_id)
         conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
-        guess, reason = dialog_prediction(ranked, conversation)
+        guess, reason = dialog_prediction(ranked, conversation, attendees=attendees)
         index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
         # Under ten seconds in a real meeting is a fragment, not a person to
         # name. New meetings fold these into a longer voice before they become

@@ -14,6 +14,7 @@ from __future__ import annotations
 import array
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -27,8 +28,21 @@ class AudioError(RuntimeError):
     pass
 
 
+# A menu-bar click inherits the app's PATH, which is only the system
+# directories. ffmpeg lives in Homebrew, and a stop that cannot find ffprobe
+# leaves the recording in in-progress instead of processing it.
+_TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
 def require_tool(name: str) -> str:
     path = shutil.which(name)
+    if not path:
+        for directory in _TOOL_DIRS:
+            candidate = Path(directory) / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                path = str(candidate)
+                os.environ["PATH"] = directory + os.pathsep + os.environ.get("PATH", "")
+                break
     if not path:
         raise AudioError(
             f"{name} not found on PATH. Install with: brew install ffmpeg"
@@ -625,4 +639,93 @@ def extract_clip(
         tmp.unlink(missing_ok=True)
         raise AudioError(f"ffmpeg clip failed: {proc.stderr.strip()}")
     tmp.replace(dst)
+    # A video-call recording can drop a few tens of milliseconds in the middle
+    # of a word. The identify window plays these clips, so a hole here is the
+    # voice cutting in and out. Fill only those holes; leave real pauses.
+    conceal_dropouts(dst)
     return dst
+
+
+def conceal_dropouts(path: Path, max_hole_s: float = 0.04) -> int:
+    """Replace short mutes that sit inside speech. The length stays the same.
+
+    A 10–30ms dip to the noise floor, with speech on both sides, is a dropped
+    capture packet. A breath is longer than ``max_hole_s`` and is left alone.
+    Returns how many holes were filled.
+    """
+    try:
+        with wave.open(str(path), "rb") as handle:
+            if handle.getnchannels() != 1 or handle.getsampwidth() != 2:
+                return 0
+            rate = handle.getframerate() or 1
+            samples = array.array("h")
+            samples.frombytes(handle.readframes(handle.getnframes()))
+    except (OSError, wave.Error):
+        return 0
+    if len(samples) < rate // 10:
+        return 0
+    filled = _conceal_dropouts(samples, rate, max_hole_s=max_hole_s)
+    if not filled:
+        return 0
+    tmp = path.with_suffix(path.suffix + ".partial")
+    with wave.open(str(tmp), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(samples.tobytes())
+    tmp.replace(path)
+    return filled
+
+
+def _conceal_dropouts(
+    samples: array.array, rate: int, max_hole_s: float = 0.04
+) -> int:
+    frame = max(1, int(rate * 0.005))
+    if len(samples) < frame * 6:
+        return 0
+    levels: list[float] = []
+    for start in range(0, len(samples) - frame + 1, frame):
+        energy = 0.0
+        for value in samples[start : start + frame]:
+            energy += float(value) * float(value)
+        rms = math.sqrt(energy / frame) / 32768.0
+        levels.append(20.0 * math.log10(rms + 1e-12))
+    quiet = -42.0
+    loud = -28.0
+    max_frames = max(1, int(max_hole_s / 0.005))
+    filled = 0
+    index = 1
+    while index < len(levels) - 1:
+        if levels[index] >= quiet or levels[index - 1] < loud:
+            index += 1
+            continue
+        end = index
+        while end < len(levels) - 1 and levels[end] < quiet:
+            end += 1
+        run = end - index
+        if (
+            1 <= run <= max_frames
+            and end < len(levels)
+            and levels[end] >= loud
+        ):
+            _bridge_hole(samples, index * frame, end * frame)
+            filled += 1
+        index = max(end, index + 1)
+    return filled
+
+
+def _bridge_hole(samples: array.array, start: int, end: int) -> None:
+    """Crossfade the audio just before the hole into the audio just after it."""
+    count = end - start
+    if count <= 0 or start < count or end + count > len(samples):
+        return
+    for offset in range(count):
+        weight = offset / count
+        left = samples[start - count + offset]
+        right = samples[end + offset]
+        mixed = int(left * (1.0 - weight) + right * weight)
+        if mixed > 32767:
+            mixed = 32767
+        elif mixed < -32768:
+            mixed = -32768
+        samples[start + offset] = mixed

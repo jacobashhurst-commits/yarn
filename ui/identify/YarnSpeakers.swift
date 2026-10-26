@@ -710,6 +710,15 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         }
         titleBox.stringValue = titles[v.key] ?? ""
         companyBox.stringValue = companies[v.key] ?? ""
+        // The box has to show the person, not only the caption above it.
+        // One saved row with this name is selected, title and company included.
+        let same = choices.filter { fold($0.name) == fold(shownName) }
+        if same.count == 1 {
+            nameBox.selectItem(withObjectValue: same[0].label)
+            if nameBox.indexOfSelectedItem >= 0 {
+                nameBox.stringValue = same[0].label
+            }
+        }
         backButton.isEnabled = index > 0
         saveButton.title = index == queue.count - 1 ? "Save & finish" : "Save & next"
         renderClip()

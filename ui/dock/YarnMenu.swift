@@ -176,6 +176,7 @@ final class YarnStatus: NSObject, NSMenuDelegate {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: command.executable)
                 process.arguments = command.arguments
+                process.environment = Self.commandEnvironment()
                 try? process.run()
                 process.waitUntilExit()
             }
@@ -185,10 +186,21 @@ final class YarnStatus: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Stop, and every other menu action, is a child of Yarn. Without Homebrew
+    /// on PATH, `ma finalize` cannot see ffprobe and the recording never starts
+    /// processing.
+    private static func commandEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let prefix = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = prefix + ":" + (env["PATH"] ?? "")
+        return env
+    }
+
     private static func run(_ script: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [script]
+        process.environment = commandEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()

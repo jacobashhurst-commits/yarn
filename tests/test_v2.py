@@ -36,6 +36,7 @@ from meeting_archive.speakers import (
     snippet_window,
     names_for_roster,
     suggest_matches,
+    dialog_prediction,
     usable_dialog_guess,
 )
 from tests.test_pipeline import FakeStore, FakeTranscriber, make_wav, write_transcript
@@ -959,6 +960,37 @@ def test_snippet_window_uses_spans_when_turns_look_isolated():
     start, duration = snippet_window(transcript, profile)
     _assert_solo_clip(start, duration, [(12.5, 14.0)])
     assert 20.0 <= start < start + duration <= 24.0
+
+
+def test_an_overwhelming_match_is_prefilled_when_they_are_in_the_meeting():
+    attendees = ["Jacob", "Shiv", "Jamie", "Betty", "Shaym"]
+    # Shiv is clearly this voice, and Shiv is on the list.
+    name, reason = dialog_prediction(
+        [("Shiv", 0.70), ("Charles", 0.40), ("Jamie", 0.31)],
+        attendees=attendees,
+    )
+    assert name == "Shiv"
+    assert "in this meeting" in reason
+
+    # A library match who was not in the meeting does not take the box,
+    # even when their score is a little higher.
+    name, _reason = dialog_prediction(
+        [("Charles", 0.76), ("Shiv", 0.70), ("Jamie", 0.30)],
+        attendees=attendees,
+    )
+    assert name == ""
+
+    # Two people who were both there, and neither lead is overwhelming.
+    name, _reason = dialog_prediction(
+        [("Shiv", 0.66), ("Jamie", 0.62)],
+        attendees=attendees,
+    )
+    assert name == ""
+
+    # No attendee list keeps the older suggestion, so a meeting without a
+    # roster still offers a strong voice match.
+    name, _reason = dialog_prediction([("Shiv", 0.70), ("Jamie", 0.40)])
+    assert name == "Shiv"
 
 
 def test_usable_dialog_guess_rejects_transcript_and_locations():

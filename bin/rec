@@ -20,6 +20,10 @@
 
 set -euo pipefail
 
+# The menu bar is a Mac app. Its PATH does not include Homebrew, so stop
+# used to fail with "ffprobe not found" and leave the meeting unprocessed.
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MA="${MA_BIN:-ma}"
 RECORDER_LABEL="com.meetingarchive.recorder"

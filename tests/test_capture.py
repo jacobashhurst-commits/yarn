@@ -292,3 +292,45 @@ def test_split_channel_files_are_not_mistaken_for_captures(cfg):
     """Only the raw multi-channel file represents an unpublished meeting."""
     (cfg.in_progress_dir / "2026-09-11T17-22-07__mic.wav").write_bytes(b"RIFF")
     assert pipeline.stranded_captures(cfg) == []
+
+
+def test_a_short_mute_inside_speech_is_filled_and_a_pause_is_not(tmp_path):
+    """Identify playback was cutting in and out on holes a few tens of ms long."""
+    import array
+    import math
+
+    from meeting_archive.audio import conceal_dropouts
+
+    rate = 16000
+    seconds = 1.0
+    samples = array.array(
+        "h",
+        (
+            int(8000 * math.sin(2 * math.pi * 180 * i / rate))
+            for i in range(int(rate * seconds))
+        ),
+    )
+    # 15ms of digital silence in the middle of the tone.
+    hole = int(0.40 * rate)
+    width = int(0.015 * rate)
+    for index in range(hole, hole + width):
+        samples[index] = 0
+    # A 200ms pause must stay quiet.
+    pause = int(0.70 * rate)
+    pause_width = int(0.20 * rate)
+    for index in range(pause, pause + pause_width):
+        samples[index] = 0
+    path = tmp_path / "clip.wav"
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+    assert conceal_dropouts(path) == 1
+    with wave.open(str(path), "rb") as handle:
+        restored = array.array("h")
+        restored.frombytes(handle.readframes(handle.getnframes()))
+    assert len(restored) == len(samples)
+    middle = restored[hole + width // 2]
+    assert abs(middle) > 1000
+    assert max(abs(restored[i]) for i in range(pause, pause + pause_width)) == 0
