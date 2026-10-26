@@ -77,6 +77,13 @@ def test_speaker_display_indices_renumber_by_first_appearance():
         SpeakerProfile("room-8", "room", first_at=12.0),
     ]
     assert speaker_display_indices(profiles) == {"room-1": 1, "room-8": 2}
+    # Same start time: the number in the key, so room-12 cannot become Speaker 2.
+    tied = [
+        SpeakerProfile("room-12", "room", first_at=0.0),
+        SpeakerProfile("room-2", "room", first_at=0.0),
+        SpeakerProfile("room-1", "room", first_at=0.0),
+    ]
+    assert speaker_display_indices(tied) == {"room-1": 1, "room-2": 2, "room-12": 3}
 
 
 def test_speaker_label_uses_display_map_over_key_suffix(cfg):
@@ -134,7 +141,13 @@ def test_to_spans_empty_and_all_dropped():
     assert to_spans([(0.0, 0.1, "A")], ROOM, min_span_s=0.5) == []
 
 
-def test_same_voice_groups_only_mutual_best_matches():
+def test_same_voice_groups_a_chain_of_strong_matches():
+    """A third fragment joins even when it is not anyone's nearest voice.
+
+    room-11's nearest voice is room-4, and room-13 still clears 0.58 against
+    room-11, so all three are one person. room-1 does not clear the bar
+    against any of them. The kept key is the longest stretch.
+    """
     speakers = ["room-4", "room-11", "room-13", "room-1"]
     durations = {"room-4": 180.0, "room-11": 200.0, "room-13": 20.0, "room-1": 120.0}
     scores = {
@@ -150,9 +163,25 @@ def test_same_voice_groups_only_mutual_best_matches():
         return scores.get(frozenset((left, right)), 0.0)
 
     groups = group_same_voices(speakers, cosine, durations)
-    assert groups["room-4"] == groups["room-11"]
-    assert groups["room-13"] == "room-13"
+    assert groups["room-4"] == groups["room-11"] == groups["room-13"] == "room-11"
     assert groups["room-1"] == "room-1"
+
+
+def test_a_moderate_resemblance_does_not_join_two_people():
+    speakers = ["room-1", "room-2", "room-3"]
+    durations = {"room-1": 100.0, "room-2": 80.0, "room-3": 40.0}
+    scores = {
+        frozenset(("room-1", "room-2")): 0.70,
+        frozenset(("room-2", "room-3")): 0.50,
+        frozenset(("room-1", "room-3")): 0.20,
+    }
+
+    def cosine(left, right):
+        return scores.get(frozenset((left, right)), 0.0)
+
+    groups = group_same_voices(speakers, cosine, durations)
+    assert groups["room-1"] == groups["room-2"]
+    assert groups["room-3"] == "room-3"
 
 
 def test_a_short_fragment_is_folded_into_the_voice_it_sounds_like():

@@ -61,10 +61,12 @@ MIN_LISTED_SPEAKER_S = 1.0
 MIN_NOTABLE_SPEAKER_S = 10.0
 
 # Same person, split into several clusters, scores about 0.45-0.7 with this
-# embedding model. Different people on the same call sit around 0.1-0.35.
-# 0.58 is the high end of "same voice" so a chain of merely-similar tracks
-# cannot pull a whole meeting into one speaker. Matches also have to be
-# mutual: A’s closest voice is B and B’s closest voice is A.
+# embedding model. On the confirmed room archive the same person sat at a
+# median of 0.54 and different people never cleared 0.55. 0.58 is above that
+# worst different-person pair, so every pair at or above it can be joined,
+# including a chain of strong matches. A merely-similar pair stays apart.
+# Requiring each pair to also be mutual nearest neighbours left the same
+# person split: a third fragment is rarely anyone's single closest voice.
 SAME_VOICE_COSINE = 0.58
 
 # sherpa's distance cut. Smaller means more clusters. 0.9, the cautious
@@ -538,11 +540,13 @@ def group_same_voices(
     durations: dict[str, float],
     threshold: float = SAME_VOICE_COSINE,
 ) -> dict[str, str]:
-    """Map every speaker to the longer member of a mutual voice match.
+    """Map every speaker to the longer member of the same voice.
 
-    ``cosine(a, b)`` is similarity in ``[0, 1]``. Only pairs who are each
-    other's closest voice, and only when that score clears ``threshold``, are
-    combined. A chain of moderate scores must not collapse a meeting.
+    ``cosine(a, b)`` is similarity in ``[0, 1]``. Every pair that clears
+    ``threshold`` is one person, and a chain of those pairs is too. The kept
+    key is the longer stretch, so a name already stored on it still applies.
+    A score under the threshold never joins, which is what stops two
+    different people who both vaguely resemble a third from becoming one.
     """
     parent = {speaker: speaker for speaker in speakers}
 
@@ -561,18 +565,10 @@ def group_same_voices(
         else:
             parent[right_root] = left_root
 
-    closest: dict[str, str] = {}
-    for left in speakers:
-        ranked = sorted(
-            ((cosine(left, right), right) for right in speakers if right != left),
-            reverse=True,
-        )
-        if not ranked or ranked[0][0] < threshold:
-            continue
-        closest[left] = ranked[0][1]
-    for left, right in closest.items():
-        if closest.get(right) == left:
-            union(left, right)
+    for index, left in enumerate(speakers):
+        for right in speakers[index + 1 :]:
+            if cosine(left, right) >= threshold:
+                union(left, right)
     return {speaker: find(speaker) for speaker in speakers}
 
 

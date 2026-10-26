@@ -1,0 +1,26 @@
+sequenceDiagram
+  actor User
+  participant Yarn
+  participant Capture as ma-capture
+  participant Call as Call audio
+  participant Disk as Archive
+  participant Watch as ma watch
+  participant Model as Local models
+
+  User->>Yarn: Start room or call
+  Yarn->>Capture: LaunchAgent request
+  opt Headphones
+    Yarn->>Call: Record what the Mac is playing
+  end
+  User->>Yarn: Stop
+  Note over Capture,Disk: Audio is already on disk before any dialog
+  Yarn->>Disk: Split channels, then write the manifest
+  Watch->>Disk: Claim the manifest
+  Watch->>Model: Transcribe, then diarise
+  Watch->>Disk: Transcript
+  opt Ollama is open and summaries are due
+    Watch->>Model: Summarise
+    Watch->>Disk: Summary on the transcript
+  end
+  Watch->>Disk: Index chunks and archive the audio
+  Yarn-->>User: Name voices, if any are unidentified

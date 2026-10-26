@@ -232,13 +232,17 @@ def test_setup_copies_a_downloads_zip_before_creating_the_venv(
 
 def test_setup_installs_from_the_lockfile_when_uv_is_there(tmp_path, monkeypatch):
     calls: list[list[str]] = []
+    site = tmp_path / "site"
+    (site / "sherpa_onnx" / "lib").mkdir(parents=True)
+    (site / "onnxruntime" / "capi").mkdir(parents=True)
+    (site / "onnxruntime" / "capi" / "libonnxruntime.1.dylib").write_bytes(b"dylib")
 
     def fake_run(argv, **_k):
         calls.append(list(argv))
 
         class Result:
             returncode = 0
-            stdout = ""
+            stdout = str(site) if "sysconfig" in " ".join(argv) else ""
             stderr = ""
 
         return Result()
@@ -254,6 +258,18 @@ def test_setup_installs_from_the_lockfile_when_uv_is_there(tmp_path, monkeypatch
     yarn_setup.step_deps(tmp_path)
     assert calls[0][:3] == ["/opt/homebrew/bin/uv", "sync", "--frozen"]
     assert "--directory" in calls[0]
+
+
+def test_a_blank_site_packages_path_is_not_the_checkout(tmp_path, monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(yarn_setup, "run", lambda argv, **_k: Result())
+    monkeypatch.setattr(yarn_setup, "venv_python", lambda repo: repo / "python")
+    with pytest.raises(RuntimeError, match="Could not find the Python environment"):
+        yarn_setup.site_packages(tmp_path)
 
 
 def test_neo_setup_will_not_download_accurate(monkeypatch):
@@ -564,6 +580,15 @@ def test_uv_binary_is_taken_from_the_tarball(tmp_path):
     yarn_setup._extract_uv(buf.getvalue(), dest)
     assert dest.read_bytes().startswith(b"#!/bin/sh")
     assert dest.stat().st_mode & 0o111
+
+
+def test_a_developer_id_keeps_the_call_audio_grant():
+    signed = "Authority=Developer ID Application: Yarn (TEAMID)"
+    adhoc = "Signature=adhoc"
+    assert yarn_setup.call_audio_grant_is_stable(signed)
+    assert not yarn_setup.call_audio_grant_is_stable(adhoc)
+    assert not yarn_setup.call_audio_grant_is_stable(signed + "\n" + adhoc)
+    assert not yarn_setup.call_audio_grant_is_stable("")
 
 
 def test_guess_mic_uses_the_real_device_name(monkeypatch):

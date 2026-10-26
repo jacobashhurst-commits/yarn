@@ -72,6 +72,10 @@ def speaker_display_indices(profiles: list) -> dict[str, int]:
         ),
         key=lambda profile: (
             float(getattr(profile, "first_at", 0.0) or 0.0),
+            # Numeric, not alphabetical. "room-12" sorts before "room-2" as
+            # text, and the summary then gives room-2's confirmed name to
+            # Speaker 3.
+            speaker_index(str(getattr(profile, "speaker", "") or "")) or 0,
             str(getattr(profile, "speaker", "")),
         ),
     )

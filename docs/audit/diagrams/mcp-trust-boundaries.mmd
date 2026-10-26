@@ -1,0 +1,21 @@
+flowchart LR
+  subgraph mac [This Mac]
+    tx[Transcripts]
+    chroma[Chroma]
+    ask[Ask Yarn]
+    ollama[Ollama on 127.0.0.1]
+    server[chroma-mcp]
+    tx --> chroma
+    ask --> chroma
+    ask --> ollama
+    server --> chroma
+  end
+
+  subgraph app [Chat app you connected]
+    client[Claude, ChatGPT, or Cursor]
+  end
+
+  provider[That app's model provider]
+
+  client -->|starts a local process| server
+  client -->|sends retrieved passages with the chat| provider

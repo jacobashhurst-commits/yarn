@@ -565,7 +565,7 @@ def test_process_puts_local_summary_above_transcript(cfg):
     transcript = Transcript.read(cfg.transcript_json(manifest.meeting_id))
     assert "Friday release" in transcript.summary
     markdown = cfg.transcript_md(manifest.meeting_id).read_text()
-    assert markdown.index("## Summary") < markdown.index("---")
+    assert markdown.index("## Summary") < markdown.index("## Transcript")
     assert "**Decisions**" in markdown
 
 
@@ -854,8 +854,8 @@ def test_room_meeting_separates_the_voices_and_never_names_them(cfg):
     # Marina's self-introduction is offered for her voice, not applied to it.
     assert {g.speaker: g.name for g in transcript.speaker_guesses} == {"room-1": "Marina"}
     markdown = cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
-    assert "Speaker 1:" in markdown
-    assert "Marina:" not in markdown
+    assert "] Speaker 1**" in markdown
+    assert "] Marina**" not in markdown
     # And the honest room label is gone now that the voices are distinguished.
     assert f"{cfg.room_label}:" not in markdown
 
@@ -913,7 +913,7 @@ def test_mic_channel_is_never_diarized(cfg):
     assert by_channel[SYS].speaker == "sys-1"
 
     markdown = cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
-    assert f"{cfg.own_label}:" in markdown
+    assert f"] {cfg.own_label}**" in markdown
     assert store.meetings
 
 
@@ -947,7 +947,7 @@ def test_diarization_failure_still_produces_a_full_transcript(cfg):
 
     # Falls back to the honest channel label rather than inventing speakers.
     markdown = cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
-    assert f"{cfg.room_label}:" in markdown
+    assert f"] {cfg.room_label}**" in markdown
     assert "Diarization unavailable" in markdown
 
     # Audio archived normally, not quarantined.
@@ -970,7 +970,7 @@ def test_process_without_a_diarizer_behaves_as_before(cfg):
     assert transcript.diarize_error == ""
     assert transcript.turns[0].speaker is None
     markdown = cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
-    assert f"{cfg.room_label}:" in markdown
+    assert f"] {cfg.room_label}**" in markdown
 
 
 def test_naming_a_voice_relabels_the_transcript_on_reindex(cfg):
@@ -997,7 +997,7 @@ def test_naming_a_voice_relabels_the_transcript_on_reindex(cfg):
 
     # Before: numbered, unnamed.
     pipeline.ingest(cfg, meeting_id, store)
-    assert "Speaker 1:" in cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
+    assert "] Speaker 1**" in cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
 
     # Jacob names them, exactly as the dialog would.
     records.write_notes(
@@ -1009,9 +1009,9 @@ def test_naming_a_voice_relabels_the_transcript_on_reindex(cfg):
     pipeline.ingest(cfg, meeting_id, store)
 
     markdown = cfg.transcript_md(meeting_id).read_text(encoding="utf-8")
-    assert "Marina:" in markdown
-    assert "Ben:" in markdown
-    assert "Speaker 1:" not in markdown
+    assert "] Marina**" in markdown
+    assert "] Ben**" in markdown
+    assert "] Speaker 1**" not in markdown
 
     # The chunk text and its speakers metadata agree, so a search filtered on
     # a name cannot return a chunk that never mentions them.
@@ -1217,8 +1217,8 @@ def test_ingest_rewrites_markdown_with_notes(cfg):
     )
     pipeline.ingest(cfg, meeting_id, FakeStore())
     text = cfg.transcript_md(meeting_id).read_text()
-    assert "Names heard in conversation: John" in text
-    assert "[0:00:00] Jacob:" in text
+    assert "**Names heard in conversation:** John" in text
+    assert "**[0:00:00–0:00:05] Jacob**" in text
 
     records.write_notes(cfg.notes_json(meeting_id), meeting_id, notes="good call", applied=False)
     pipeline.ingest(cfg, meeting_id, FakeStore())
@@ -1501,8 +1501,8 @@ def test_room_recording_is_labelled_unknown_not_jacob(cfg):
     text = cfg.transcript_md(manifest.meeting_id).read_text()
     # The critical assertion: nothing said in a room is attributed to Jacob,
     # because there is no way to know who said it.
-    assert "Jacob:" not in text
-    assert "Unknown:" in text
+    assert "] Jacob**" not in text
+    assert "] Unknown**" in text
 
     _, metadatas = store.meetings[manifest.meeting_id]
     assert metadatas[0]["speakers"] == "Unknown"

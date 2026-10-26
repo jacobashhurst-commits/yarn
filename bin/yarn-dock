@@ -89,7 +89,7 @@ PLIST
 seal_app() {
   xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
   if ! codesign --verify --deep --strict "$APP_DIR" >/dev/null 2>&1; then
-    codesign --force --sign - "$APP_DIR"
+    "$REPO_DIR/bin/yarn-sign" "$APP_DIR"
   fi
 }
 
@@ -112,7 +112,7 @@ elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
   mv -f "$APP_BIN.partial" "$APP_BIN"
   # The linker signs the temporary filename, so TCC recorded this app as
   # "Yarn.partial" and then refused the grant the user had given Yarn.
-  codesign --force --sign - "$APP_DIR"
+  "$REPO_DIR/bin/yarn-sign" "$APP_DIR"
 else
   echo "Yarn could not add an Applications icon on this Mac. The menu bar still works." >&2
   exit 0

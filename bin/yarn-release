@@ -124,10 +124,16 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
 # Sign the bundle, not the temporary linker output, so macOS treats this as
 # Yarn. A linker signature names the file that was compiled and the screen
 # recording grant then does not apply.
-xattr -cr "$YARN" 2>/dev/null || true
-codesign --force --sign - "$YARN"
+# Ad-hoc until a Developer ID Application certificate is in the keychain.
+# bin/yarn-sign switches itself once that certificate exists.
+"$REPO_DIR/bin/yarn-sign" "$APP"
+YARN_SIGN="$("$REPO_DIR/bin/yarn-sign" "$YARN")"
+echo "$YARN_SIGN"
 
 rm -f "$OUT"
 COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$ROOT" "$OUT"
 rm -rf "$STAGE"
+if [[ "$YARN_SIGN" == *"developer-id"* && "${YARN_SKIP_NOTARIZE:-}" != "1" ]]; then
+  "$REPO_DIR/bin/yarn-sign" --notarize "$OUT"
+fi
 echo "$OUT"

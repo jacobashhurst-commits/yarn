@@ -1,0 +1,23 @@
+flowchart TD
+  live[In progress wav]
+  inbox[Inbox channels plus manifest]
+  work[Processing]
+  tx[Transcript JSON, Markdown, HTML]
+  notes[Notes]
+  idx[Chroma chunks]
+  arch[Archived wav]
+  clips[Speaker clip and embedding]
+  failed[Failed capture kept]
+  pruned[Archived wav deleted]
+
+  live --> inbox
+  inbox --> work
+  inbox --> failed
+  work --> tx
+  work --> notes
+  work --> idx
+  work --> arch
+  work --> clips
+  notes --> idx
+  arch --> pruned
+  tx --> idx

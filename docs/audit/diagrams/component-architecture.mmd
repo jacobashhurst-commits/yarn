@@ -1,0 +1,63 @@
+flowchart TB
+  user[User]
+
+  subgraph ui [Controls]
+    dock[Yarn.app]
+    menu[Menu bar]
+    popups[Notes and speaker dialogs]
+  end
+
+  subgraph capture [Capture]
+    rec[bin/rec]
+    mic[ma-capture]
+    call[System audio in Yarn.app]
+  end
+
+  subgraph background [Background jobs]
+    watcher[ma watch]
+    prune[Daily audio prune]
+  end
+
+  subgraph pipeline [On stop, then in the watcher]
+    finalize[ma finalize]
+    whisper[whisper.cpp]
+    diarize[sherpa-onnx]
+    summary[Ollama summary]
+    index[Chroma index]
+  end
+
+  subgraph store [Archive on disk]
+    audio[Audio]
+    transcripts[Transcripts and notes]
+    speakers[Speaker clips]
+    chroma[(Chroma)]
+  end
+
+  ask[Ask Yarn]
+  mcp[chroma-mcp]
+  chat[Connected chat app]
+
+  user --> dock
+  user --> menu
+  dock --> rec
+  menu --> rec
+  rec --> mic
+  rec --> call
+  rec --> finalize
+  finalize --> audio
+  watcher --> whisper
+  watcher --> diarize
+  watcher --> summary
+  watcher --> index
+  whisper --> transcripts
+  diarize --> transcripts
+  summary --> transcripts
+  index --> chroma
+  transcripts --> chroma
+  diarize --> speakers
+  popups --> transcripts
+  prune --> audio
+  ask --> chroma
+  ask --> summary
+  mcp --> chroma
+  chat --> mcp

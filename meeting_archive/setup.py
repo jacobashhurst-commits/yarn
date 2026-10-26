@@ -720,8 +720,12 @@ def site_packages(repo: Path) -> Path:
         [str(py), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
         timeout=30,
     )
-    path = Path((proc.stdout or "").strip())
-    if proc.returncode != 0 or not path.is_dir():
+    reported = (proc.stdout or "").strip()
+    path = Path(reported)
+    # A blank path is the current directory, which is the checkout, not the
+    # environment. Treating it as site-packages then reports that sherpa is
+    # missing from Yarn itself.
+    if proc.returncode != 0 or not reported or not path.is_dir():
         raise RuntimeError("Could not find the Python environment.")
     return path
 
@@ -1423,6 +1427,19 @@ def _prefetch_search_embedder(repo: Path) -> None:
     emit({"type": "log", "id": "ollama", "text": "Search is ready on this Mac"})
 
 
+def call_audio_grant_is_stable(signature: str) -> bool:
+    """A Developer ID is the same app next install. An ad-hoc signature is not.
+
+    macOS binds Screen & System Audio Recording to the signature. An ad-hoc
+    rebuild changes that signature, hides Yarn from the privacy list, and
+    leaves the old grant pointing at an app the list will not show. Clearing
+    it is what makes the new copy appear. A Developer ID does not change, so
+    clearing it only sends the person through Settings again.
+    """
+    text = signature or ""
+    return "Developer ID Application:" in text and "Signature=adhoc" not in text
+
+
 def allow_call_audio(ma: Path) -> None:
     """Ask the way a new Mac expects, on Ventura through the current macOS.
 
@@ -1451,12 +1468,12 @@ def allow_call_audio(ma: Path) -> None:
         time.sleep(0.2)
     result = home / "Library/Application Support/Yarn/call-audio-access"
     result.unlink(missing_ok=True)
-    # Reinstalling keeps the previous copy's permission. macOS then hides
-    # Yarn from the list and will not ask again, because this copy is not
-    # the one it remembers. Clearing that decision lets this copy appear.
-    # A new Mac has no decision to clear.
-    for service in ("ScreenCapture", "AudioCapture"):
-        run(["tccutil", "reset", service, "com.meetingarchive.yarn"], timeout=20)
+    signed = run(["codesign", "-dv", "--verbose=4", str(app)], timeout=20)
+    signature = f"{signed.stdout or ''}\n{signed.stderr or ''}"
+    # Ad-hoc only. A Developer ID grant has to survive the next install.
+    if not call_audio_grant_is_stable(signature):
+        for service in ("ScreenCapture", "AudioCapture"):
+            run(["tccutil", "reset", service, "com.meetingarchive.yarn"], timeout=20)
     emit(
         {
             "type": "log",

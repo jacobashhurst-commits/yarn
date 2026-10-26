@@ -1,0 +1,20 @@
+flowchart TB
+  user[User]
+
+  subgraph mac [This Mac]
+    yarn[Yarn]
+    capture[Microphone and call audio]
+    archive[(Meeting archive)]
+    ollama[Ollama]
+    yarn --> capture
+    capture --> archive
+    yarn --> archive
+    yarn <-->|summaries and Ask Yarn| ollama
+  end
+
+  setup[Setup downloads]
+  chat[Claude, ChatGPT, or Cursor]
+
+  user -->|start and stop| yarn
+  setup -.->|models and tools| mac
+  yarn -.->|search hits, only when that app asks| chat

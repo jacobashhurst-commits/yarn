@@ -1,0 +1,22 @@
+flowchart TB
+  subgraph mac [This Mac]
+    subgraph yarn [Yarn]
+      cap[Capture]
+      watch[Watcher and Ask Yarn]
+      ui[Yarn.app]
+    end
+    disk[Meeting archive]
+    ollama[Ollama localhost]
+    cap --> disk
+    ui --> disk
+    watch --> disk
+    watch <--> ollama
+  end
+
+  downloads[Setup: models and programs]
+  chat[Connected chat app]
+  other[Another login on this Mac]
+
+  downloads -.->|install time, no meeting content| mac
+  chat -.->|search hits when you ask that app| disk
+  other -.->|can read the archive at current file modes| disk
