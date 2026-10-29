@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
@@ -1244,6 +1245,39 @@ def test_sweep_inbox_force_ignores_manual_schedule(cfg):
         cfg, FakeTranscriber(), FakeStore(), force=True
     ) == 1
     assert cfg.transcript_json("2026-09-26T11-00-00").exists()
+
+
+def test_refresh_grows_the_batch_when_another_meeting_arrives(cfg):
+    from meeting_archive import queue as queue_mod
+
+    _inbox_meeting(cfg, "2026-09-26T10-00-00")
+    first = queue_mod.begin_work(cfg, "2026-09-26T10-00-00")
+    assert first["current"] == 1 and first["total"] == 1
+    (cfg.inbox_dir / "2026-09-26T10-00-00.json").unlink()
+    cfg.processing_status.write_text(
+        json.dumps(
+            {
+                "meeting_id": "2026-09-26T10-00-00",
+                "phase": "Identifying speakers",
+                "current": 1,
+                "total": 1,
+                "remaining": 0,
+                "detail": "Analysing speaker segments",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _inbox_meeting(cfg, "2026-09-26T11-00-00")
+    later = queue_mod.refresh(cfg)
+    assert later["current"] == 1
+    assert later["remaining"] == 1
+    assert later["total"] == 2
+    status = json.loads(cfg.processing_status.read_text(encoding="utf-8"))
+    assert status["current"] == 1
+    assert status["total"] == 2
+    assert status["remaining"] == 1
+    assert status["phase"] == "Identifying speakers"
+    assert status["detail"] == "Analysing speaker segments"
 
 
 def test_begin_work_counts_one_of_five_then_advances(cfg):

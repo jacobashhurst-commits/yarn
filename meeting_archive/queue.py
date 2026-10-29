@@ -127,11 +127,52 @@ def refresh(cfg: Config, exclude: str = "") -> dict:
         **_counts(cfg, exclude),
         "updated_epoch": int(time.time()),
     }
-    if payload["remaining"] == 0 and not exclude and not payload["working_id"]:
+    current = int(payload.get("current") or 0)
+    working = str(payload.get("working_id") or "")
+    if payload["remaining"] == 0 and not exclude and not working:
         payload["current"] = 0
         payload["total"] = 0
+    elif current > 0 and working:
+        # Voice separation can run for most of an hour without rewriting
+        # the batch counter. A meeting saved in that time is waiting behind
+        # the one on screen, so 1 of 1 has to become 1 of 2.
+        behind = _counts(cfg, exclude=working)["remaining"]
+        payload["total"] = max(int(payload.get("total") or 0), current + behind)
+        _sync_processing_batch(cfg, payload, behind)
     write_json_atomic(status_path(cfg), payload)
     return payload
+
+
+def _sync_processing_batch(cfg: Config, payload: dict, behind: int) -> None:
+    """Copy the batch counter onto the status file the window actually reads.
+
+    A long stage writes that file once, at the start. The window polls it
+    every second, so growing `total` here is what changes "1 of 1" while
+    the second meeting sits in the queue.
+    """
+    path = cfg.processing_status
+    if not path.exists():
+        return
+    try:
+        status = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    working = str(payload.get("working_id") or "")
+    shown = str(status.get("meeting_id") or "")
+    if working and shown and shown != working:
+        return
+    current = int(payload.get("current") or 0)
+    total = int(payload.get("total") or 0)
+    if (
+        int(status.get("current") or 0) == current
+        and int(status.get("total") or 0) == total
+        and int(status.get("remaining") or 0) == behind
+    ):
+        return
+    status["current"] = current
+    status["total"] = total
+    status["remaining"] = behind
+    write_json_atomic(path, status)
 
 
 def read(cfg: Config) -> dict:

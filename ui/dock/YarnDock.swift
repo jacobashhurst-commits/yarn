@@ -443,7 +443,9 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if snap.processing {
             let title = text(status["title"])
             let current = integer(status["current"]) ?? 0
-            let total = integer(status["total"]) ?? 0
+            // The queue total grows when another meeting arrives during a
+            // long stage. The stage's own status file can still say 1 of 1.
+            let total = max(integer(status["total"]) ?? 0, integer(queue["total"]) ?? 0)
             let length = text(status["recording_length"])
             var heading = title.isEmpty ? shortID(text(status["meeting_id"])) : title
             if !length.isEmpty { heading += " (\(length))" }
