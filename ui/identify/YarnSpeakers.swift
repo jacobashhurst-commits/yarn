@@ -702,23 +702,14 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         distinguishHint.isHidden = true
         let answer = answers[v.key]
         let shownName = answer ?? (v.named.isEmpty ? v.guess : v.named)
-        nameBox.stringValue = shownName
+        let predicted = predictedChoice(shownName)
+        nameBox.stringValue = predicted?.name ?? shownName
         if titles[v.key] == nil {
-            let person = uniquePerson(shownName)
-            titles[v.key] = person?.title ?? ""
-            companies[v.key] = person?.company ?? ""
+            titles[v.key] = predicted?.title ?? ""
+            companies[v.key] = predicted?.company ?? ""
         }
         titleBox.stringValue = titles[v.key] ?? ""
         companyBox.stringValue = companies[v.key] ?? ""
-        // The box has to show the person, not only the caption above it.
-        // One saved row with this name is selected, title and company included.
-        let same = choices.filter { fold($0.name) == fold(shownName) }
-        if same.count == 1 {
-            nameBox.selectItem(withObjectValue: same[0].label)
-            if nameBox.indexOfSelectedItem >= 0 {
-                nameBox.stringValue = same[0].label
-            }
-        }
         backButton.isEnabled = index > 0
         saveButton.title = index == queue.count - 1 ? "Save & finish" : "Save & next"
         renderClip()
@@ -938,6 +929,21 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         companies[voice.key] = companyBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// The library row this prediction is talking about.
+    ///
+    /// The menu row reads "Mio — BDR, Zuora". That whole line is how you pick
+    /// the person. The name box stays "Mio", and title and company take the
+    /// other two fields.
+    func predictedChoice(_ shown: String) -> NameChoice? {
+        let typed = shown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else { return nil }
+        if let labeled = choices.first(where: { $0.label == typed }) {
+            return labeled
+        }
+        let same = choices.filter { fold($0.name) == fold(typed) }
+        return same.count == 1 ? same[0] : nil
+    }
+
     func knownPerson(_ name: String) -> Person? {
         let key = fold(name)
         guard !key.isEmpty else { return nil }
@@ -1113,6 +1119,44 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         }.joined(separator: "\n")
     }
 
+    /// Names for the success screen, one person each, in the order they spoke.
+    ///
+    /// People Yarn already knew are included. A title stays off this list:
+    /// the line is who was identified, not their role.
+    func identifiedNames() -> [String] {
+        guard let payload else { return [] }
+        var names: [String] = []
+        var seen = Set<String>()
+        for voice in payload.voices {
+            let typed = (answers[voice.key] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let stored = voice.named.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = typed.isEmpty ? stored : typed
+            guard !name.isEmpty else { continue }
+            let key = fold(name)
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            names.append(name)
+        }
+        return names
+    }
+
+    func nameFromSavedLine(_ line: String) -> String {
+        let divider = line.contains("→") ? "→" : "->"
+        guard let range = line.range(of: divider) else { return "" }
+        var text = String(line[range.upperBound]).trimmingCharacters(in: .whitespaces)
+        if let assumed = text.range(of: " (assumed") {
+            text = String(text[..<assumed.lowerBound])
+        }
+        return text.trimmingCharacters(in: .whitespaces)
+    }
+
+    func speakerLines(_ names: [String]) -> String {
+        names.enumerated()
+            .map { "Speaker \($0.offset + 1) -> \($0.element)" }
+            .joined(separator: "\n")
+    }
+
     func finish() {
         guard !finished else { return }
         finished = true
@@ -1133,8 +1177,17 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
                 }
             }
         }
+        let named = identifiedNames()
         guard args.count > 2 else {
-            NSApp.terminate(nil)
+            if named.isEmpty {
+                NSApp.terminate(nil)
+            } else {
+                showYarnResult(
+                    title: "Speaker names saved",
+                    body: speakerLines(named),
+                    footer: "Names land in the background. If one person shows up twice, Yarn merges them."
+                )
+            }
             return
         }
         setControls(enabled: false)
@@ -1146,9 +1199,19 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
                     let lines = out.split(separator: "\n").filter {
                         !$0.hasPrefix("ASSUMED") && !$0.hasPrefix("run `ma")
                     }
+                    var names = named
+                    var have = Set(named.map { self.fold($0) })
+                    let extra = self.savedLines(lines.map(String.init))
+                    for raw in extra.split(separator: "\n") {
+                        let person = self.nameFromSavedLine(String(raw))
+                        let key = self.fold(person)
+                        guard !person.isEmpty, !have.contains(key) else { continue }
+                        have.insert(key)
+                        names.append(person)
+                    }
                     showYarnResult(
                         title: "Speaker names saved",
-                        body: self.savedLines(lines.map(String.init)),
+                        body: self.speakerLines(names),
                         footer: "Names land in the background. If one person shows up twice, Yarn merges them."
                     )
                 } else {
