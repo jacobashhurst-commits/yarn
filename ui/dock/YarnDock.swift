@@ -284,11 +284,14 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             link("Library", #selector(library), self),
             link("Speakers", #selector(speakers), self),
             link("Transcripts", #selector(transcripts), self),
+            link("Settings", #selector(settings), self),
         ], spacing: 2)
 
         style(noteLabel, size: 12, weight: .regular, color: YarnColor.slate)
         noteLabel.maximumNumberOfLines = 2
-        noteLabel.isHidden = true
+        noteLabel.preferredMaxLayoutWidth = 340
+        noteLabel.wantsLayer = true
+        quips = QuipLine(label: noteLabel)
         style(footer, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
         footer.preferredMaxLayoutWidth = 340
         footer.maximumNumberOfLines = 2
@@ -396,15 +399,16 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if snap.failed > 0 { foot += "  ·  \(snap.failed) kept their audio" }
         footer.stringValue = foot
         footer.textColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
-        fitWindow()
-        let idle = noteLabel.stringValue.isEmpty
-            || noteLabel.stringValue == restingNote
-            || noteLabel.stringValue == "Opening the library…"
-        if snap.ollamaDown && idle {
-            note("Summaries need Ollama. Open it from the menu bar if a summary is waiting.")
-        } else if idle {
-            note(restingNote)
+        if snap.ollamaDown {
+            quips.hold(
+                "Summaries need Ollama. Open it from the menu bar if a summary is waiting.",
+                sticky: true,
+                reason: "ollama"
+            )
+        } else {
+            quips.releaseSticky(reason: "ollama")
         }
+        fitWindow()
     }
 
     func read() -> Snapshot {
@@ -548,9 +552,44 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AskChat.show(paths: paths)
     }
 
+    private var briefsInFlight = 0
+
     @objc func brief() {
-        note("Writing today's brief. It usually takes about a minute.")
-        launch(paths.ma, ["brief", "--open", "--force"])
+        guard FileManager.default.isExecutableFile(atPath: paths.ma) else {
+            note("That action isn't available yet.")
+            return
+        }
+        quips.hold(
+            "Writing today's brief. It usually takes about a minute.",
+            sticky: true,
+            reason: "brief"
+        )
+        briefsInFlight += 1
+        let ma = paths.ma
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: ma)
+            task.arguments = ["brief", "--open", "--force"]
+            var env = ProcessInfo.processInfo.environment
+            env["MA_BIN"] = ma
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+            task.environment = env
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            do {
+                try task.run()
+                task.waitUntilExit()
+            } catch {
+                // The line still has to come down if the brief never started.
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.briefsInFlight = max(0, self.briefsInFlight - 1)
+                if self.briefsInFlight == 0 {
+                    self.quips.releaseSticky(reason: "brief")
+                }
+            }
+        }
     }
 
     @objc func library() {
@@ -566,13 +605,11 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             task.waitUntilExit()
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(URL(fileURLWithPath: page))
-                self.note(self.restingNote)
             }
         }
     }
 
     @objc func speakers() {
-        note("Opening speakers…")
         let ma = paths.ma
         let page = paths.root + "/speakers/library.html"
         DispatchQueue.global(qos: .userInitiated).async {
@@ -602,9 +639,12 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             task.waitUntilExit()
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(URL(fileURLWithPath: page))
-                self.note(self.restingNote)
             }
         }
+    }
+
+    @objc func settings() {
+        YarnSettings.show(paths: paths)
     }
 
     /// One fill for the whole meeting. A stage with no measured fraction
@@ -636,11 +676,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return barFloor
     }
 
-    let restingNote = "How good this is free!"
+    var quips: QuipLine!
 
     func note(_ text: String) {
-        noteLabel.stringValue = text
-        noteLabel.isHidden = text.isEmpty
+        quips.hold(text, sticky: false)
     }
 
     func launch(_ bin: String, _ args: [String]) {
@@ -727,7 +766,7 @@ private func phaseHint(_ phase: String) -> String {
     }
 }
 
-private func stack(_ views: [NSView], spacing: CGFloat, horizontal: Bool = false) -> NSStackView {
+func stack(_ views: [NSView], spacing: CGFloat, horizontal: Bool = false) -> NSStackView {
     let view = NSStackView(views: views)
     view.orientation = horizontal ? .horizontal : .vertical
     view.alignment = horizontal ? .centerY : .leading
@@ -750,7 +789,7 @@ final class CardView: NSView {
     }
 }
 
-private func card(_ content: NSView, owner: AnyObject) -> NSView {
+func card(_ content: NSView, owner: AnyObject) -> NSView {
     let box = CardView()
     box.wantsLayer = true
     box.setContentHuggingPriority(.required, for: .vertical)
@@ -770,13 +809,13 @@ private func card(_ content: NSView, owner: AnyObject) -> NSView {
     return box
 }
 
-private func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, mono: Bool = false) -> NSTextField {
+func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, mono: Bool = false) -> NSTextField {
     let field = NSTextField(labelWithString: text)
     style(field, size: size, weight: weight, color: color, mono: mono)
     return field
 }
 
-private func style(_ field: NSTextField, size: CGFloat, weight: NSFont.Weight, color: NSColor, mono: Bool = false) {
+func style(_ field: NSTextField, size: CGFloat, weight: NSFont.Weight, color: NSColor, mono: Bool = false) {
     field.font = mono
         ? NSFont.monospacedSystemFont(ofSize: size, weight: weight)
         : NSFont.systemFont(ofSize: size, weight: weight)
@@ -785,7 +824,7 @@ private func style(_ field: NSTextField, size: CGFloat, weight: NSFont.Weight, c
     field.lineBreakMode = .byWordWrapping
 }
 
-private func link(_ title: String, _ action: Selector, _ target: AnyObject) -> NSButton {
+func link(_ title: String, _ action: Selector, _ target: AnyObject) -> NSButton {
     let button = HoverLink(title: title, target: target, action: action)
     button.font = NSFont.systemFont(ofSize: 15, weight: .medium)
     button.heightAnchor.constraint(equalToConstant: 30).isActive = true
@@ -852,7 +891,7 @@ final class HoverLink: NSButton {
     }
 }
 
-private func json(_ path: String) -> [String: Any] {
+func json(_ path: String) -> [String: Any] {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         return [:]
@@ -860,20 +899,20 @@ private func json(_ path: String) -> [String: Any] {
     return obj
 }
 
-private func text(_ value: Any?) -> String {
+func text(_ value: Any?) -> String {
     if let value = value as? String { return value }
     if let value = value as? NSNumber { return value.stringValue }
     return ""
 }
 
-private func integer(_ value: Any?) -> Int? {
+func integer(_ value: Any?) -> Int? {
     if let value = value as? Int { return value }
     if let value = value as? NSNumber { return value.intValue }
     if let value = value as? String { return Int(value) }
     return nil
 }
 
-private func boolean(_ value: Any?) -> Bool {
+func boolean(_ value: Any?) -> Bool {
     if let value = value as? Bool { return value }
     if let value = value as? NSNumber { return value.boolValue }
     if let value = value as? String { return value == "true" || value == "1" }
@@ -926,9 +965,128 @@ private func editMenu() -> NSMenu {
     return main
 }
 
-private func markImage() -> NSImage? {
+func markImage() -> NSImage? {
     guard let url = Bundle.main.url(forResource: "yarn-mark", withExtension: "png") else { return nil }
     return NSImage(contentsOf: url)
+}
+
+/// The line under the buttons. It cycles through asides, and a real status
+/// borrows it until that status is done.
+final class QuipLine {
+    static let lines = [
+        "How good this is free!",
+        "Another subscription avoided.",
+        "Your meetings. Not our business.",
+        "Something witty about SaaS. I\u{2019}m tired.",
+        "Your data isn\u{2019}t our business model.",
+        "Small brain. Big ambitions.",
+        "Hi Mum! Jokes, she doesn\u{2019}t use a computer.",
+        "Powered by your Mac. Not your wallet.",
+        "Your IP. Not theirs. You know who.",
+        "We can\u{2019}t sell your data. We don\u{2019}t have it.",
+    ]
+
+    private let label: NSTextField
+    private var index: Int
+    private var deck: [Int]
+    private var quip: String
+    private var timer: Timer?
+    private var generation = 0
+    private var holdToken = 0
+    private enum Mode { case cycling, sticky, temporary }
+    private var mode: Mode = .cycling
+    private var stickyReason = ""
+
+    init(label: NSTextField) {
+        self.label = label
+        let start = Int.random(in: 0..<Self.lines.count)
+        index = start
+        quip = Self.lines[start]
+        deck = Array(Self.lines.indices).filter { $0 != start }.shuffled()
+        label.wantsLayer = true
+        label.stringValue = quip
+        label.alphaValue = 1
+        label.isHidden = false
+        label.textColor = YarnColor.slate
+        schedule()
+    }
+
+    func hold(_ text: String, sticky: Bool, reason: String = "") {
+        if reason == "ollama", stickyReason == "brief" { return }
+        if sticky, mode == .sticky, stickyReason == reason, label.stringValue == text { return }
+        mode = sticky ? .sticky : .temporary
+        stickyReason = sticky ? reason : ""
+        holdToken += 1
+        let token = holdToken
+        timer?.invalidate()
+        timer = nil
+        label.textColor = YarnColor.slate
+        show(text, animated: label.stringValue != text)
+        if sticky { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard let self, token == self.holdToken, self.mode == .temporary else { return }
+            self.mode = .cycling
+            self.label.textColor = YarnColor.slate
+            self.show(self.quip, animated: self.label.stringValue != self.quip)
+            self.schedule()
+        }
+    }
+
+    func releaseSticky(reason: String = "") {
+        guard mode == .sticky else { return }
+        if !reason.isEmpty, stickyReason != reason { return }
+        mode = .cycling
+        stickyReason = ""
+        holdToken += 1
+        label.textColor = YarnColor.slate
+        show(quip, animated: label.stringValue != quip)
+        schedule()
+    }
+
+    private func schedule() {
+        timer?.invalidate()
+        let wait = Double.random(in: 12...16)
+        timer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+            self?.advance()
+        }
+    }
+
+    private func advance() {
+        guard mode == .cycling else { return }
+        if deck.isEmpty {
+            deck = Array(Self.lines.indices).shuffled()
+            if deck.count > 1, deck[0] == index {
+                deck.swapAt(0, 1)
+            }
+        }
+        index = deck.removeFirst()
+        quip = Self.lines[index]
+        label.textColor = YarnColor.slate
+        show(quip, animated: true)
+        schedule()
+    }
+
+    private func show(_ text: String, animated: Bool) {
+        generation += 1
+        let token = generation
+        label.isHidden = false
+        if !animated {
+            label.stringValue = text
+            label.alphaValue = 1
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.35
+            label.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, token == self.generation else { return }
+            self.label.stringValue = text
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.45
+                self.label.animator().alphaValue = 1
+            }
+        })
+    }
 }
 
 @main

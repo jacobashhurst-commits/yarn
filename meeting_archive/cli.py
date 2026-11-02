@@ -1082,10 +1082,10 @@ def cmd_brief(cfg: Config, args) -> int:
     from . import brief as brief_mod
     from .summarize import SummaryUnavailable
 
-    # The menu runs this with the terminal hidden, and a brief takes about a
-    # minute. Without a note on screen the click looks like it did nothing.
-    if not args.login:
-        _tell("Writing today's brief on this Mac. It usually takes about a minute.")
+    # The brief opens in the browser when it is ready. A progress window
+    # with an OK button was only something to dismiss while that happened.
+    # A failure still speaks up, because a menu click has nowhere else to
+    # show an error.
     try:
         result = brief_mod.generate_brief(
             cfg,

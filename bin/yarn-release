@@ -116,6 +116,7 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
   "$REPO_DIR/ui/dock/YarnDock.swift" \
   "$REPO_DIR/ui/dock/YarnChat.swift" \
   "$REPO_DIR/ui/dock/YarnMenu.swift" \
+  "$REPO_DIR/ui/dock/YarnSettings.swift" \
   "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
   "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
   -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \

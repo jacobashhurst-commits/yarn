@@ -442,16 +442,16 @@ fi
 case "$engine" in
   sherpa) engine_label="Stable" ;;
   compare) engine_label="Compare both" ;;
-  *) engine_label="Experimental" ;;
+  *) engine_label="Accurate" ;;
 esac
-echo "Voices: ${engine_label} | size=11 color=#617188"
+echo "Voice recognition model: ${engine_label} | size=11 color=#617188"
 pyannote_mark=""; sherpa_mark=""; compare_mark=""
 case "$engine" in
   sherpa) sherpa_mark="checked=true" ;;
   compare) compare_mark="checked=true" ;;
   *) pyannote_mark="checked=true" ;;
 esac
-echo "-- Experimental | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true ${pyannote_mark}"
+echo "-- Accurate | bash=\"$MA\" param1=setting param2=speaker_engine param3=pyannote terminal=false refresh=true ${pyannote_mark}"
 echo "-- Stable | bash=\"$MA\" param1=setting param2=speaker_engine param3=sherpa terminal=false refresh=true ${sherpa_mark}"
 echo "-- Compare both | bash=\"$MA\" param1=setting param2=speaker_engine param3=compare terminal=false refresh=true ${compare_mark}"
 week_mark=""; month_mark=""; never_mark=""

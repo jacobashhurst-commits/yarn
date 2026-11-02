@@ -3,14 +3,16 @@
 
 import AppKit
 
-final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+final class AskChat: NSObject, NSWindowDelegate {
     private let paths: Paths
     private let window: NSWindow
     private let transcript = NSStackView()
     private let scroller = NSScrollView()
-    private let field = NSTextField()
+    private let composer = AskComposer()
     private let askButton = AskButton()
     private var saved: [(role: String, text: String)] = []
+    private var recallSlot = -1
+    private var recallText: String?
     private var pending: [(role: String, text: String)] = []
     private var busy = false
     private var laidOutWidth: CGFloat = 0
@@ -28,7 +30,7 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         current?.reloadIfIdle()
         current?.window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        current?.window.makeFirstResponder(current?.field)
+        current?.window.makeFirstResponder(current?.composer.textView)
     }
 
     init(paths: Paths) {
@@ -98,34 +100,36 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         scroller.borderType = .noBorder
         scroller.documentView = doc
 
-        field.placeholderString = "Ask about your meetings"
-        field.font = .systemFont(ofSize: 14)
-        field.textColor = YarnColor.ink
-        field.focusRingType = .none
-        field.isBezeled = true
-        field.bezelStyle = .roundedBezel
-        field.delegate = self
-        field.translatesAutoresizingMaskIntoConstraints = false
-        if let cell = field.cell as? NSTextFieldCell {
-            cell.wraps = true
-            cell.isScrollable = true
-        }
+        composer.onSubmit = { [weak self] in self?.send() }
+        composer.onRecall = { [weak self] delta in self?.recall(delta) }
+        composer.onEdit = { [weak self] text in self?.composerEdited(text) }
+        composer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         askButton.title = "Ask"
         askButton.isBordered = false
+        askButton.isEnabled = false
         askButton.target = self
         askButton.action = #selector(send)
         askButton.translatesAutoresizingMaskIntoConstraints = false
-
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         askButton.setContentHuggingPriority(.required, for: .horizontal)
 
-        let composer = NSStackView(views: [field, askButton])
-        composer.orientation = .horizontal
-        composer.alignment = .centerY
-        composer.distribution = .fill
-        composer.spacing = 8
-        composer.translatesAutoresizingMaskIntoConstraints = false
+        let row = NSStackView(views: [composer, askButton])
+        row.orientation = .horizontal
+        row.alignment = .bottom
+        row.distribution = .fill
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let hint = NSTextField(labelWithString: "Return to ask. Shift-return for a new line.")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = YarnColor.slate
+        hint.translatesAutoresizingMaskIntoConstraints = false
+
+        let compose = NSStackView(views: [row, hint])
+        compose.orientation = .vertical
+        compose.alignment = .leading
+        compose.spacing = 6
+        compose.translatesAutoresizingMaskIntoConstraints = false
 
         history.orientation = .vertical
         history.alignment = .leading
@@ -158,7 +162,7 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         content.addSubview(rail)
         content.addSubview(header)
         content.addSubview(scroller)
-        content.addSubview(composer)
+        content.addSubview(compose)
 
         NSLayoutConstraint.activate([
             mark.widthAnchor.constraint(equalToConstant: 72),
@@ -192,13 +196,12 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             scroller.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: 16),
             scroller.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
-            composer.topAnchor.constraint(equalTo: scroller.bottomAnchor, constant: 12),
-            composer.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: 16),
-            composer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            composer.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            compose.topAnchor.constraint(equalTo: scroller.bottomAnchor, constant: 12),
+            compose.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: 16),
+            compose.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            compose.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
 
-            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            field.heightAnchor.constraint(equalToConstant: 36),
+            row.widthAnchor.constraint(equalTo: compose.widthAnchor),
             askButton.widthAnchor.constraint(equalToConstant: 72),
             askButton.heightAnchor.constraint(equalToConstant: 36),
 
@@ -210,23 +213,50 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         ])
     }
 
-    func control(
-        _ control: NSControl,
-        textView: NSTextView,
-        doCommandBy commandSelector: Selector
-    ) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            send()
-            return true
+    /// Up walks back through this chat's questions when the box is empty.
+    /// A question you are still editing keeps the arrow keys for the caret.
+    private func recall(_ delta: Int) -> String? {
+        let yours = saved.compactMap { $0.role == "you" ? $0.text : nil }
+        let current = composer.text
+        let showing = recallText != nil && current == recallText
+        if !current.isEmpty && !showing { return nil }
+        guard !yours.isEmpty else { return nil }
+        if delta < 0 {
+            if recallSlot < 0 { recallSlot = yours.count }
+            if recallSlot == 0 {
+                return recallText ?? yours[0]
+            }
+            recallSlot -= 1
+            recallText = yours[recallSlot]
+            return recallText
         }
-        return false
+        if recallSlot < 0 { return nil }
+        recallSlot += 1
+        if recallSlot >= yours.count {
+            resetRecall()
+            return ""
+        }
+        recallText = yours[recallSlot]
+        return recallText
+    }
+
+    private func resetRecall() {
+        recallSlot = -1
+        recallText = nil
+    }
+
+    private func composerEdited(_ text: String) {
+        if text != recallText { resetRecall() }
+        let ready = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        askButton.isEnabled = !busy && ready
     }
 
     @objc private func send() {
-        let question = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let question = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !busy else { return }
         busy = true
-        field.stringValue = ""
+        resetRecall()
+        composer.setText("")
         askButton.isEnabled = false
         ensureThread()
         saved.append((role: "you", text: question))
@@ -239,9 +269,14 @@ final class AskChat: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.busy = false
-                self.askButton.isEnabled = true
                 self.pending = []
                 self.saved.append((role: "yarn", text: reply.text))
+                if !reply.ok && self.composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.composer.setText(question)
+                } else {
+                    let ready = !self.composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    self.askButton.isEnabled = ready
+                }
                 self.persist()
                 self.render()
             }
@@ -689,6 +724,221 @@ private final class HistoryRow: NSButton {
             attributes: attrs
         )
     }
+}
+
+/// A growing plain-text box. Return asks. Shift-return, and the Mac's
+/// option-return, start a new paragraph. The old single-line field treated
+/// every return as "done", so shift-return asked as well.
+final class AskComposer: NSView, NSTextViewDelegate {
+    let textView: NSTextView
+    private let scroll = NSScrollView()
+    private let placeholder = PassTextField(labelWithString: "Ask about your meetings")
+    private var focused = false
+    private var settingText = false
+    private let minHeight: CGFloat = 40
+    private let maxHeight: CGFloat = 132
+    private var heightConstraint: NSLayoutConstraint!
+    var onSubmit: (() -> Void)?
+    var onRecall: ((Int) -> String?)?
+    var onEdit: ((String) -> Void)?
+
+    var text: String { textView.string }
+
+    override init(frame frameRect: NSRect) {
+        let container = NSTextContainer(size: NSSize(width: 240, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        container.heightTracksTextView = false
+        container.lineFragmentPadding = 0
+        let layout = NSLayoutManager()
+        layout.addTextContainer(container)
+        let storage = NSTextStorage()
+        storage.addLayoutManager(layout)
+        textView = NSTextView(frame: .zero, textContainer: container)
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        heightConstraint = heightAnchor.constraint(equalToConstant: minHeight)
+        heightConstraint.isActive = true
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+
+        textView.delegate = self
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.focusRingType = .none
+        textView.font = .systemFont(ofSize: 14)
+        textView.textColor = YarnColor.ink
+        textView.insertionPointColor = YarnColor.blue
+        textView.textContainerInset = NSSize(width: 8, height: 11)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.minSize = .zero
+        textView.isContinuousSpellCheckingEnabled = true
+        textView.isAutomaticSpellingCorrectionEnabled = true
+        textView.isGrammarCheckingEnabled = false
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: YarnColor.ink,
+        ]
+
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.contentView = ComposerClip()
+        scroll.documentView = textView
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+
+        placeholder.font = .systemFont(ofSize: 14)
+        placeholder.textColor = YarnColor.slate
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        placeholder.isBezeled = false
+        placeholder.drawsBackground = false
+        placeholder.isEditable = false
+        placeholder.isSelectable = false
+        placeholder.lineBreakMode = .byTruncatingTail
+        addSubview(placeholder)
+
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            placeholder.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func setText(_ value: String) {
+        settingText = true
+        textView.string = value
+        let end = (value as NSString).length
+        textView.setSelectedRange(NSRange(location: end, length: 0))
+        settingText = false
+        refreshChrome()
+        onEdit?(value)
+    }
+
+    func textDidChange(_ notification: Notification) {
+        refreshChrome()
+        textView.scrollRangeToVisible(textView.selectedRange())
+        if !settingText { onEdit?(textView.string) }
+    }
+
+    override func layout() {
+        super.layout()
+        let width = scroll.contentSize.width
+        if width > 40, abs(textView.frame.width - width) > 0.5 {
+            textView.frame.size.width = width
+        }
+        refreshHeight()
+    }
+
+    private func refreshChrome() {
+        placeholder.isHidden = !textView.string.isEmpty
+        refreshHeight()
+    }
+
+    private func refreshHeight() {
+        guard bounds.width > 40, let layout = textView.layoutManager, let container = textView.textContainer else {
+            return
+        }
+        layout.ensureLayout(for: container)
+        let used = layout.usedRect(for: container).height + textView.textContainerInset.height * 2
+        let next = min(maxHeight, max(minHeight, ceil(used)))
+        guard abs(heightConstraint.constant - next) > 0.5 else { return }
+        heightConstraint.constant = next
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 10
+        layer?.borderWidth = 1
+        let border = focused ? YarnColor.blue : YarnColor.slate.withAlphaComponent(0.45)
+        layer?.borderColor = border.cgColor
+        layer?.backgroundColor = YarnColor.canvas.cgColor
+    }
+
+    func textDidBeginEditing(_ notification: Notification) {
+        focused = true
+        needsDisplay = true
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        focused = false
+        needsDisplay = true
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        // A return still inside a Japanese or Chinese composition belongs to
+        // the input method, not to Ask.
+        if textView.hasMarkedText() { return false }
+        let flags = NSApp.currentEvent?.modifierFlags ?? []
+        let newline = commandSelector == #selector(NSResponder.insertNewline(_:))
+            || commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+            || commandSelector == #selector(NSResponder.insertLineBreak(_:))
+        if newline {
+            let breakLine = flags.contains(.shift) || flags.contains(.option)
+                || commandSelector != #selector(NSResponder.insertNewline(_:))
+            if breakLine {
+                textView.insertText("\n", replacementRange: textView.selectedRange())
+            } else {
+                onSubmit?()
+            }
+            return true
+        }
+        if commandSelector == #selector(NSResponder.moveUp(_:)) && caret(onFirstLine: true),
+           let next = onRecall?(-1) {
+            setText(next)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.moveDown(_:)) && caret(onFirstLine: false),
+           let next = onRecall?(1) {
+            setText(next)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertTab(_:))
+            || commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)), !textView.string.isEmpty {
+            setText("")
+            return true
+        }
+        return false
+    }
+
+    /// True on the first line, false on the last. Arrow recall only takes
+    /// over at those edges, so a paragraph can still be edited.
+    private func caret(onFirstLine first: Bool) -> Bool {
+        let ns = textView.string as NSString
+        let loc = min(textView.selectedRange().location, ns.length)
+        let slice = first ? ns.substring(to: loc) : ns.substring(from: loc)
+        return !slice.contains("\n")
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(textView)
+    }
+}
+
+private final class ComposerClip: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
+private final class PassTextField: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 private final class AskButton: NSButton {

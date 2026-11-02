@@ -255,6 +255,46 @@ def test_ollama_connect_prepares_local_search(cfg: Config, tmp_path, monkeypatch
     assert "ChatGPT" in text
 
 
+def test_writing_a_brief_does_not_open_a_progress_dialog(cfg: Config, monkeypatch):
+    told: list[tuple] = []
+
+    def capture(*args, **kwargs):
+        told.append((args, kwargs))
+
+    class Result:
+        path = cfg.root / "briefs" / "today.html"
+        overview = "A quiet morning."
+
+    monkeypatch.setattr("meeting_archive.cli._tell", capture)
+    monkeypatch.setattr("meeting_archive.brief.generate_brief", lambda *a, **k: Result())
+    from meeting_archive.cli import cmd_brief
+
+    args = type("A", (), {"login": False, "open": False, "force": True})()
+    assert cmd_brief(cfg, args) == 0
+    assert told == []
+
+
+def test_a_brief_that_cannot_be_written_still_reports_the_reason(cfg: Config, monkeypatch):
+    from meeting_archive.summarize import SummaryUnavailable
+
+    told: list[tuple] = []
+
+    def capture(*args, **kwargs):
+        told.append((args, kwargs))
+
+    def boom(*_args, **_kwargs):
+        raise SummaryUnavailable("Ollama is not running.")
+
+    monkeypatch.setattr("meeting_archive.cli._tell", capture)
+    monkeypatch.setattr("meeting_archive.brief.generate_brief", boom)
+    from meeting_archive.cli import cmd_brief
+
+    args = type("A", (), {"login": False, "open": False, "force": True})()
+    assert cmd_brief(cfg, args) == 1
+    assert told[0][0][0] == "Ollama is not running."
+    assert told[0][1].get("alert") is True
+
+
 def test_should_hint_after_manual_uses(cfg: Config):
     assert not brief.should_hint_login_brief(cfg)
     from meeting_archive.config import write_setting

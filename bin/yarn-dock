@@ -107,6 +107,7 @@ elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
   swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP_BIN.partial" \
     "$SWIFT_SRC" "$(dirname "$SWIFT_SRC")/YarnChat.swift" \
     "$(dirname "$SWIFT_SRC")/YarnMenu.swift" \
+    "$(dirname "$SWIFT_SRC")/YarnSettings.swift" \
     "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
     "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
     -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
