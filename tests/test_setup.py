@@ -534,6 +534,72 @@ def test_host_python_explains_python39_without_the_import_error(monkeypatch):
     assert "3.9" in str(caught.value)
 
 
+def test_tools_fetch_ffprobe_when_only_ffmpeg_is_present(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ffmpeg = bin_dir / "ffmpeg"
+    ffmpeg.write_text("ffmpeg", encoding="utf-8")
+    ffmpeg.chmod(0o755)
+    monkeypatch.setattr(yarn_setup, "support_bin", lambda: bin_dir)
+    monkeypatch.setattr(yarn_setup, "tool_search_dirs", lambda: (bin_dir,))
+    monkeypatch.setattr(
+        yarn_setup,
+        "which",
+        lambda name: str(ffmpeg) if name == "ffmpeg" else None,
+    )
+    downloaded = []
+
+    def fake_download(url, dest, step_id, long=False):
+        downloaded.append((dest.name, url))
+        dest.write_text("ffprobe", encoding="utf-8")
+        dest.chmod(0o755)
+
+    monkeypatch.setattr(yarn_setup, "download", fake_download)
+    monkeypatch.setattr(yarn_setup, "_brew_install", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        yarn_setup,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="ok", stderr=""),
+    )
+    yarn_setup.step_tools(tmp_path)
+    assert downloaded[0][0] == "ffprobe"
+    assert downloaded[0][1] == yarn_setup.FFPROBE_STATIC
+    assert (bin_dir / "ffprobe").is_file()
+    assert os.access(bin_dir / "ffprobe", os.X_OK)
+
+
+def test_tools_leave_both_programs_alone_when_they_are_present(tmp_path, monkeypatch):
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        path = bin_dir / name
+        path.write_text(name, encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setattr(yarn_setup, "support_bin", lambda: bin_dir)
+    monkeypatch.setattr(yarn_setup, "which", lambda name: str(bin_dir / name))
+    monkeypatch.setattr(
+        yarn_setup,
+        "download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("download")),
+    )
+    monkeypatch.setattr(
+        yarn_setup,
+        "_brew_install",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("brew")),
+    )
+    monkeypatch.setattr(
+        yarn_setup,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="ok", stderr=""),
+    )
+    yarn_setup.step_tools(tmp_path)
+
+
 def test_install_host_python_asks_uv_for_312(tmp_path, monkeypatch):
     import subprocess
 

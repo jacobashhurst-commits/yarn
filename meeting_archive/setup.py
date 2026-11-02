@@ -36,6 +36,12 @@ FFMPEG_STATIC = (
     "https://github.com/eugeneware/ffmpeg-static/releases/download/"
     "b6.1.1/ffmpeg-darwin-arm64"
 )
+# The same release as ffmpeg. Saving a recording runs ffprobe, a second
+# program. The ffmpeg-only file used to leave Setup looking finished.
+FFPROBE_STATIC = (
+    "https://github.com/eugeneware/ffmpeg-static/releases/download/"
+    "b6.1.1/ffprobe-darwin-arm64"
+)
 OLLAMA_ZIP = "https://ollama.com/download/Ollama-darwin.zip"
 # macOS /usr/bin/python3 is still 3.9. It has no tomllib, and Setup used to
 # stop on the first step with that raw import error. uv installs a current
@@ -785,25 +791,67 @@ def _brew_install(formula: str, cask: bool = False, step_id: str = "tools") -> b
     return proc.returncode == 0
 
 
+def tool_search_dirs() -> tuple[Path, ...]:
+    return (
+        support_bin(),
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+    )
+
+
+def find_tool(name: str) -> str | None:
+    """ffmpeg lives in Homebrew, or in Yarn's own folder when Homebrew is absent."""
+    found = which(name)
+    if found:
+        return found
+    for directory in tool_search_dirs():
+        candidate = directory / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _static_tool(name: str, url: str) -> str:
+    dest = support_bin() / name
+    if not dest.is_file():
+        download(url, dest, "tools", long=True)
+        dest.chmod(0o755)
+    return str(dest)
+
+
 def step_tools(repo: Path) -> None:
-    ffmpeg = which("ffmpeg")
-    if ffmpeg:
-        emit({"type": "log", "id": "tools", "text": "ffmpeg is already on this Mac."})
+    del repo
+    ffmpeg = find_tool("ffmpeg")
+    ffprobe = find_tool("ffprobe")
+    if ffmpeg and ffprobe:
+        emit(
+            {
+                "type": "log",
+                "id": "tools",
+                "text": "ffmpeg and ffprobe are already on this Mac.",
+            }
+        )
     else:
-        emit({"type": "log", "id": "tools", "text": "ffmpeg is not on this Mac. Getting it."})
+        emit(
+            {
+                "type": "log",
+                "id": "tools",
+                "text": "ffmpeg is not complete on this Mac. Getting it.",
+            }
+        )
         if _brew_install("ffmpeg"):
-            ffmpeg = which("ffmpeg")
+            ffmpeg = find_tool("ffmpeg")
+            ffprobe = find_tool("ffprobe")
     if not ffmpeg:
-        dest = support_bin() / "ffmpeg"
-        if not dest.is_file():
-            download(FFMPEG_STATIC, dest, "tools", long=True)
-            dest.chmod(0o755)
-        ffmpeg = str(dest)
+        ffmpeg = _static_tool("ffmpeg", FFMPEG_STATIC)
+    if not ffprobe:
+        ffprobe = _static_tool("ffprobe", FFPROBE_STATIC)
     os.environ["PATH"] = f"{support_bin()}:{os.environ.get('PATH', '')}"
-    emit({"type": "log", "id": "tools", "text": f"ffmpeg: {ffmpeg}"})
-    probe = run([ffmpeg, "-version"], timeout=20)
-    if probe.returncode != 0:
-        raise RuntimeError("ffmpeg is present but would not run.")
+    for name, path in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+        emit({"type": "log", "id": "tools", "text": f"{name}: {path}"})
+        probe = run([path, "-version"], timeout=20)
+        if probe.returncode != 0:
+            raise RuntimeError(f"{name} is present but would not run.")
 
     whisper = which("whisper-cli")
     if not whisper and _brew_install("whisper-cpp"):

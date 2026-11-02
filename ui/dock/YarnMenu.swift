@@ -187,11 +187,12 @@ final class YarnStatus: NSObject, NSMenuDelegate {
     }
 
     /// Stop, and every other menu action, is a child of Yarn. Without Homebrew
-    /// on PATH, `ma finalize` cannot see ffprobe and the recording never starts
-    /// processing.
+    /// or Yarn's own tools on PATH, `ma finalize` cannot see ffprobe and the
+    /// recording is never saved.
     private static func commandEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        let prefix = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let support = NSHomeDirectory() + "/Library/Application Support/Yarn/bin"
+        let prefix = "\(support):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = prefix + ":" + (env["PATH"] ?? "")
         return env
     }

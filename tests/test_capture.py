@@ -334,3 +334,16 @@ def test_a_short_mute_inside_speech_is_filled_and_a_pause_is_not(tmp_path):
     middle = restored[hole + width // 2]
     assert abs(middle) > 1000
     assert max(abs(restored[i]) for i in range(pause, pause + pause_width)) == 0
+
+
+def test_ffprobe_in_yarns_folder_is_found(tmp_path, monkeypatch):
+    from meeting_archive import audio
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    probe = bin_dir / "ffprobe"
+    probe.write_text("probe", encoding="utf-8")
+    probe.chmod(0o755)
+    monkeypatch.setattr(audio, "tool_directories", lambda: (bin_dir,))
+    monkeypatch.setattr(audio.shutil, "which", lambda _name: None)
+    assert audio.require_tool("ffprobe") == str(probe)

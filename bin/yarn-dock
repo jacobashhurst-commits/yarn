@@ -98,6 +98,8 @@ if [[ -x "$BUNDLED_APP/Contents/MacOS/Yarn" ]]; then
   rm -rf "$APP_DIR"
   mkdir -p "$(dirname "$APP_DIR")"
   ditto "$BUNDLED_APP" "$APP_DIR"
+  # An older copy can still be carrying the hard white square.
+  "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
   seal_app
 elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
   write_info_plist

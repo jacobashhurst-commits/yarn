@@ -29,19 +29,24 @@ class AudioError(RuntimeError):
 
 
 # A menu-bar click inherits the app's PATH, which is only the system
-# directories. ffmpeg lives in Homebrew, and a stop that cannot find ffprobe
-# leaves the recording in in-progress instead of processing it.
-_TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+# directories. ffmpeg lives in Homebrew, or in Yarn's folder when Setup
+# downloaded it. A stop that cannot find ffprobe leaves the recording unsaved.
+def tool_directories() -> tuple[Path, ...]:
+    return (
+        Path.home() / "Library" / "Application Support" / "Yarn" / "bin",
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+    )
 
 
 def require_tool(name: str) -> str:
     path = shutil.which(name)
     if not path:
-        for directory in _TOOL_DIRS:
-            candidate = Path(directory) / name
+        for directory in tool_directories():
+            candidate = directory / name
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 path = str(candidate)
-                os.environ["PATH"] = directory + os.pathsep + os.environ.get("PATH", "")
+                os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
                 break
     if not path:
         raise AudioError(
