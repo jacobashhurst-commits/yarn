@@ -49,6 +49,7 @@ struct Snapshot {
     var failed = 0
     var model = ""
     var tokens = 0
+    var space = ""
     var ollamaDown = false
 }
 
@@ -101,6 +102,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let noteLabel = NSTextField(wrappingLabelWithString: "")
     let footer = NSTextField(labelWithString: "")
     var meetingCount = 0
+    var spaceSaved = ""
     var countedAt = Date.distantPast
     var background = false
     var rootStack: NSStackView?
@@ -293,6 +295,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         noteLabel.wantsLayer = true
         quips = QuipLine(label: noteLabel)
         style(footer, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
+        footer.maximumNumberOfLines = 3
         footer.preferredMaxLayoutWidth = 340
         footer.maximumNumberOfLines = 2
 
@@ -395,6 +398,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var foot = "\(snap.meetings) meeting\(snap.meetings == 1 ? "" : "s")"
         let tokens = NumberFormatter.localizedString(from: NSNumber(value: snap.tokens), number: .decimal)
         foot += "  ·  \(tokens) tokens saved"
+        if !snap.space.isEmpty { foot += "  ·  \(snap.space)" }
         if !snap.model.isEmpty { foot += "  ·  \(snap.model)" }
         if snap.failed > 0 { foot += "  ·  \(snap.failed) kept their audio" }
         footer.stringValue = foot
@@ -505,9 +509,11 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if countedAt.timeIntervalSinceNow < -30 || meetingCount == 0 {
             meetingCount = countFiles(root + "/transcripts", suffix: ".json")
+            spaceSaved = formatSaved(spaceNotStored(root))
             countedAt = Date()
         }
         snap.meetings = meetingCount
+        snap.space = spaceSaved
         snap.failed = countFiles(root + "/recordings/failed", suffix: ".json")
         let model = text(json(root + "/.yarn-settings.json")["summary_model"])
         snap.model = model
@@ -940,6 +946,57 @@ private func countFiles(_ dir: String, suffix: String) -> Int {
         if name.hasSuffix(suffix) { count += 1 }
     }
     return count
+}
+
+/// Same rates as meeting_archive/space_saved.py. Video is 1 GB an hour.
+/// Audio is 320 KB a second, and only counts once the recording is gone.
+private func spaceNotStored(_ root: String) -> Int64 {
+    let transcripts = root + "/transcripts"
+    let archive = root + "/recordings/archive"
+    guard let enumerator = FileManager.default.enumerator(atPath: transcripts) else { return 0 }
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: archive)) ?? []
+    var total: Int64 = 0
+    while let name = enumerator.nextObject() as? String {
+        guard name.hasSuffix(".json") else { continue }
+        let path = transcripts + "/" + name
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+        let seconds = doubleValue(obj["duration_s"])
+        if seconds <= 0 { continue }
+        let meeting = text(obj["meeting_id"])
+        let id = meeting.isEmpty
+            ? URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
+            : meeting
+        let prefix = id + "__"
+        let kept = names.contains { $0.hasPrefix(prefix) }
+        total += Int64((seconds * 1_000_000_000 / 3600).rounded())
+        if !kept { total += Int64((seconds * 320_000).rounded()) }
+    }
+    return total
+}
+
+private func doubleValue(_ value: Any?) -> Double {
+    if let value = value as? Double { return value }
+    if let value = value as? NSNumber { return value.doubleValue }
+    if let value = value as? String { return Double(value) ?? 0 }
+    return 0
+}
+
+private func formatSaved(_ bytes: Int64) -> String {
+    if bytes >= 1_000_000_000_000 {
+        return savedUnit(Double(bytes) / 1_000_000_000_000, "TB")
+    }
+    if bytes >= 1_000_000_000 {
+        return savedUnit(Double(bytes) / 1_000_000_000, "GB")
+    }
+    return savedUnit(Double(bytes) / 1_000_000, "MB")
+}
+
+private func savedUnit(_ value: Double, _ name: String) -> String {
+    if value >= 10 {
+        return "\(Int(value.rounded())) \(name) saved"
+    }
+    return String(format: "%.1f \(name) saved", value)
 }
 
 /// Cmd-C and Cmd-V only fire when the app has an Edit menu. Without it,

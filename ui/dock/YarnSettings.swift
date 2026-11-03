@@ -80,7 +80,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         let title = NSTextField(labelWithString: "Settings")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         title.textColor = YarnColor.navy
-        let subtitle = NSTextField(wrappingLabelWithString: "The same choices as the menu bar.")
+        let subtitle = NSTextField(wrappingLabelWithString: "Make Yarn your own.")
         subtitle.font = .systemFont(ofSize: 12)
         subtitle.textColor = YarnColor.slate
         let titles = NSStackView(views: [title, subtitle])
@@ -167,8 +167,8 @@ final class YarnSettings: NSObject, NSWindowDelegate {
 
         let form = stack([
             group(
-                "Thread",
-                caption: "A few lines about you, including your name. Ask Yarn reads this when it answers.",
+                "Your Thread",
+                caption: "Tell Yarn a little about yourself and how you like your answers. It'll use this when you Ask Yarn.",
                 body: thread
             ),
             group(
@@ -580,7 +580,7 @@ private final class SettingClip: NSClipView {
 /// A short note about the person using Yarn. The grey sentence is an example,
 /// shown only while the box is empty, and it is never saved.
 final class ThreadEditor: NSView, NSTextViewDelegate {
-    static let example = "I'm Jordan Lee. I look after partnerships. When you answer, use my name, lead with the decision, and say who is doing the next step."
+    static let example = "I'm Jacob. I manage Solution Consulting. Keep answers short, lead with decisions, and tell me who's doing what next."
     var onCommit: ((String) -> Void)?
     private let textView = ThreadText()
     private let border = NSView()
