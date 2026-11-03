@@ -21,6 +21,7 @@ from .store import MeetingStore
 from .summarize import Summarizer
 
 NOT_FOUND = "Nothing in your meetings matches that yet."
+THREAD_MAX = 2000
 
 # "Write me a summary email" is a drafting task. The passages are the source,
 # not a place to go looking for an email that was already sent.
@@ -314,7 +315,26 @@ def passages_for_meeting(cfg: Config, meeting_id: str, *, limit_chars: int = 200
     ]
 
 
-def build_prompt(question: str, hits: list[dict], *, earlier: str = "") -> str:
+def user_thread(cfg: Config) -> str:
+    """Who is asking, written in Settings. Empty until they fill it in."""
+    path = cfg.root / ".yarn-settings.json"
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    text = str(data.get("thread") or "").strip()
+    return text[:THREAD_MAX].strip()
+
+
+def build_prompt(
+    question: str,
+    hits: list[dict],
+    *,
+    earlier: str = "",
+    about: str = "",
+) -> str:
     blocks: list[str] = []
     for index, hit in enumerate(hits, start=1):
         meta = hit.get("metadata") or {}
@@ -330,6 +350,14 @@ def build_prompt(question: str, hits: list[dict], *, earlier: str = "") -> str:
     prior = ""
     if earlier.strip():
         prior = f"Earlier in this chat:\n{earlier.strip()}\n\n"
+    person = ""
+    note = about.strip()
+    if note:
+        person = (
+            "About the person asking. Use this for their name and what they "
+            "care about. It is not a meeting, and it does not add facts.\n"
+            f"{note}\n\n"
+        )
     if wants_draft(question):
         instruction = (
             "The user wants you to write something from these meetings, such as "
@@ -355,6 +383,7 @@ def build_prompt(question: str, hits: list[dict], *, earlier: str = "") -> str:
         )
     return (
         f"{instruction}\n\n"
+        f"{person}"
         f"{prior}"
         f"Question:\n{question.strip()}\n\n"
         f"Passages:\n{passages}"
@@ -421,7 +450,14 @@ def ask(cfg: Config, question: str, *, complete=None, remember: bool = True) -> 
     else:
         if complete is None:
             complete = Summarizer(cfg.summary).complete
-        answer = complete(build_prompt(question, hits, earlier=earlier_chat(cfg)))
+        answer = complete(
+            build_prompt(
+                question,
+                hits,
+                earlier=earlier_chat(cfg),
+                about=user_thread(cfg),
+            )
+        )
     path = write_answer(cfg, question, answer, hits)
     # The Dock chat stores the thread itself. Remembering here as well
     # would write the same question twice.

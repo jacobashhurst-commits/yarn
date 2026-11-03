@@ -62,6 +62,32 @@ def test_last_meeting_uses_that_transcript_not_a_keyword_search(cfg: Config, mon
     assert "Compose it yourself" in seen[0]
 
 
+def test_a_thread_names_who_is_asking_without_becoming_a_meeting(cfg: Config, monkeypatch):
+    from meeting_archive.config import write_setting
+
+    write_setting(cfg, "thread", "I'm Jordan Lee. Call me Jordan.")
+    hits = [{"document": "We will ship Friday.", "metadata": {"date_label": "15 Oct"}}]
+    monkeypatch.setattr("meeting_archive.ask.search_meetings", lambda _cfg, _question: hits)
+    seen: list[str] = []
+
+    def complete(prompt: str) -> str:
+        seen.append(prompt)
+        return "Friday."
+
+    ask(cfg, "what did we decide", complete=complete, remember=False)
+    assert "Jordan Lee" in seen[0]
+    assert "It is not a meeting" in seen[0]
+    assert "ship Friday" in seen[0]
+
+
+def test_prompt_without_a_thread_does_not_invent_a_person():
+    prompt = build_prompt(
+        "what did we decide",
+        [{"document": "We will ship Friday.", "metadata": {"date_label": "15 Oct"}}],
+    )
+    assert "About the person asking" not in prompt
+
+
 def test_prompt_stays_inside_the_passages():
     prompt = build_prompt(
         "what did we decide",

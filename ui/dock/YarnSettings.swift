@@ -21,6 +21,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         caption: "Opens today\u{2019}s brief when you log in."
     )
     private let briefTip = NSTextField(labelWithString: "Tip: try Open brief at login after a few mornings")
+    private let thread = ThreadEditor()
     private let status = NSTextField(labelWithString: "")
     private var writeGeneration = 0
     private var writing = false
@@ -61,6 +62,10 @@ final class YarnSettings: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         if !writing { reload() }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        thread.commit()
     }
 
     private func build() {
@@ -114,6 +119,9 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         brief.onChange = { [weak self] on in
             self?.write("brief_on_login", on ? "on" : "off")
         }
+        thread.onCommit = { [weak self] text in
+            self?.write("thread", text)
+        }
 
         let accurate = canAccurate
             ? "Accurate (9B)"
@@ -158,6 +166,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         briefRows.detachesHiddenViews = true
 
         let form = stack([
+            group(
+                "Thread",
+                caption: "A few lines about you, including your name. Ask Yarn reads this when it answers.",
+                body: thread
+            ),
             group(
                 "Meeting language",
                 caption: "The app stays in English. This is the language of the next recording.",
@@ -261,6 +274,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
 
     func reload() {
         let data = json(paths.root + "/.yarn-settings.json")
+        thread.setText(text(data["thread"]))
         let languageID = text(data["meeting_language"])
         language.select(known(languageID, fallback: "en", allowed: ["en", "auto", "ja", "zh", "es", "fr", "de", "ko"]))
         recognise.setOn(data["recognise_known"] == nil ? true : boolean(data["recognise_known"]))
@@ -561,4 +575,117 @@ private final class SettingDoc: NSView {
 
 private final class SettingClip: NSClipView {
     override var isFlipped: Bool { true }
+}
+
+/// A short note about the person using Yarn. The grey sentence is an example,
+/// shown only while the box is empty, and it is never saved.
+final class ThreadEditor: NSView, NSTextViewDelegate {
+    static let example = "I'm Jordan Lee. I look after partnerships. When you answer, use my name, lead with the decision, and say who is doing the next step."
+    var onCommit: ((String) -> Void)?
+    private let textView = ThreadText()
+    private let border = NSView()
+    private var saved = ""
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        border.wantsLayer = true
+        border.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+
+        textView.delegate = self
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.font = .systemFont(ofSize: 13)
+        textView.textColor = YarnColor.ink
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        scroll.documentView = textView
+
+        addSubview(border)
+        border.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            border.topAnchor.constraint(equalTo: topAnchor),
+            border.leadingAnchor.constraint(equalTo: leadingAnchor),
+            border.trailingAnchor.constraint(equalTo: trailingAnchor),
+            border.bottomAnchor.constraint(equalTo: bottomAnchor),
+            border.heightAnchor.constraint(equalToConstant: 108),
+            scroll.topAnchor.constraint(equalTo: border.topAnchor, constant: 1),
+            scroll.leadingAnchor.constraint(equalTo: border.leadingAnchor, constant: 1),
+            scroll.trailingAnchor.constraint(equalTo: border.trailingAnchor, constant: -1),
+            scroll.bottomAnchor.constraint(equalTo: border.bottomAnchor, constant: -1),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        border.layer?.cornerRadius = 8
+        border.layer?.borderWidth = 1
+        border.layer?.backgroundColor = (dark ? yarn(0x10161C) : yarn(0xF7F8FA)).cgColor
+        border.layer?.borderColor = (dark ? yarn(0x2C3642) : yarn(0xE2E6EC)).cgColor
+    }
+
+    func setText(_ value: String) {
+        if window?.firstResponder == textView { return }
+        if textView.string != value {
+            textView.string = value
+        }
+        saved = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        textView.needsDisplay = true
+    }
+
+    func commit() {
+        let value = String(textView.string.prefix(2000))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if value == saved { return }
+        saved = value
+        onCommit?(value)
+    }
+
+    func textDidChange(_ notification: Notification) {
+        if textView.string.count > 2000 {
+            textView.string = String(textView.string.prefix(2000))
+        }
+        textView.needsDisplay = true
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        commit()
+    }
+}
+
+private final class ThreadText: NSTextView {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty else { return }
+        let shown = NSAttributedString(
+            string: ThreadEditor.example,
+            attributes: [
+                .font: font ?? NSFont.systemFont(ofSize: 13),
+                .foregroundColor: YarnColor.slate.withAlphaComponent(0.8),
+            ]
+        )
+        let origin = textContainerOrigin
+        shown.draw(with: NSRect(
+            x: origin.x,
+            y: origin.y,
+            width: max(0, bounds.width - origin.x - 10),
+            height: max(0, bounds.height - origin.y)
+        ), options: [.usesLineFragmentOrigin])
+    }
 }

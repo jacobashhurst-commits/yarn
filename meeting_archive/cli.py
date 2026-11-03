@@ -15,7 +15,7 @@
     ma import-transcript PATH archive a coworker transcript without Whisper
     ma library                list meetings; --html writes a local viewer
     ma keep-audio / delete-audio
-    ma setting KEY VALUE      recognise_known, meeting_language, speaker_engine, audio_retention
+    ma setting KEY VALUE      recognise_known, meeting_language, speaker_engine, audio_retention, thread
     ma rediarize <id>         rebuild speaker labels without rerunning Whisper
     ma ingest <id>            reindex one meeting from its transcript
     ma rebuild                reindex every transcript on disk
@@ -1043,6 +1043,10 @@ def cmd_setting(cfg: Config, args) -> int:
             )
             return 1
         value = lowered
+    elif args.key == "thread":
+        from .ask import THREAD_MAX
+
+        value = raw[:THREAD_MAX].strip()
     elif args.key == "summary_model":
         from .resources import (
             SUMMARY_MODEL_FULL,
@@ -1479,6 +1483,7 @@ def build_parser() -> argparse.ArgumentParser:
             "summarize_when",
             "brief_on_login",
             "summary_model",
+            "thread",
         ),
     )
     p.add_argument("value")
