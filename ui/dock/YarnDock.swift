@@ -707,6 +707,7 @@ private func identifyWaitAlive(_ path: String) -> Bool {
     return kill(pid, 0) == 0
 }
 
+/// Bands for the whole meeting. menu.sh copies these in overall_percent.
 private func phaseBand(_ phase: String) -> (Int, Int) {
     switch phase {
     case "Preparing audio": return (2, 8)

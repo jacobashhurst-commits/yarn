@@ -182,12 +182,63 @@ progress_bar() {
   printf '%s' "$bar"
 }
 
-stage_line() {
-  if [[ "$indeterminate" == "true" || ! "$percent" =~ ^[0-9]+$ ]]; then
-    printf '%s%s' "$phase" "${detail:+: $detail}"
+# Whole-meeting percent. The Dock window uses the same bands in
+# YarnDock.phaseBand: a step at 50% is halfway through that step only.
+# Transcribing fills 8–62 of the meeting, voices 62–78, and so on.
+# OVERALL_PERCENT
+overall_percent() {
+  local phase_name="$1" stage_percent="$2" is_indeterminate="$3"
+  local elapsed="$4" expected="$5"
+  local start=8 end=96 span inner_num inner_den
+  case "$phase_name" in
+    "Preparing audio") start=2; end=8 ;;
+    "Transcribing") start=8; end=62 ;;
+    "Identifying speakers") start=62; end=78 ;;
+    "Recognising known speakers") start=78; end=84 ;;
+    "Cleaning transcript") start=84; end=88 ;;
+    "Writing summary") start=88; end=96 ;;
+    "Indexing"|"Indexing for search") start=96; end=99 ;;
+    "Saving transcript") start=99; end=100 ;;
+  esac
+  span=$(( end - start ))
+  (( span < 1 )) && span=1
+  [[ "$elapsed" =~ ^[0-9]+$ ]] || elapsed=0
+  [[ "$expected" =~ ^[0-9]+$ ]] || expected=0
+  if [[ "$is_indeterminate" != "true" ]]; then
+    [[ "$stage_percent" =~ ^[0-9]+$ ]] || stage_percent=0
+    (( stage_percent > 100 )) && stage_percent=100
+    inner_num=$stage_percent
+    inner_den=100
+  elif (( expected > 0 )); then
+    inner_num=$(( elapsed * 1000 / expected ))
+    (( inner_num > 920 )) && inner_num=920
+    inner_den=1000
   else
-    printf '%s %s%%%s' "$phase" "$percent" "${detail:+: $detail}"
+    inner_num=$(( elapsed * 1000 / 40 ))
+    (( inner_num > 900 )) && inner_num=900
+    inner_den=1000
   fi
+  local value=$(( start + (span * inner_num + inner_den / 2) / inner_den ))
+  (( value > end )) && value=$end
+  (( value < start )) && value=$start
+  printf '%s' "$value"
+}
+# END_OVERALL_PERCENT
+
+# The number must not fall when a step's own percent resets. Kept beside the
+# archive so the next menu refresh, a few seconds later, still agrees.
+hold_percent() {
+  local meeting="$1" value="$2" file="$MA_ROOT/.menu-progress-floor"
+  local saved_id="" saved=0
+  if [[ -f "$file" ]]; then
+    saved_id="$(sed -n 1p "$file" 2>/dev/null)"
+    saved="$(sed -n 2p "$file" 2>/dev/null)"
+  fi
+  [[ "$saved" =~ ^[0-9]+$ ]] || saved=0
+  [[ "$saved_id" == "$meeting" ]] || saved=0
+  (( value > saved )) || value=$saved
+  printf '%s\n%s\n' "$meeting" "$value" > "$file"
+  printf '%s' "$value"
 }
 
 short_phase() {
@@ -265,13 +316,9 @@ elif $identifying; then
 elif $processing; then
   frac="$(fraction)"
   stage="$(short_phase)"
-  pct=""
-  if [[ -n "$live_percent" ]]; then
-    pct=" ~${live_percent}%"
-  elif [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
-    pct=" ${percent}%"
-  fi
-  menu_title "${frac:+$frac }${stage}${pct}"
+  whole="$(overall_percent "$phase" "$percent" "$indeterminate" "$phase_elapsed" "$expected_s")"
+  whole="$(hold_percent "$proc_id" "$whole")"
+  menu_title "${frac:+$frac }${stage} ${whole}%"
 elif $paused; then
   menu_title "Paused"
 elif [[ "$queue_remaining" =~ ^[0-9]+$ ]] && (( queue_remaining > 0 )); then
@@ -311,11 +358,7 @@ if $processing; then
   step_text="${proc_step:-$phase}"
   echo "${step_text}, running $(span "$phase_elapsed") | size=11 color=#cc8800"
   [[ -n "$detail" ]] && echo "$detail | size=11 color=#888888"
-  if [[ -n "$live_percent" ]]; then
-    echo "$(progress_bar "$live_percent")  ~${live_percent}% | font=Menlo size=11 color=#cc8800"
-  elif [[ "$indeterminate" != "true" && "$percent" =~ ^[0-9]+$ ]]; then
-    echo "$(progress_bar "$percent")  ${percent}% | font=Menlo size=11 color=#cc8800"
-  fi
+  echo "$(progress_bar "$whole")  ${whole}% | font=Menlo size=11 color=#cc8800"
   [[ -n "$live_eta" ]] && echo "$live_eta | size=11 color=#cc8800"
   [[ -n "$proc_steps" ]] && echo "$proc_steps | size=11 color=#888888"
 elif $paused; then
