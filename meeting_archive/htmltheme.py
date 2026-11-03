@@ -253,6 +253,16 @@ a { color: var(--navy); }
 a:hover { color: var(--blue); }
 .note { color: var(--warn); }
 .err { color: var(--err); }
+button.delete {
+  font: 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: var(--err);
+  background: transparent;
+  border: 1px solid var(--err);
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button.delete:hover { background: var(--cloud); }
 .voice { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .voice audio, .player audio { width: 100%; margin-top: 8px; }
 .player + .player { margin-top: 14px; }

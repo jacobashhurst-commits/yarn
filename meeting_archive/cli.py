@@ -980,6 +980,7 @@ def cmd_library(cfg: Config, args) -> int:
 
     rows = library.list_meetings(cfg)
     if args.html:
+        library.ensure_server(cfg)
         path = library.render_html(cfg, rows)
         print(path)
         return 0

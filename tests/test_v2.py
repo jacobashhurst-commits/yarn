@@ -541,6 +541,61 @@ def test_import_transcript_rejects_empty(cfg):
         import_transcript(cfg, src)
 
 
+def test_library_audio_says_held_or_purged_and_offers_delete(cfg):
+    meeting_id = "2026-09-17T15-00-00"
+    write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "Hi")])
+    (cfg.audio_archive_dir / f"{meeting_id}__room.wav").write_bytes(b"sound")
+    kept = "2026-09-17T16-00-00"
+    write_transcript(cfg, kept, [Turn(ROOM, 0.0, 1.0, "Stay")])
+    records.write_notes(cfg.notes_json(kept), meeting_id=kept, keep_audio=True)
+    gone = "2026-09-17T17-00-00"
+    write_transcript(cfg, gone, [Turn(ROOM, 0.0, 1.0, "Was")])
+    html = library.render_html(cfg).read_text(encoding="utf-8")
+    assert html.count(">Held<") == 1
+    assert html.count(">Purged<") == 1
+    assert ">Kept<" in html
+    assert "Here" not in html
+    assert "Cleared" not in html
+    assert html.count(">Delete<") == 3
+    assert "Delete this meeting and its transcript?" in html
+
+
+def test_delete_removes_the_meeting_and_its_transcript(cfg):
+    meeting_id = "2026-09-17T18-00-00"
+    transcript = write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "Hi")])
+    transcript.md_name = "Board notes.md"
+    transcript.write(cfg.transcript_json(meeting_id))
+    md = cfg.transcript_md(meeting_id)
+    md.write_text("Board notes", encoding="utf-8")
+    html = cfg.transcript_html(meeting_id)
+    html.write_text("<p>Board notes</p>", encoding="utf-8")
+    records.write_notes(cfg.notes_json(meeting_id), meeting_id=meeting_id, notes="keep")
+    (cfg.audio_archive_dir / f"{meeting_id}__room.wav").write_bytes(b"sound")
+    jobs.enqueue(cfg, meeting_id, title="Board notes")
+
+    library.delete_meeting(cfg, meeting_id)
+
+    assert not cfg.transcript_json(meeting_id).exists()
+    assert not md.exists()
+    assert not html.exists()
+    assert not cfg.notes_json(meeting_id).exists()
+    assert not (cfg.audio_archive_dir / f"{meeting_id}__room.wav").exists()
+    assert jobs.load(cfg, meeting_id) is None
+    assert meeting_id not in {row.meeting_id for row in library.list_meetings(cfg)}
+
+
+def test_delete_refuses_a_meeting_yarn_is_still_processing(cfg):
+    meeting_id = "2026-09-17T19-00-00"
+    write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "Hi")])
+    cfg.processing_status.write_text(
+        json.dumps({"meeting_id": meeting_id, "phase": "Transcribing"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="still processing"):
+        library.delete_meeting(cfg, meeting_id)
+    assert cfg.transcript_json(meeting_id).exists()
+
+
 def test_library_lists_jobs_and_transcripts(cfg):
     write_transcript(cfg, "2026-09-17T15-00-00", [Turn(ROOM, 0.0, 1.0, "Hi")])
     jobs.enqueue(cfg, "2026-09-17T16-00-00", title="Queued call")
