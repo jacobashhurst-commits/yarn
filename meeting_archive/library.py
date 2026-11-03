@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 # page, so a small local server has to be awake to receive it. It listens
 # only on this Mac, and only for the token written into the page.
 LIBRARY_PORT = 47331
-_SERVER_MARK = b"yarn-library/1"
+_SERVER_MARK = b"yarn-library/2"
 
 
 @dataclass
@@ -150,11 +150,7 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
                     page = cfg.transcript_md(row.meeting_id)
         elif not page.exists():
             page = cfg.transcript_md(row.meeting_id)
-        title = row.title
-        if page.exists():
-            title = f'<a href="{page.as_uri()}">{_esc(title)}</a>'
-        else:
-            title = _esc(title)
+        title = _title_cell(action, row, page)
         audio = _audio_label(row)
         summary = (
             "Written"
@@ -243,7 +239,7 @@ def _audio_label(row: MeetingRow) -> str:
     return "Purged"
 
 
-def _delete_action(cfg: Config) -> tuple[str, str]:
+def _delete_action(cfg: Config) -> tuple[str, str, str]:
     token_path = cfg.root / ".library-token"
     try:
         token = token_path.read_text(encoding="utf-8").strip()
@@ -256,11 +252,34 @@ def _delete_action(cfg: Config) -> tuple[str, str]:
             token_path.chmod(0o600)
         except OSError:
             pass
-    return (f"http://127.0.0.1:{LIBRARY_PORT}/delete", token)
+    base = f"http://127.0.0.1:{LIBRARY_PORT}"
+    return (f"{base}/delete", f"{base}/rename", token)
 
 
-def _delete_button(action: tuple[str, str], meeting_id: str) -> str:
-    url, token = action
+def _title_cell(action: tuple[str, str, str], row: MeetingRow, page: Path) -> str:
+    _, rename, token = action
+    shown = row.title
+    link = (
+        f'<a href="{page.as_uri()}">{_esc(shown)}</a>'
+        if page.exists()
+        else _esc(shown)
+    )
+    return (
+        f'<div class="name-line">{link}'
+        '<button type="button" class="texty" '
+        "onclick=\"var f=this.parentElement.nextElementSibling;"
+        'f.hidden=!f.hidden">Edit</button></div>'
+        f'<form class="name-edit" hidden method="post" action="{rename}">'
+        f'<input name="name" value="{_esc(shown)}" aria-label="Meeting name">'
+        f'<input type="hidden" name="meeting" value="{_esc(row.meeting_id)}">'
+        f'<input type="hidden" name="token" value="{_esc(token)}">'
+        '<button class="texty" type="submit">Save</button>'
+        "</form>"
+    )
+
+
+def _delete_button(action: tuple[str, str, str], meeting_id: str) -> str:
+    url, _, token = action
     return (
         f'<form method="post" action="{url}" '
         'onsubmit="return confirm(\'Delete this meeting and its transcript?\')">'
@@ -405,8 +424,51 @@ def ensure_server(cfg: Config) -> None:
     log.warning("the library delete button could not start")
 
 
+def rename_meeting(cfg: Config, meeting_id: str, name: str) -> None:
+    """Correct the name shown in the library, and on the transcript page."""
+    try:
+        parse_meeting_id(meeting_id)
+    except ValueError as exc:
+        raise ValueError(f"unknown meeting {meeting_id}") from exc
+    name = " ".join(name.split())
+    if not name:
+        raise ValueError("The meeting needs a name.")
+    reason = _busy_reason(cfg, meeting_id)
+    if reason:
+        raise RuntimeError(reason)
+    path = cfg.transcript_json(meeting_id)
+    if not path.exists():
+        raise FileNotFoundError(f"no transcript for {meeting_id}")
+    transcript = Transcript.read(path)
+    previous_html = cfg.transcript_html(meeting_id)
+    previous_md = cfg.transcript_md(meeting_id)
+    records.write_notes(
+        cfg.notes_json(meeting_id),
+        meeting_id=meeting_id,
+        notes=name,
+        applied=False,
+    )
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    transcript.title = records.meeting_title(notes, transcript)
+    transcript.md_name = records.markdown_filename(meeting_id, transcript.title)
+    transcript.write(path)
+    records.ensure_transcript_page(cfg, transcript, notes)
+    current_html = cfg.transcript_html(meeting_id)
+    if previous_html != current_html:
+        previous_html.unlink(missing_ok=True)
+    current_md = cfg.transcript_md(meeting_id)
+    if previous_md != current_md and previous_md.exists() and not current_md.exists():
+        previous_md.replace(current_md)
+    elif previous_md != current_md:
+        previous_md.unlink(missing_ok=True)
+    job = jobs.load(cfg, meeting_id)
+    if job is not None and job.title != transcript.title:
+        job.title = transcript.title
+        jobs.save(cfg, job)
+
+
 def serve(cfg: Config) -> None:
-    token = _delete_action(cfg)[1]
+    token = _delete_action(cfg)[2]
     handler = _handler(cfg, token)
 
     class Server(ThreadingHTTPServer):
@@ -435,7 +497,8 @@ def _handler(cfg: Config, token: str):
             self._send(404, b"Not found", "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path.split("?", 1)[0] != "/delete":
+            path = self.path.split("?", 1)[0]
+            if path not in ("/delete", "/rename"):
                 self._send(404, b"Not found", "text/plain")
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -447,7 +510,10 @@ def _handler(cfg: Config, token: str):
                 self._send(403, b"Refused", "text/plain")
                 return
             try:
-                delete_meeting(cfg, meeting_id)
+                if path == "/rename":
+                    rename_meeting(cfg, meeting_id, (fields.get("name") or [""])[0])
+                else:
+                    delete_meeting(cfg, meeting_id)
             except (OSError, RuntimeError, ValueError) as exc:
                 body = f"<p>{_esc(str(exc))}</p>".encode()
                 self._send(409, body, "text/html; charset=utf-8")

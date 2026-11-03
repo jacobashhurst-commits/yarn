@@ -584,6 +584,32 @@ def test_delete_removes_the_meeting_and_its_transcript(cfg):
     assert meeting_id not in {row.meeting_id for row in library.list_meetings(cfg)}
 
 
+def test_rename_replaces_the_meeting_name(cfg):
+    meeting_id = "2026-09-17T18-30-00"
+    transcript = write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "Hi")])
+    transcript.title = "Wrong name"
+    transcript.md_name = "2026-09-17 Wrong name.md"
+    transcript.write(cfg.transcript_json(meeting_id))
+    old = cfg.transcript_html(meeting_id)
+    old.write_text("<p>Wrong name</p>", encoding="utf-8")
+    records.write_notes(cfg.notes_json(meeting_id), meeting_id=meeting_id, notes="Wrong name")
+
+    library.rename_meeting(cfg, meeting_id, "MYOB RFP brief")
+
+    renamed = Transcript.read(cfg.transcript_json(meeting_id))
+    assert renamed.title == "MYOB RFP brief"
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    assert notes["notes"] == "MYOB RFP brief"
+    assert notes["applied"] is False
+    page = cfg.transcript_html(meeting_id)
+    assert page.exists()
+    assert "MYOB RFP brief" in page.read_text(encoding="utf-8")
+    assert not old.exists()
+    html = library.render_html(cfg).read_text(encoding="utf-8")
+    assert ">Edit<" in html
+    assert "MYOB RFP brief" in html
+
+
 def test_delete_refuses_a_meeting_yarn_is_still_processing(cfg):
     meeting_id = "2026-09-17T19-00-00"
     write_transcript(cfg, meeting_id, [Turn(ROOM, 0.0, 1.0, "Hi")])

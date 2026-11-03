@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 #
-# The optional on-stop popup. Two dialogs, both dismissible, neither required.
+# The optional on-stop window. One window, two sections, neither required.
 #
 #   meeting-popup <meeting_id> [--attendees "John, Marina"]
 #
-# Escape or "Not now" on either dialog skips it. If both come back empty,
-# nothing is written at all and the meeting is processed exactly as if this
-# script had never run.
+# Not now, or Save with both boxes empty, writes nothing. The meeting is
+# then processed exactly as if this script had never run.
 #
 # Called in the background by `rec stop`, and again by the watcher once names
 # have been detected in the transcript (with --attendees pre-filled).
@@ -26,6 +25,57 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
+
+# Preferred path: one Yarn window with both questions. AppleScript can only
+# ask them one after another, and those dialogs are not the Yarn window.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SWIFT_SRC="$REPO_DIR/ui/notes/YarnNotes.swift"
+APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Notes.app"
+APP_BIN="$APP_DIR/Contents/MacOS/YarnNotes"
+
+build_notes_app() {
+  command -v swiftc >/dev/null 2>&1 || return 1
+  mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" || return 1
+  cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.meetingarchive.notes</string>
+  <key>CFBundleName</key><string>Yarn Notes</string>
+  <key>CFBundleDisplayName</key><string>This meeting</string>
+  <key>CFBundleExecutable</key><string>YarnNotes</string>
+  <key>CFBundleIconFile</key><string>Yarn</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+  cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
+    "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
+  "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" || return 1
+  swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
+    -framework AppKit >/dev/null 2>&1 || return 1
+  mv -f "$APP_BIN.partial" "$APP_BIN"
+  codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+}
+
+if [[ -f "$SWIFT_SRC" ]]; then
+  if [[ ! -x "$APP_BIN" || ! -f "$APP_DIR/Contents/Info.plist" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+    build_notes_app || echo "meeting-popup: could not build the window, using dialogs" >&2
+  fi
+  if [[ -x "$APP_BIN" ]]; then
+    ma_path="$(command -v "$MA")"
+    args=(--ma "$ma_path")
+    if [[ -n "$attendees_prefill" ]]; then
+      args+=(--attendees "$attendees_prefill")
+    fi
+    args+=("$meeting_id")
+    exec open -n "$APP_DIR" --args "${args[@]}"
+  fi
+fi
 
 # Arguments are passed through argv rather than interpolated into the script
 # text, so apostrophes and quotes in a meeting note can't break the AppleScript.

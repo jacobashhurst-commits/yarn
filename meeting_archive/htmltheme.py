@@ -263,6 +263,35 @@ button.delete {
   cursor: pointer;
 }
 button.delete:hover { background: var(--cloud); }
+button.texty {
+  font: 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: var(--navy);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+button.texty:hover { background: var(--cloud); }
+.name-line { display: flex; align-items: center; gap: 8px; }
+.name-edit {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.name-edit[hidden] { display: none; }
+.name-edit input {
+  flex: 1;
+  min-width: 0;
+  font: 14px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 8px;
+}
+.name-edit button { margin-left: 0; }
 .voice { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .voice audio, .player audio { width: 100%; margin-top: 8px; }
 .player + .player { margin-top: 14px; }
