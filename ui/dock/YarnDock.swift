@@ -295,9 +295,9 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         noteLabel.wantsLayer = true
         quips = QuipLine(label: noteLabel)
         style(footer, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
-        footer.maximumNumberOfLines = 3
-        footer.preferredMaxLayoutWidth = 340
-        footer.maximumNumberOfLines = 2
+        footer.maximumNumberOfLines = 1
+        footer.lineBreakMode = .byTruncatingTail
+        footer.preferredMaxLayoutWidth = 360
 
         let root = stack([header, now, progress, actions, noteLabel, footer], spacing: 14)
         root.detachesHiddenViews = true
@@ -396,11 +396,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         progressTitle.isHidden = snap.heading.isEmpty
 
         var foot = "\(snap.meetings) meeting\(snap.meetings == 1 ? "" : "s")"
-        let tokens = NumberFormatter.localizedString(from: NSNumber(value: snap.tokens), number: .decimal)
-        foot += "  ·  \(tokens) tokens saved"
-        if !snap.space.isEmpty { foot += "  ·  \(snap.space)" }
-        if !snap.model.isEmpty { foot += "  ·  \(snap.model)" }
-        if snap.failed > 0 { foot += "  ·  \(snap.failed) kept their audio" }
+        foot += " · \(formatTokens(snap.tokens)) tokens saved"
+        if !snap.space.isEmpty { foot += " · \(snap.space)" }
+        if !snap.model.isEmpty { foot += " · \(snap.model)" }
+        if snap.failed > 0 { foot += " · \(snap.failed) kept their audio" }
         footer.stringValue = foot
         footer.textColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
         if snap.ollamaDown {
@@ -980,6 +979,27 @@ private func doubleValue(_ value: Any?) -> Double {
     if let value = value as? NSNumber { return value.doubleValue }
     if let value = value as? String { return Double(value) ?? 0 }
     return 0
+}
+
+/// 648,255 is "648k". A million is "1.2M", ten million is "12M".
+private func formatTokens(_ count: Int) -> String {
+    let n = Double(max(0, count))
+    if n >= 1_000_000_000 { return tokenUnit(n / 1_000_000_000, "B") }
+    if n >= 1_000_000 { return tokenUnit(n / 1_000_000, "M") }
+    if n >= 1_000 { return tokenUnit(n / 1_000, "k") }
+    return "\(count)"
+}
+
+private func tokenUnit(_ value: Double, _ suffix: String) -> String {
+    if value >= 9.95 {
+        let whole = Int(value.rounded())
+        if whole >= 1000 {
+            let next = suffix == "k" ? "M" : "B"
+            return tokenUnit(value / 1000, next)
+        }
+        return "\(whole)\(suffix)"
+    }
+    return String(format: "%.1f\(suffix)", value)
 }
 
 private func formatSaved(_ bytes: Int64) -> String {
