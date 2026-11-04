@@ -579,71 +579,142 @@ private final class SettingClip: NSClipView {
 
 /// A short note about the person using Yarn. The grey sentence is an example,
 /// shown only while the box is empty, and it is never saved.
+///
+/// The box has to wrap to its own width, and the letters have to be a plain
+/// colour. On macOS 13 and 14 a layer behind the text view draws the cursor
+/// and hides the letters, and a text view left at its default width draws
+/// the example as one line that runs out of the box.
 final class ThreadEditor: NSView, NSTextViewDelegate {
     static let example = "I'm Jacob. I manage Solution Consulting. Keep answers short, lead with decisions, and tell me who's doing what next."
     var onCommit: ((String) -> Void)?
     private let textView = ThreadText()
-    private let border = NSView()
+    private let scroll = NSScrollView()
     private var saved = ""
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
 
-        border.wantsLayer = true
-        border.translatesAutoresizingMaskIntoConstraints = false
-
-        let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
+        scroll.contentView = ThreadClip()
+        scroll.automaticallyAdjustsContentInsets = false
 
+        let wrapping = NSMutableParagraphStyle()
+        wrapping.lineBreakMode = .byWordWrapping
         textView.delegate = self
         textView.isRichText = false
         textView.importsGraphics = false
         textView.font = .systemFont(ofSize: 13)
-        textView.textColor = YarnColor.ink
-        textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.drawsBackground = true
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.textContainerInset = NSSize(width: 6, height: 8)
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.defaultParagraphStyle = wrapping
         scroll.documentView = textView
 
-        addSubview(border)
-        border.addSubview(scroll)
+        addSubview(scroll)
         NSLayoutConstraint.activate([
-            border.topAnchor.constraint(equalTo: topAnchor),
-            border.leadingAnchor.constraint(equalTo: leadingAnchor),
-            border.trailingAnchor.constraint(equalTo: trailingAnchor),
-            border.bottomAnchor.constraint(equalTo: bottomAnchor),
-            border.heightAnchor.constraint(equalToConstant: 108),
-            scroll.topAnchor.constraint(equalTo: border.topAnchor, constant: 1),
-            scroll.leadingAnchor.constraint(equalTo: border.leadingAnchor, constant: 1),
-            scroll.trailingAnchor.constraint(equalTo: border.trailingAnchor, constant: -1),
-            scroll.bottomAnchor.constraint(equalTo: border.bottomAnchor, constant: -1),
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
+            heightAnchor.constraint(equalToConstant: 108),
         ])
+        applyColours()
     }
 
     required init?(coder: NSCoder) { nil }
 
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let fill = dark ? yarn(0x10161C) : yarn(0xF7F8FA)
+        let stroke = dark ? yarn(0x2C3642) : yarn(0xE2E6EC)
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
+        fill.setFill()
+        path.fill()
+        stroke.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
     override func layout() {
         super.layout()
+        fitText()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyColours()
+        fitText()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColours()
+        needsDisplay = true
+    }
+
+    /// Plain colours, resolved for the current appearance. A dynamic colour
+    /// inside this card can come out the same shade as the background, so
+    /// the cursor moves and the words do not show.
+    private func applyColours() {
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        border.layer?.cornerRadius = 8
-        border.layer?.borderWidth = 1
-        border.layer?.backgroundColor = (dark ? yarn(0x10161C) : yarn(0xF7F8FA)).cgColor
-        border.layer?.borderColor = (dark ? yarn(0x2C3642) : yarn(0xE2E6EC)).cgColor
+        let ink = dark ? yarn(0xE7EEF6) : yarn(0x19293D)
+        let fill = dark ? yarn(0x10161C) : yarn(0xF7F8FA)
+        let ghost = (dark ? yarn(0x9AAFC3) : yarn(0x617188)).withAlphaComponent(0.8)
+        let wrapping = (textView.defaultParagraphStyle?.mutableCopy() as? NSMutableParagraphStyle)
+            ?? NSMutableParagraphStyle()
+        wrapping.lineBreakMode = .byWordWrapping
+        textView.backgroundColor = fill
+        textView.textColor = ink
+        textView.insertionPointColor = yarn(0x167DFF)
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: ink,
+            .paragraphStyle: wrapping,
+        ]
+        textView.ghost = ghost
+        if textView.string.isEmpty == false {
+            textView.textStorage?.addAttributes(textView.typingAttributes, range: NSRange(location: 0, length: textView.string.utf16.count))
+        }
+        textView.needsDisplay = true
+    }
+
+    /// The text view's default width is far wider than the card, so the
+    /// example and the typing both run off the right edge.
+    private func fitText() {
+        let width = scroll.contentSize.width
+        guard width > 20 else { return }
+        textView.minSize = NSSize(width: width, height: 0)
+        textView.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        if abs(textView.frame.width - width) > 0.5 {
+            textView.frame.size.width = width
+        }
+        textView.needsDisplay = true
     }
 
     func setText(_ value: String) {
         if window?.firstResponder == textView { return }
         if textView.string != value {
             textView.string = value
+            applyColours()
         }
         saved = value.trimmingCharacters(in: .whitespacesAndNewlines)
         textView.needsDisplay = true
@@ -669,7 +740,22 @@ final class ThreadEditor: NSView, NSTextViewDelegate {
     }
 }
 
+/// A layer here is what hides the letters on macOS 13 and 14.
+private final class ThreadClip: NSClipView {
+    override var wantsLayer: Bool {
+        get { false }
+        set { }
+    }
+}
+
 private final class ThreadText: NSTextView {
+    var ghost = yarn(0x617188).withAlphaComponent(0.8)
+
+    override var wantsLayer: Bool {
+        get { false }
+        set { }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard string.isEmpty else { return }
@@ -677,15 +763,22 @@ private final class ThreadText: NSTextView {
             string: ThreadEditor.example,
             attributes: [
                 .font: font ?? NSFont.systemFont(ofSize: 13),
-                .foregroundColor: YarnColor.slate.withAlphaComponent(0.8),
+                .foregroundColor: ghost,
+                .paragraphStyle: defaultParagraphStyle ?? {
+                    let style = NSMutableParagraphStyle()
+                    style.lineBreakMode = .byWordWrapping
+                    return style
+                }(),
             ]
         )
         let origin = textContainerOrigin
+        let wrap = textContainer?.containerSize.width ?? bounds.width
+        let width = min(bounds.width, wrap > 20 ? wrap : bounds.width)
         shown.draw(with: NSRect(
             x: origin.x,
             y: origin.y,
-            width: max(0, bounds.width - origin.x - 10),
-            height: max(0, bounds.height - origin.y)
+            width: max(20, width - origin.x),
+            height: max(bounds.height, 80)
         ), options: [.usesLineFragmentOrigin])
     }
 }
