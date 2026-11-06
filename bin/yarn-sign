@@ -86,9 +86,13 @@ notarize_file() {
       local stage app
       stage="$(mktemp -d)"
       unzip -q "$target" -d "$stage"
-      while IFS= read -r app; do
+      # Only the app people double-click. Stapling the nested Yarn.app
+      # writes CodeResources into it, and the Setup signature then fails
+      # because that file was not part of the seal.
+      app="$(find "$stage" -mindepth 2 -maxdepth 2 -name '*.app' -type d -print -quit)"
+      if [[ -n "$app" ]]; then
         xcrun stapler staple "$app"
-      done < <(find "$stage" -name '*.app' -type d -print | awk '{ print length($0), $0 }' | sort -nr | cut -d' ' -f2-)
+      fi
       local root
       root="$(find "$stage" -mindepth 1 -maxdepth 1 -type d -print -quit)"
       rm -f "$target"
