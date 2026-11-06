@@ -74,11 +74,27 @@ notarize_file() {
     exit 2
   fi
   xcrun notarytool submit "$target" --keychain-profile "$PROFILE" --wait
-  # A downloaded zip only skips the unidentified-developer prompt when the
-  # ticket is stapled to the zip. Notarization alone leaves it on Apple's
-  # server, and Gatekeeper then sends people through Privacy & Security.
+  # stapler cannot attach a ticket to a zip. The ticket has to go inside
+  # each app, or a Mac with no network still hits the unidentified-developer
+  # prompt. Deepest app first, so a nested Yarn.app is finished before the
+  # Setup app that contains it.
   case "$target" in
-    *.app|*.zip) xcrun stapler staple "$target" ;;
+    *.app)
+      xcrun stapler staple "$target"
+      ;;
+    *.zip)
+      local stage app
+      stage="$(mktemp -d)"
+      unzip -q "$target" -d "$stage"
+      while IFS= read -r app; do
+        xcrun stapler staple "$app"
+      done < <(find "$stage" -name '*.app' -type d -print | awk '{ print length($0), $0 }' | sort -nr | cut -d' ' -f2-)
+      local root
+      root="$(find "$stage" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+      rm -f "$target"
+      COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$root" "$target"
+      rm -rf "$stage"
+      ;;
   esac
   echo "yarn-sign: notarized $target"
 }

@@ -46,7 +46,7 @@ The Yarn page downloads `releases/latest`. That zip opens Yarn Setup, which is s
 2. `bin/yarn-release` signs and notarizes `dist/Yarn.Setup.Apple.Silicon.zip`.
 3. Upload that zip as the new GitHub release.
 
-`Start here.txt`, `README.md`, and `docs/index.html` tell people to double-click Yarn Setup. Those lines stay only while the file on `releases/latest` is this notarized zip. An ad-hoc zip is still blocked on first open, and the note in the zip would then be wrong.
+`README.md` and `docs/index.html` tell people to double-click Yarn Setup. Those lines stay only while the file on `releases/latest` is this notarized zip. An ad-hoc zip is still blocked on first open, and the note on the page would then be wrong.
 
 ## What still asks
 

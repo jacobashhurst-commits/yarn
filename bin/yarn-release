@@ -17,12 +17,11 @@ OUT="$REPO_DIR/dist/$NAME.zip"
 
 mkdir -p "$ROOT" "$REPO_DIR/dist"
 
-# The folder people open shows this note and Yarn Setup. The program lives
-# inside that app. A downloaded app can be opened from a temporary folder,
-# and a sibling folder would be left behind.
+# The folder people open is Yarn Setup. The program lives inside that app.
+# A downloaded app can be opened from a temporary folder, and a note beside
+# it would be left behind.
 INNER="$STAGE/program"
 mkdir -p "$INNER"
-cp -f "$REPO_DIR/Start here.txt" "$ROOT/"
 
 copy() {
   local src="$1"

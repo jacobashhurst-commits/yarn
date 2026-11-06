@@ -75,7 +75,7 @@ That zip is a GitHub Release, not Code → Download ZIP.
 Code → Download ZIP is the whole source tree. The release zip already
 contains Yarn Setup, so a Mac does not need Xcode or Python beforehand.
 
-Open the folder from the release zip. It contains **Start here.txt** and **Yarn Setup**. Double-click Yarn Setup. Setup copies Yarn out of
+Open the folder from the release zip and double-click **Yarn Setup**. Setup copies Yarn out of
 Downloads into `~/Library/Application Support/Yarn` so the recorder can run
 as a background job. macOS blocks LaunchAgents from reading Downloads.
 When it finishes, Yarn is in the Dock: record, watch progress, name voices,
