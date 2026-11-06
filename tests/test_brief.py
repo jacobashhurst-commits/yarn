@@ -87,6 +87,13 @@ def test_hours_by_day_fills_empty_days(cfg: Config):
     assert hours["2026-10-15"] == 0.0
 
 
+def test_short_meetings_still_count_as_hours():
+    assert brief._compact_hours(0) == "0"
+    assert brief._compact_hours(0.02) == "<0.1"
+    assert brief._compact_hours(1.0) == "1"
+    assert brief._compact_hours(1.5) == "1.5"
+
+
 def test_render_brief_html_includes_charts_and_sections(cfg: Config):
     today = date(2026, 10, 15)
     mid = _write_meeting(
@@ -113,6 +120,11 @@ def test_render_brief_html_includes_charts_and_sections(cfg: Config):
     )
     html = brief.render_brief_html(result, hint_login=True)
     assert "Yarn daily brief" in html
+    assert 'class="dashboard"' in html
+    assert "In short" in html
+    assert ">Meetings<" in html
+    assert ">Hours<" in html
+    assert ">Actions<" in html
     assert "Where the week went" in html
     assert "Where to spend today" in html
     assert "Needs action" in html

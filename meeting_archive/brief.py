@@ -488,6 +488,8 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
         )
 
     actions = _merge_items(brief.actions, _extracted_actions(brief.sources), brief.sources)
+    linked = [src for src in brief.sources if src.md_uri]
+    week_hours = _compact_hours(sum(hours.values()))
 
     def section(title: str, items: list[BriefItem], empty: str) -> str:
         if not items:
@@ -559,27 +561,41 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
             "Those lines are drafts from a short excerpt.</p>"
         )
 
+    overview = ""
+    if brief.overview.strip():
+        overview = (
+            f'<section class="card prose overview"><h2>In short</h2>'
+            f"{_blocks(brief.overview)}</section>"
+        )
     body = f"""
-  {htmltheme.masthead("Yarn daily brief", day_label)}
-  <p class="when">Generated {generated_label} · saved on this Mac</p>
-  <div class="prose overview">{_blocks(brief.overview)}</div>
+<div class="dashboard">
+  <div class="dash-top">
+    <div>
+      {htmltheme.masthead("Yarn daily brief", day_label)}
+      <p class="when">Generated {generated_label} · saved on this Mac</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><strong>{len(linked)}</strong><span>Meetings</span></div>
+      <div class="stat"><strong>{week_hours}</strong><span>Hours</span></div>
+      <div class="stat"><strong>{len(actions)}</strong><span>Actions</span></div>
+    </div>
+  </div>
   {hint}
-  <div class="columns">
+  {overview}
+  <section class="card week">
+    <h2>Where the week went</h2>
+    <div class="bars">{"".join(week_bars)}</div>
+  </section>
+  <div class="columns boards">
     {section("Needs action", actions, "No open actions jumped out.")}
     {section("Important today", brief.important, "Nothing urgent stood out.")}
     {section("Start this week", brief.start, "No clear starts called out.")}
   </div>
-  <div class="grid">
-    <section class="card">
-      <h2>Where the week went</h2>
-      <div class="bars">{"".join(week_bars)}</div>
-    </section>
-    <section class="card">
-      <h2>Where to spend today</h2>
-      {"".join(focus_rows) if focus_rows else '<p class="empty">Not enough signal for a focus split.</p>'}
-    </section>
-  </div>
-  <section class="card sources">
+  <section class="card focus-card">
+    <h2>Where to spend today</h2>
+    {"".join(focus_rows) if focus_rows else '<p class="empty">Not enough signal for a focus split.</p>'}
+  </section>
+  <section class="card sources meetings">
     <h2>From your meetings</h2>
     {gap}
     <ul>{"".join(sources) or "<li><span>No linked transcripts.</span></li>"}</ul>
@@ -589,8 +605,21 @@ def render_brief_html(brief: BriefResult, *, hint_login: bool = False) -> str:
     Model: {_esc(brief.model or "local")}.
     Read-only over your archive; nothing was changed.
   </footer>
+</div>
 """
     return htmltheme.document(f"Yarn brief, {brief.day.isoformat()}", body)
+
+
+def _compact_hours(total: float) -> str:
+    if total <= 0:
+        return "0"
+    # A short meeting is still a meeting. Rounding it to 0 made the tile a lie.
+    if total < 0.1:
+        return "<0.1"
+    rounded = round(total, 1)
+    if float(rounded).is_integer():
+        return str(int(rounded))
+    return f"{rounded:.1f}"
 
 
 def _rich(value: str) -> str:

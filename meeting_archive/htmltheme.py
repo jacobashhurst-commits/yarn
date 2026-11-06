@@ -303,6 +303,80 @@ button.texty:hover { background: var(--cloud); }
   margin-right: 6px;
   vertical-align: 1px;
 }
+/* The brief is a board. Library and transcript pages stay a reading column. */
+.wrap:has(.dashboard) { max-width: 1160px; }
+.dashboard {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(240px, 0.85fr);
+  column-gap: 16px;
+  row-gap: 16px;
+  align-items: stretch;
+}
+.dashboard .dash-top,
+.dashboard .hint,
+.dashboard .meetings,
+.dashboard > footer { grid-column: 1 / -1; }
+.dashboard .overview { grid-column: 1 / 4; }
+.dashboard .week,
+.dashboard .focus-card { grid-column: 4; }
+.dashboard .boards { display: contents; }
+.dashboard .dash-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+}
+.dashboard .mast { margin: 0; }
+.dashboard .when { margin: 8px 0 0; }
+.dashboard .stats { display: flex; gap: 10px; flex: none; }
+.dashboard .stat {
+  min-width: 96px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+.dashboard .stat strong {
+  display: block;
+  font-size: 22px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--navy);
+  font-variant-numeric: tabular-nums;
+}
+.dashboard .stat span {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+.dashboard .overview { max-width: none; margin: 0; font-size: 16px; }
+.dashboard .focus-row { grid-template-columns: minmax(4.5rem, 38%) minmax(0, 1fr) 2.2rem; }
+.dashboard .focus-row span { overflow-wrap: anywhere; }
+.dashboard .meetings { background: transparent; border: 0; padding: 0; }
+.dashboard .sources ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.dashboard .sources li {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+@media (max-width: 980px) {
+  .dashboard { grid-template-columns: 1fr; }
+  .dashboard .overview,
+  .dashboard .week,
+  .dashboard .focus-card,
+  .dashboard .boards > section { grid-column: 1; }
+  .dashboard .dash-top { flex-direction: column; align-items: flex-start; }
+  .dashboard .stats { flex-wrap: wrap; }
+}
 """
 
 
