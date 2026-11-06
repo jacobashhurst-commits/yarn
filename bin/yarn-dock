@@ -72,8 +72,8 @@ write_info_plist() {
   <key>CFBundleExecutable</key><string>Yarn</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.7</string>
-  <key>CFBundleVersion</key><string>0.7</string>
+  <key>CFBundleShortVersionString</key><string>0.8</string>
+  <key>CFBundleVersion</key><string>0.8</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAudioCaptureUsageDescription</key>
@@ -98,9 +98,14 @@ if [[ -x "$BUNDLED_APP/Contents/MacOS/Yarn" ]]; then
   rm -rf "$APP_DIR"
   mkdir -p "$(dirname "$APP_DIR")"
   ditto "$BUNDLED_APP" "$APP_DIR"
-  # An older copy can still be carrying the hard white square.
-  "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
-  seal_app
+  xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
+  # The release app is already signed. Drawing a new icon rewrites the
+  # bundle, the signature no longer matches, and the fallback signature is
+  # a different app. The headphone permission would not survive the install.
+  if ! codesign --verify --deep --strict "$APP_DIR" >/dev/null 2>&1; then
+    "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"
+    seal_app
+  fi
 elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
   write_info_plist
   "$REPO_DIR/bin/yarn-icon" "$MARK" "$APP_DIR"

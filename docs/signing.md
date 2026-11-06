@@ -40,12 +40,13 @@ Microphone permission belongs to `ma-capture`. Call audio belongs to `Yarn.app`.
 
 ## The day you publish
 
-The download on the Yarn page is GitHub release v0.2. Main is past that release: headphone calls, speaker separation, and the menu-bar stop fix are not in that zip.
+The Yarn page downloads `releases/latest`. That zip opens Yarn Setup, which is signed and notarized. The program is inside the app, because macOS can open a download from a temporary folder and a folder beside the app would be left behind.
 
 1. Enrol, create the Developer ID Application certificate, and store the notary profile above.
 2. `bin/yarn-release` signs and notarizes `dist/Yarn.Setup.Apple.Silicon.zip`.
-3. Upload that zip as the new GitHub release. The page already downloads `releases/latest`.
-4. Then, and only then, take “Yarn isn't paying” out of `Start here.txt`, `README.md`, `docs/index.html`, and `docs/v0.2-release.md`. Until the notarized zip is the file people download, those lines are the instructions that keep Setup from being thrown away.
+3. Upload that zip as the new GitHub release.
+
+`Start here.txt`, `README.md`, and `docs/index.html` tell people to double-click Yarn Setup. Those lines stay only while the file on `releases/latest` is this notarized zip. An ad-hoc zip is still blocked on first open, and the note in the zip would then be wrong.
 
 ## What still asks
 

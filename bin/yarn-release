@@ -17,12 +17,12 @@ OUT="$REPO_DIR/dist/$NAME.zip"
 
 mkdir -p "$ROOT" "$REPO_DIR/dist"
 
-# The folder people open should show two things: this note and the command.
-# The Setup app and the program live in a hidden folder, so Finder does not
-# put them next to the note.
-INNER="$ROOT/.yarn"
+# The folder people open shows this note and Yarn Setup. The program lives
+# inside that app. A downloaded app can be opened from a temporary folder,
+# and a sibling folder would be left behind.
+INNER="$STAGE/program"
 mkdir -p "$INNER"
-cp -f "$REPO_DIR/Yarn Setup.command" "$REPO_DIR/Start here.txt" "$ROOT/"
+cp -f "$REPO_DIR/Start here.txt" "$ROOT/"
 
 copy() {
   local src="$1"
@@ -43,16 +43,16 @@ do
   copy "$path"
 done
 
-find "$ROOT" \( -name '__pycache__' -o -name '.DS_Store' -o -name '._*' \) -print0 \
+find "$INNER" \( -name '__pycache__' -o -name '.DS_Store' -o -name '._*' \) -print0 \
   | while IFS= read -r -d '' path; do
       rm -rf "$path"
     done
-find "$ROOT" -name '*.pyc' -delete || true
-chmod +x "$ROOT/Yarn Setup.command" "$INNER"/bin/*
+find "$INNER" -name '*.pyc' -delete || true
+chmod +x "$INNER"/bin/*
 
 # Ship the Setup window already built. Otherwise the first double-click
 # needs Xcode's compiler, which a normal Mac does not have.
-APP="$INNER/Yarn Setup.app"
+APP="$ROOT/Yarn Setup.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -61,11 +61,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <dict>
   <key>CFBundleIdentifier</key><string>com.meetingarchive.setup</string>
   <key>CFBundleName</key><string>Yarn Setup</string>
-  <key>CFBundleDisplayName</key><string>Setup</string>
+  <key>CFBundleDisplayName</key><string>Yarn Setup</string>
   <key>CFBundleExecutable</key><string>YarnSetup</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.7</string>
+  <key>CFBundleShortVersionString</key><string>0.8</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
@@ -75,14 +75,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 cp -f "$REPO_DIR/meeting_archive/assets/yarn-mark.png" \
   "$APP/Contents/Resources/yarn-mark.png"
-# minos follows the SDK unless this is set. Built on a newer Mac, Launch
-# Services then refuses the app on an older one (-10825) before any window.
-swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP/Contents/MacOS/YarnSetup" \
-  "$REPO_DIR/ui/setup/YarnSetup.swift" \
-  "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
-  -framework AppKit
-"$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP" Setup
-xattr -cr "$APP" 2>/dev/null || true
 
 # Same for the Applications icon. paths.plist is rewritten on the person's
 # Mac during Setup, so this copy does not contain this machine's archive.
@@ -99,8 +91,8 @@ cat > "$YARN/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Yarn</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.7</string>
-  <key>CFBundleVersion</key><string>0.7</string>
+  <key>CFBundleShortVersionString</key><string>0.8</string>
+  <key>CFBundleVersion</key><string>0.8</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAudioCaptureUsageDescription</key>
@@ -122,19 +114,31 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
   -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
   -framework CoreAudio -framework Foundation
 "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$YARN"
-# Sign the bundle, not the temporary linker output, so macOS treats this as
-# Yarn. A linker signature names the file that was compiled and the screen
-# recording grant then does not apply.
+# Sign Yarn before it is sealed inside Setup. A later install copies this
+# bundle out, and that copy has to stay Developer ID or the headphone
+# permission does not survive.
 # Ad-hoc until a Developer ID Application certificate is in the keychain.
 # bin/yarn-sign switches itself once that certificate exists.
-"$REPO_DIR/bin/yarn-sign" "$APP"
 YARN_SIGN="$("$REPO_DIR/bin/yarn-sign" "$YARN")"
 echo "$YARN_SIGN"
+
+# minos follows the SDK unless this is set. Built on a newer Mac, Launch
+# Services then refuses the app on an older one (-10825) before any window.
+swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP/Contents/MacOS/YarnSetup" \
+  "$REPO_DIR/ui/setup/YarnSetup.swift" \
+  "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
+  -framework AppKit
+ditto "$INNER" "$APP/Contents/Resources/yarn"
+"$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP" Setup
+SETUP_SIGN="$("$REPO_DIR/bin/yarn-sign" "$APP")"
+echo "$SETUP_SIGN"
+codesign --verify --deep --strict "$APP"
+codesign --verify --deep --strict "$APP/Contents/Resources/yarn/Yarn.app"
 
 rm -f "$OUT"
 COPYFILE_DISABLE=1 ditto -c -k --norsrc --keepParent "$ROOT" "$OUT"
 rm -rf "$STAGE"
-if [[ "$YARN_SIGN" == *"developer-id"* && "${YARN_SKIP_NOTARIZE:-}" != "1" ]]; then
+if [[ "$YARN_SIGN" == *"developer-id"* && "$SETUP_SIGN" == *"developer-id"* && "${YARN_SKIP_NOTARIZE:-}" != "1" ]]; then
   "$REPO_DIR/bin/yarn-sign" --notarize "$OUT"
 fi
 echo "$OUT"

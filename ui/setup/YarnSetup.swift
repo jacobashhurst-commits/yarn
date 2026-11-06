@@ -773,7 +773,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         var args = Array(CommandLine.arguments.dropFirst())
-        var repo = FileManager.default.currentDirectoryPath
+        // The download is this app. macOS may open it from a temporary
+        // folder, so the program has to travel inside the app. A checkout
+        // passes --repo and is left alone.
+        var repo = programDirectory() ?? FileManager.default.currentDirectoryPath
         var python = "/usr/bin/python3"
         if let i = args.firstIndex(of: "--repo"), i + 1 < args.count {
             repo = args[i + 1]
@@ -791,6 +794,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+}
+
+func programDirectory() -> String? {
+    guard let resources = Bundle.main.resourceURL else { return nil }
+    let bundled = resources.appendingPathComponent("yarn")
+    let marker = bundled.appendingPathComponent("bin/yarn-setup").path
+    if FileManager.default.isExecutableFile(atPath: marker) {
+        return bundled.path
+    }
+    return nil
 }
 
 func memoryGB() -> Double {

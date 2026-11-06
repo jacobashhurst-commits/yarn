@@ -9,7 +9,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-xattr -cr "$REPO_DIR" 2>/dev/null || true
+# Only the download flag. Clearing every attribute made a signed app look damaged.
+xattr -dr com.apple.quarantine "$REPO_DIR" 2>/dev/null || true
 # A double-clicked command does not see Homebrew. Look there before deciding
 # this Mac has no usable Python.
 export PATH="/Library/Developer/CommandLineTools/usr/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-}"
@@ -88,7 +89,7 @@ build_app() {
   <key>CFBundleExecutable</key><string>YarnSetup</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>CFBundleShortVersionString</key><string>0.8</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
@@ -111,7 +112,7 @@ PLIST
 open_setup() {
   local app="$1"
   local err=""
-  xattr -cr "$app" 2>/dev/null || true
+  xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
   if err="$(open -n "$app" --args --repo "$REPO_DIR" 2>&1)"; then
     exit 0
   fi

@@ -74,8 +74,11 @@ notarize_file() {
     exit 2
   fi
   xcrun notarytool submit "$target" --keychain-profile "$PROFILE" --wait
+  # A downloaded zip only skips the unidentified-developer prompt when the
+  # ticket is stapled to the zip. Notarization alone leaves it on Apple's
+  # server, and Gatekeeper then sends people through Privacy & Security.
   case "$target" in
-    *.app) xcrun stapler staple "$target" ;;
+    *.app|*.zip) xcrun stapler staple "$target" ;;
   esac
   echo "yarn-sign: notarized $target"
 }

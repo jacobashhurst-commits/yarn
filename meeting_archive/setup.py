@@ -84,10 +84,18 @@ TCC_BLOCKED_FOLDERS = ("Downloads", "Desktop", "Documents")
 
 def is_blocked_for_launchd(path: Path) -> bool:
     resolved = path.expanduser().resolve()
+    # A quarantined app is opened from a temporary read-only copy, and the
+    # download itself is the Setup app. The recorder has to be copied out of
+    # both. Writing it back into the app would break the signature, and
+    # throwing the zip away would throw Yarn away with it.
+    if "AppTranslocation" in resolved.parts or any(
+        part.endswith(".app") for part in resolved.parts
+    ):
+        return True
     try:
         relative = resolved.relative_to(Path.home().resolve())
     except ValueError:
-        return False
+        return not os.access(resolved, os.W_OK)
     if relative.parts and relative.parts[0] in TCC_BLOCKED_FOLDERS:
         return True
     return "Mobile Documents" in str(relative)
@@ -107,6 +115,26 @@ def copy_checkout(source: Path, dest: Path) -> None:
     )
 
 
+def install_signed_apps(source: Path, dest: Path) -> None:
+    """A normal copy breaks a Developer ID signature. ditto keeps it.
+
+    The signed app is what makes the next install the same app, so the
+    headphone permission survives. Re-signing here would throw that away.
+    """
+    for name in ("Yarn.app", "Yarn Setup.app"):
+        src = source / name
+        if not (src / "Contents" / "Info.plist").is_file():
+            continue
+        target = dest / name
+        if target.exists():
+            shutil.rmtree(target)
+        copied = run(["ditto", str(src), str(target)], timeout=180)
+        if copied.returncode != 0:
+            detail = (copied.stderr or copied.stdout or "could not copy").strip()
+            raise RuntimeError(f"Could not copy {name}: {detail[-400:]}")
+        _clear_quarantine(target)
+
+
 def materialize_runtime(source: Path) -> Path:
     """Yarn's recorder is a LaunchAgent. It must not live in Downloads."""
     source = source.expanduser().resolve()
@@ -114,7 +142,10 @@ def materialize_runtime(source: Path) -> Path:
         emit({"type": "log", "id": "venv", "text": f"Installing in place at {source}"})
         return source
     dest = runtime_dir()
-    folder = source.relative_to(Path.home().resolve()).parts[0]
+    try:
+        folder = source.relative_to(Path.home().resolve()).parts[0]
+    except ValueError:
+        folder = "this download"
     emit(
         {
             "type": "log",
@@ -126,7 +157,10 @@ def materialize_runtime(source: Path) -> Path:
         }
     )
     copy_checkout(source, dest)
-    run(["xattr", "-cr", str(dest)], timeout=60)
+    install_signed_apps(source, dest)
+    # Only the download flag. Clearing every attribute is what made a
+    # signed app look damaged.
+    run(["xattr", "-dr", "com.apple.quarantine", str(dest)], timeout=60)
     return dest
 
 

@@ -193,6 +193,63 @@ def test_prereqs_reject_intel_macs(tmp_path, monkeypatch):
         yarn_setup.step_prereqs(tmp_path)
 
 
+def test_the_recorder_is_not_left_inside_the_downloaded_app(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    inside = (
+        home
+        / "Yarn.Setup.Apple.Silicon"
+        / "Yarn Setup.app"
+        / "Contents"
+        / "Resources"
+        / "yarn"
+    )
+    translocated = (
+        tmp_path
+        / "AppTranslocation"
+        / "d"
+        / "Yarn Setup.app"
+        / "Contents"
+        / "Resources"
+        / "yarn"
+    )
+    assert yarn_setup.is_blocked_for_launchd(inside)
+    assert yarn_setup.is_blocked_for_launchd(translocated)
+
+
+def test_a_downloaded_copy_keeps_the_signed_app(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    home = tmp_path / "home"
+    source = home / "Downloads" / "Yarn Setup.app" / "Contents" / "Resources" / "yarn"
+    app = source / "Yarn.app" / "Contents"
+    app.mkdir(parents=True)
+    (app / "Info.plist").write_text("signed", encoding="utf-8")
+    (source / "keep.txt").write_text("ok", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_k):
+        calls.append(list(argv))
+        if argv[0] == "ditto":
+            src, dest = Path(argv[1]), Path(argv[2])
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(yarn_setup, "run", fake_run)
+
+    dest = yarn_setup.materialize_runtime(source)
+    assert (dest / "keep.txt").read_text(encoding="utf-8") == "ok"
+    assert (dest / "Yarn.app" / "Contents" / "Info.plist").read_text(encoding="utf-8") == "signed"
+    assert any(c[0] == "ditto" and c[1].endswith("Yarn.app") for c in calls)
+    assert any(c[:3] == ["xattr", "-dr", "com.apple.quarantine"] for c in calls)
+    assert not any(c[:2] == ["xattr", "-cr"] for c in calls)
+
+
 def test_launchd_cannot_use_downloads(tmp_path, monkeypatch):
     home = tmp_path / "home"
     downloads = home / "Downloads" / "yarn-main"
