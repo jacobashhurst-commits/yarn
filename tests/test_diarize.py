@@ -197,6 +197,23 @@ def test_a_short_fragment_is_folded_into_the_voice_it_sounds_like():
     assert [span.speaker for span in cleaned] == ["room-1", "room-3", "room-3"]
 
 
+def test_a_short_voice_that_does_not_sound_like_the_longer_one_stays():
+    """6s against 11s at cosine 0.21 is a second person, not a fragment.
+
+    MHTB Room 1 folded the introduction into the longer voice because it
+    was under ten seconds, then the only name saved was the longer voice.
+    """
+    spans = [
+        SpeakerSpan(ROOM, 2.3, 8.6, "room-1"),
+        SpeakerSpan(ROOM, 17.8, 29.3, "room-2"),
+    ]
+    cleaned = absorb_short_voices(
+        spans,
+        voice_scores={("room-1", "room-2"): 0.21},
+    )
+    assert [span.speaker for span in cleaned] == ["room-1", "room-2"]
+
+
 def test_a_short_fragment_without_a_voice_match_follows_the_nearest_speaker():
     spans = [
         SpeakerSpan(ROOM, 0.0, 30.0, "room-1"),

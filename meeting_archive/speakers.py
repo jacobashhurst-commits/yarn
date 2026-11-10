@@ -1234,12 +1234,14 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
             guess = other
             reason = f"the other person listed for this meeting, {other}"
         index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
-        # Under ten seconds in a real meeting is a fragment, not a person to
-        # name. New meetings fold these into a longer voice before they become
-        # a speaker. This still hides them on a meeting already transcribed.
-        from .diarize import MIN_NOTABLE_SPEAKER_S
+        # A blip under two seconds is not a person to name. Someone who spoke
+        # for longer is asked about even when another voice went past ten
+        # seconds. Folding already removed fragments that sound like that
+        # longer voice. Hiding every voice under ten seconds dropped a 6s
+        # introduction once the other person had spoken for 11s.
+        from .diarize import MIN_SUBSTANTIVE_SPEAKER_S
 
-        crumb = float(profile.speaking_s or 0.0) < MIN_NOTABLE_SPEAKER_S
+        crumb = float(profile.speaking_s or 0.0) < MIN_SUBSTANTIVE_SPEAKER_S
         voices.append(
             {
                 "key": profile.speaker,

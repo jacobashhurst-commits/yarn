@@ -56,8 +56,8 @@ MIN_LISTED_SPEAKER_S = 1.0
 # meeting (six people, three and a half hours) came back as 96 voices; 55 of
 # them had under ten seconds of speech. Asking who each one was is the part
 # that makes a long meeting feel broken. Those fragments are attached to the
-# longer voice they sound like, or to whoever was speaking just before or
-# after, and they are not listed as their own speaker.
+# longer voice they sound like. With no fingerprint, they go to whoever was
+# speaking just before or after. A measured different person stays listed.
 MIN_NOTABLE_SPEAKER_S = 10.0
 
 # Same person, split into several clusters, scores about 0.45-0.7 with this
@@ -369,12 +369,13 @@ def absorb_short_voices(
     min_speaking_s: float = MIN_NOTABLE_SPEAKER_S,
     voice_scores: dict[tuple[str, str], float] | None = None,
 ) -> list[SpeakerSpan]:
-    """Attach every voice under ``min_speaking_s`` to a longer voice.
+    """Attach a short fragment to a longer voice when it is the same person.
 
     Does nothing when nobody spoke that long: a short meeting of people who
-    each said a little is still those people. When a longer voice exists, a
-    fragment is not listed on its own. Preference is the longer voice it
-    sounds most like, then whoever was speaking nearest to it in time.
+    each said a little is still those people. A fragment joins the longer
+    voice it actually sounds like. A measured mismatch stays, however short:
+    duration is not identity. Nearest-in-time is only for a fragment with no
+    fingerprint, so a cough in a long meeting still has somewhere to go.
     Speaker keys of the longer voices are kept, so a name already stored
     against one of them still points at that voice.
     """
@@ -408,7 +409,10 @@ def absorb_short_voices(
     mapping: dict[str, str] = {}
     for speaker in short:
         target = _best_anchor(speaker, anchors, voice_scores, vectors)
-        if target is None:
+        # A fingerprint that lost is a different person. Nearest-in-time is
+        # only for a fragment we could not measure. MHTB Room 1 was 6s then
+        # 11s at cosine 0.21; folding on duration alone labelled both Arun.
+        if target is None and not _voice_was_compared(speaker, voice_scores, vectors):
             target = _nearest_anchor(spans, speaker, anchors)
         if target and target != speaker:
             mapping[speaker] = target
@@ -450,7 +454,24 @@ def _best_anchor(
     if not ranked:
         return None
     ranked.sort(reverse=True)
-    return ranked[0][1]
+    score, anchor = ranked[0]
+    # Same bar as merge_same_voices. Below it, this is not that person.
+    if score < SAME_VOICE_COSINE:
+        return None
+    return anchor
+
+
+def _voice_was_compared(
+    speaker: str,
+    voice_scores: dict[tuple[str, str], float] | None,
+    vectors: dict[str, list[float]],
+) -> bool:
+    """True when this voice has a fingerprint against the longer ones."""
+    if speaker in vectors:
+        return True
+    if not voice_scores:
+        return False
+    return any(speaker in pair for pair in voice_scores)
 
 
 def _nearest_anchor(

@@ -634,7 +634,8 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         self.payload = payload
         applyBanner(payload.banner)
         buildChoices()
-        // A voice under ten seconds is not a person to name.
+        // A blip under two seconds is not a person to name. A short turn
+        // that survived separation is still a person.
         let unnamed = payload.voices.filter { $0.named.isEmpty }
         let meaningful = unnamed.filter { !$0.isCrumb }
         queue = meaningful.isEmpty ? unnamed : meaningful
