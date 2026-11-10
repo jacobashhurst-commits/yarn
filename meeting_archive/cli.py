@@ -43,7 +43,15 @@ import sys
 from pathlib import Path
 
 from . import audio, capture, jobs, models, pipeline, records, retention, watcher
-from .config import Config, load_config, write_setting
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    Config,
+    clean_own_name,
+    load_config,
+    name_prompt_pending,
+    save_own_name,
+    write_setting,
+)
 from .diarize import Diarizer
 from .models import format_timestamp
 from .records import Transcript
@@ -398,6 +406,67 @@ def cmd_call_devices(cfg: Config, args) -> int:
     print(f"MA_CALL_OUTPUT_COUNT={len(route.playback)}")
     for index, name in enumerate(route.playback, start=1):
         print(f"MA_CALL_OUTPUT_{index}={audio.shell_quote(name)}")
+    return 0
+
+
+_NAME_DIALOG = """
+on run argv
+  set suggested to ""
+  if (count of argv) > 0 then set suggested to item 1 of argv
+  set answer to text returned of (display dialog "What should Yarn call you? On a headphone call, this is the name on your microphone." default answer suggested buttons {"Cancel", "Use this name"} default button "Use this name" with title "Yarn" cancel button "Cancel")
+  return answer
+end run
+"""
+
+
+def ask_own_name(default: str) -> str | None:
+    proc = subprocess.run(
+        ["/usr/bin/osascript", "-e", _NAME_DIALOG, "--", default or ""],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return clean_own_name(proc.stdout)
+
+
+def _config_path(args) -> Path:
+    chosen = getattr(args, "config", None)
+    if chosen:
+        return Path(chosen)
+    env = os.environ.get("MEETING_ARCHIVE_CONFIG")
+    return Path(env) if env else DEFAULT_CONFIG_PATH
+
+
+def ensure_own_name(cfg: Config, path: Path, *, ask=ask_own_name) -> int:
+    """Ask once, on the first Headphones press of a new install. 2 means cancel."""
+    if not name_prompt_pending(cfg):
+        return 0
+    name = clean_own_name(ask(cfg.own_label) or "")
+    if not name:
+        return 2
+    save_own_name(path, name)
+    write_setting(cfg, "own_name_confirmed", True)
+    return 0
+
+
+def cmd_ensure_own_name(cfg: Config, args) -> int:
+    # rec evals nothing here. ok and cancel are the only words it looks for.
+    code = ensure_own_name(cfg, _config_path(args))
+    if code == 2:
+        print("cancel")
+        return 0
+    if code != 0:
+        return code
+    print("ok")
+    return 0
+
+
+def cmd_headphones_permission(cfg: Config, args) -> int:
+    del cfg, args
+    from .setup import headphones_permission_text
+
+    print(headphones_permission_text())
     return 0
 
 
@@ -1269,6 +1338,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "call-devices", help="headset microphone and headphone outputs"
     ).set_defaults(func=cmd_call_devices)
+    sub.add_parser(
+        "ensure-own-name",
+        help="ask for the headphone name the first time, then remember it",
+    ).set_defaults(func=cmd_ensure_own_name)
+    sub.add_parser(
+        "headphones-permission",
+        help="the steps for allowing a headphone call",
+    ).set_defaults(func=cmd_headphones_permission)
 
     p = sub.add_parser("finalize", help="split channels and publish to the inbox")
     p.add_argument("raw", help="path to the raw multi-channel capture")
@@ -1283,8 +1360,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["call", "room"],
         default="room",
-        help="call: mic is Jacob, system audio is everyone else. "
-             "room: one mic, several unidentified people. Default is room.",
+        help="call: the microphone is the name you gave, system audio is "
+             "everyone else. room: one mic, several unidentified people. "
+             "Default is room.",
     )
     p.set_defaults(func=cmd_finalize)
 
@@ -1539,7 +1617,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = load_config(args.config)
     # These two are eval'd by the shell, so they must emit nothing but variables.
-    if args.command not in ("rec-config", "call-devices"):
+    if args.command not in (
+        "rec-config",
+        "call-devices",
+        "ensure-own-name",
+        "headphones-permission",
+    ):
         setup_logging(cfg, args.verbose)
     try:
         return args.func(cfg, args)

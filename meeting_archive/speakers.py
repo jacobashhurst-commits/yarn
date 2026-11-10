@@ -1130,6 +1130,57 @@ def meeting_clip_path(
     return dest
 
 
+def wearer_for_confirmation(cfg: Config, transcript) -> tuple[str, float]:
+    """The headphone wearer, already known, so the saved-names list can include them.
+
+    A room microphone is several people, and this must not put the account
+    name on that recording. A silent mic did not take part.
+    """
+    name = " ".join(str(getattr(cfg, "own_label", "") or "").split())
+    if not name:
+        return "", 0.0
+    for profile in transcript.speaker_profiles:
+        speaker = str(getattr(profile, "speaker", "") or "")
+        channel = str(getattr(profile, "channel", "") or "")
+        if speaker != "mic" and channel != "mic":
+            continue
+        if float(getattr(profile, "speaking_s", 0.0) or 0.0) <= 0:
+            return "", 0.0
+        return name, float(getattr(profile, "first_at", 0.0) or 0.0)
+    return "", 0.0
+
+
+def other_listed_name(
+    attendees: list[str],
+    own_names: list[str],
+    roster: dict[str, str] | None = None,
+) -> str:
+    """The one listed person who is not the wearer and not already named.
+
+    A library match to someone who was not in this meeting must not replace
+    the name that was typed. Several remaining names are not a guess about
+    which voice is which.
+    """
+    used = {
+        str(value).strip().casefold()
+        for value in (roster or {}).values()
+        if str(value).strip()
+    }
+    own = {str(name).strip().casefold() for name in own_names if str(name).strip()}
+    leftover: list[str] = []
+    seen: set[str] = set()
+    for name in attendees:
+        text = " ".join(str(name).split())
+        key = text.casefold()
+        if not text or key in used or key in own or key in seen:
+            continue
+        seen.add(key)
+        leftover.append(text)
+    if len(leftover) == 1:
+        return leftover[0]
+    return ""
+
+
 def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
     """Everything the identify window needs for one meeting, as JSON-able data."""
     from . import models
@@ -1146,6 +1197,18 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
         for p in transcript.speaker_profiles
     )
     display = models.speaker_display_indices(transcript.speaker_profiles)
+    unnamed = [
+        profile.speaker
+        for profile in transcript.speaker_profiles
+        if models.speaker_index(profile.speaker) is not None
+        and not str(roster.get(profile.speaker, "")).strip()
+    ]
+    other = (
+        other_listed_name(attendees, cfg.names.own_names, roster)
+        if len(unnamed) == 1
+        else ""
+    )
+    attending = {name.casefold() for name in attendees if str(name).strip()}
     voices = []
     for profile in transcript.speaker_profiles:
         if models.speaker_index(profile.speaker) is None:
@@ -1161,6 +1224,15 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
                 log.exception("voice match failed for %s in %s", profile.speaker, meeting_id)
         conversation = usable_dialog_guess(profile.guess, attendees=attendees, known=known)
         guess, reason = dialog_prediction(ranked, conversation, attendees=attendees)
+        # The name they typed for the other person wins over a library match
+        # to someone who was not listed for this meeting.
+        if (
+            other
+            and profile.speaker in unnamed
+            and (not guess or guess.casefold() not in attending)
+        ):
+            guess = other
+            reason = f"the other person listed for this meeting, {other}"
         index = display.get(profile.speaker) or models.speaker_index(profile.speaker) or 0
         # Under ten seconds in a real meeting is a fragment, not a person to
         # name. New meetings fold these into a longer voice before they become
@@ -1182,6 +1254,7 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
                 "guess": guess,
                 "reason": reason,
                 "speaking_s": round(float(profile.speaking_s or 0.0), 3),
+                "first_at": round(float(profile.first_at or 0.0), 3),
                 "turns": int(profile.turns or 0),
                 "crumb": crumb,
                 "matches": [{"name": n, "score": round(s, 3)} for n, s in ranked],
@@ -1194,10 +1267,13 @@ def identify_payload(cfg: Config, meeting_id: str) -> dict[str, Any]:
     for name in (*attendees, *known):
         if name.casefold() not in {n.casefold() for n in names}:
             names.append(name)
+    wearer, wearer_at = wearer_for_confirmation(cfg, transcript)
     return {
         "meeting_id": meeting_id,
         "banner": meeting_banner(cfg, meeting_id),
         "has_audio": has_audio,
+        "wearer": wearer,
+        "wearer_at": round(wearer_at, 3),
         "names": names,
         "people": [
             {

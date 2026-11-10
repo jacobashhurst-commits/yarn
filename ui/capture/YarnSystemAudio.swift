@@ -35,7 +35,10 @@ private func permissionDenied() -> String {
         row = "Screen Recording"
     }
     return """
-    Turn on Yarn in System Settings, Privacy & Security, \(row). \
+    Yarn cannot hear a headphone call until it is allowed. \
+    Click + under Privacy & Security, \(row). \
+    Choose Yarn in the Applications folder in your home folder, \
+    not the main Applications folder. Turn Yarn on. \
     Then quit Yarn, open it again, and press Headphones.
     """
 }

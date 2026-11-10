@@ -484,9 +484,10 @@ def finalize(
             log.warning(
                 "CALL_AUDIO_SILENT %s: the other side of the video call was "
                 "silent. Yarn records that from the audio going to the "
-                "headphones. Turn on Yarn under System Settings, "
-                "Privacy & Security, Screen Recording "
-                "(Screen & System Audio Recording on a newer Mac).",
+                "headphones. Click + under Privacy & Security, "
+                "Screen & System Audio Recording, and choose Yarn from the "
+                "Applications folder in your home folder. On Ventura and "
+                "Sonoma the row is called Screen Recording.",
                 meeting_id,
             )
         channels[MIC] = mic_path.name
@@ -749,25 +750,13 @@ def needs_summary(transcript: Transcript) -> bool:
 
 
 def _keep_known_voices(cfg: Config, meeting_id: str, guesses: list) -> None:
-    """Write a returning voice into the notes so the dialog does not ask again.
+    """A voice match is a suggestion for the identify dialog, not a saved name.
 
-    Only a voice match that already cleared both gates is kept. A guess from
-    the words stays in the dialog. The library embedding is left alone, so a
-    wrong automatic name cannot train the next meeting.
+    Writing it into the notes named the voice and skipped the dialog. A known
+    Jack then landed on a meeting whose other person was someone else, and
+    there was no window in which to correct it. The dialog is what saves a name.
     """
-    if not cfg.speakers_memory.recognise_known:
-        return
-    from .speakers import names_for_roster
-
-    kept = names_for_roster(guesses)
-    if not kept:
-        return
-    records.write_notes(
-        cfg.notes_json(meeting_id),
-        meeting_id,
-        speakers=kept,
-        applied=True,
-    )
+    del cfg, meeting_id, guesses
 
 
 def rediarize(

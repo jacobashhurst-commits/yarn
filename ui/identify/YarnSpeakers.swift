@@ -101,6 +101,7 @@ struct Voice: Decodable {
     let guess: String
     let reason: String
     let speaking_s: Double?
+    let first_at: Double?
     let turns: Int?
     let crumb: Bool?
     let matches: [Match]
@@ -149,6 +150,26 @@ struct Payload: Decodable {
     let names: [String]
     let people: [Person]
     let voices: [Voice]
+    /// The headphone wearer. Empty for a room recording, where that microphone
+    /// is not one known person.
+    let wearer: String
+    let wearer_at: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case meeting_id, banner, has_audio, names, people, voices, wearer, wearer_at
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        meeting_id = try c.decode(String.self, forKey: .meeting_id)
+        banner = try c.decodeIfPresent(String.self, forKey: .banner) ?? ""
+        has_audio = try c.decodeIfPresent(Bool.self, forKey: .has_audio) ?? false
+        names = try c.decodeIfPresent([String].self, forKey: .names) ?? []
+        people = try c.decodeIfPresent([Person].self, forKey: .people) ?? []
+        voices = try c.decodeIfPresent([Voice].self, forKey: .voices) ?? []
+        wearer = try c.decodeIfPresent(String.self, forKey: .wearer) ?? ""
+        wearer_at = try c.decodeIfPresent(Double.self, forKey: .wearer_at) ?? 0
+    }
 }
 
 func runMA(_ ma: String, _ args: [String]) -> (Int32, String, String) {
@@ -1119,26 +1140,44 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
         }.joined(separator: "\n")
     }
 
-    /// Names for the success screen, one person each, in the order they spoke.
+    func savedName(_ voice: Voice) -> String {
+        let typed = (answers[voice.key] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stored = voice.named.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? stored : typed
+    }
+
+    /// Same list a room recording shows, in the order people spoke.
     ///
-    /// People Yarn already knew are included. A title stays off this list:
-    /// the line is who was identified, not their role.
-    func identifiedNames() -> [String] {
-        guard let payload else { return [] }
-        var names: [String] = []
-        var seen = Set<String>()
-        for voice in payload.voices {
-            let typed = (answers[voice.key] ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let stored = voice.named.trimmingCharacters(in: .whitespacesAndNewlines)
-            let name = typed.isEmpty ? stored : typed
-            guard !name.isEmpty else { continue }
-            let key = fold(name)
-            guard !seen.contains(key) else { continue }
-            seen.insert(key)
-            names.append(name)
+    /// A headphone call already knows who the microphone is, and that voice is
+    /// not one of the questions, so the list adds their name. Otherwise the
+    /// confirmation would only name the far side and look like the wearer was
+    /// never captured. A room recording has no wearer line to add.
+    func confirmationLines(extra: [String] = []) -> String {
+        guard let payload else { return "" }
+        let named = payload.voices.filter { !savedName($0).isEmpty }
+        let extras = extra.compactMap { raw -> String? in
+            let person = nameFromSavedLine(raw)
+            return person.isEmpty ? nil : person
         }
-        return names
+        guard !named.isEmpty || !extras.isEmpty else { return "" }
+        var rows: [(Double, String)] = []
+        var seen = Set<String>()
+        func add(_ at: Double, _ name: String) {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = fold(trimmed)
+            guard !trimmed.isEmpty, !seen.contains(key) else { return }
+            seen.insert(key)
+            rows.append((at, trimmed))
+        }
+        let wearer = payload.wearer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !wearer.isEmpty { add(payload.wearer_at, wearer) }
+        for voice in named { add(voice.first_at ?? 0, savedName(voice)) }
+        for person in extras { add(Double.greatestFiniteMagnitude, person) }
+        rows.sort { $0.0 < $1.0 }
+        return rows.enumerated()
+            .map { "Speaker \($0.offset + 1) -> \($0.element.1)" }
+            .joined(separator: "\n")
     }
 
     func nameFromSavedLine(_ line: String) -> String {
@@ -1149,12 +1188,6 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
             text = String(text[..<assumed.lowerBound])
         }
         return text.trimmingCharacters(in: .whitespaces)
-    }
-
-    func speakerLines(_ names: [String]) -> String {
-        names.enumerated()
-            .map { "Speaker \($0.offset + 1) -> \($0.element)" }
-            .joined(separator: "\n")
     }
 
     func finish() {
@@ -1177,14 +1210,14 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
                 }
             }
         }
-        let named = identifiedNames()
+        let named = confirmationLines()
         guard args.count > 2 else {
             if named.isEmpty {
                 NSApp.terminate(nil)
             } else {
                 showYarnResult(
                     title: "Speaker names saved",
-                    body: speakerLines(named),
+                    body: named,
                     footer: "Names land in the background. If one person shows up twice, Yarn merges them."
                 )
             }
@@ -1199,19 +1232,12 @@ final class Controller: NSObject, NSWindowDelegate, AVAudioPlayerDelegate {
                     let lines = out.split(separator: "\n").filter {
                         !$0.hasPrefix("ASSUMED") && !$0.hasPrefix("run `ma")
                     }
-                    var names = named
-                    var have = Set(named.map { self.fold($0) })
                     let extra = self.savedLines(lines.map(String.init))
-                    for raw in extra.split(separator: "\n") {
-                        let person = self.nameFromSavedLine(String(raw))
-                        let key = self.fold(person)
-                        guard !person.isEmpty, !have.contains(key) else { continue }
-                        have.insert(key)
-                        names.append(person)
-                    }
+                        .split(separator: "\n")
+                        .map(String.init)
                     showYarnResult(
                         title: "Speaker names saved",
-                        body: self.speakerLines(names),
+                        body: self.confirmationLines(extra: extra),
                         footer: "Names land in the background. If one person shows up twice, Yarn merges them."
                     )
                 } else {

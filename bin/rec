@@ -66,21 +66,34 @@ alert() {
   disown 2>/dev/null || true
 }
 
-# The Mac's own permission window is the ask. This is only the reminder if
-# that window was closed, and it is not an error.
+# macOS 26 does not add Yarn to Screen & System Audio Recording when
+# Headphones is pressed, and it does not show an Allow button. A switch
+# that is already on can belong to an older copy. This dialog is the +
+# step, and Finder opens on the app so it can be chosen. One dialog.
 note_permission() {
-  local message="Turn on Yarn under Privacy & Security, Screen Recording. On a newer Mac that row is called Screen & System Audio Recording. Then press Headphones again."
-  log_line "$message"
-  if [[ -f "${STARTING_LOCK:-}" ]] && [[ "$(cat "$STARTING_LOCK" 2>/dev/null || true)" == "$$" ]]; then
-    rm -f "$STARTING_LOCK"
+  local message
+  message="$("$MA" headphones-permission 2>>"$MA_LOGS/rec.log" || true)"
+  if [[ -z "$message" ]]; then
+    message="Yarn cannot hear a headphone call until it is allowed. Click + under Privacy & Security, Screen & System Audio Recording. Choose Yarn in the folder that just opened. That folder is Applications in your home folder, not the main Applications folder. Turn Yarn on. Then quit Yarn, open it again, and press Headphones."
   fi
-  nohup /usr/bin/osascript \
+  log_line "$message"
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" >/dev/null 2>&1 \
+    || open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture" >/dev/null 2>&1 \
+    || true
+  if [[ -d "$HOME/Applications/Yarn.app" ]]; then
+    open -R "$HOME/Applications/Yarn.app" >/dev/null 2>&1 || true
+  else
+    open "$HOME/Applications" >/dev/null 2>&1 || true
+  fi
+  /usr/bin/osascript \
     -e 'on run argv' \
     -e 'display dialog (item 1 of argv) buttons {"OK"} default button 1 with title "Yarn"' \
     -e 'end run' \
-    -- "$message" >/dev/null 2>&1 &
-  disown 2>/dev/null || true
-  echo "rec: $message" >&2
+    -- "$message" >/dev/null 2>&1 || true
+  if [[ -f "${STARTING_LOCK:-}" ]] && [[ "$(cat "$STARTING_LOCK" 2>/dev/null || true)" == "$$" ]]; then
+    rm -f "$STARTING_LOCK"
+  fi
+  echo "rec: headphones need permission" >&2
   exit 1
 }
 
@@ -120,7 +133,7 @@ do_start() {
     if [[ -n "$starting" ]] && kill -0 "$starting" 2>/dev/null; then
       # Not die(): that would stop the recorder this click is waiting on.
       log_line "a recording is already starting"
-      alert "A recording is already starting. If System Settings is open, turn on Yarn, then press Headphones again."
+      alert "A recording is already starting. If Yarn is not in the Screen & System Audio Recording list, click +, choose Yarn from the Applications folder in your home folder, and turn it on."
       echo "rec: a recording is already starting" >&2
       exit 1
     fi
@@ -128,6 +141,30 @@ do_start() {
   printf '%s\n' "$$" > "$STARTING_LOCK"
   # A stale state file means a previous ffmpeg died. Recover, don't refuse.
   [[ -f "$STATE_FILE" ]] && rm -f "$STATE_FILE"
+
+  # After the lock, so a second click cannot open a second name dialog.
+  # Cancel leaves the flag unset and records nothing. An older Yarn without
+  # the question keeps the name already in the config and still records.
+  if [[ "$mode" == "call" ]]; then
+    local name_answer name_err
+    name_err="$(mktemp -t yarn-name)"
+    name_answer="$("$MA" ensure-own-name 2>"$name_err" || true)"
+    cat "$name_err" >> "$MA_LOGS/rec.log" || true
+    if grep -q "invalid choice" "$name_err"; then
+      log_line "name prompt is not in this Yarn yet; recording with the saved name"
+      rm -f "$name_err"
+    elif [[ "$name_answer" == "cancel" ]]; then
+      rm -f "$name_err"
+      log_line "Headphones not started. The name was left blank."
+      rm -f "$STARTING_LOCK"
+      exit 1
+    elif [[ "$name_answer" != "ok" ]]; then
+      rm -f "$name_err"
+      die "Yarn could not ask for your name."
+    else
+      rm -f "$name_err"
+    fi
+  fi
 
   local meeting_id raw started_at started_epoch
   meeting_id="$(date +%Y-%m-%dT%H-%M-%S)"
@@ -431,18 +468,11 @@ start_call_audio() {
       message="$(cat "$err_file")"
       rm -f "$err_file"
       stop_call_audio
-      # macOS will not show an Allow button for this. The switch in
-      # Settings is the grant, and it sticks. A second alert on top of
-      # that window is what made this look broken.
-      if [[ "$message" == *Turn\ on\ Yarn* || "$message" == *Screen\ \&\ System\ Audio* ]]; then
+      # The Swift text still contains the row name. The dialog says to use
+      # +, because the list does not gain Yarn on its own.
+      if [[ "$message" == *Turn\ on\ Yarn* || "$message" == *Screen\ \&\ System\ Audio* || "$message" == *cannot\ hear\ a\ headphone\ call* ]]; then
         log_line "$message"
-        open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" >/dev/null 2>&1 \
-          || open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture" >/dev/null 2>&1 \
-          || true
-        if [[ -f "${STARTING_LOCK:-}" ]] && [[ "$(cat "$STARTING_LOCK" 2>/dev/null || true)" == "$$" ]]; then
-          rm -f "$STARTING_LOCK"
-        fi
-        exit 1
+        note_permission
       fi
       die "$message"
     fi
@@ -561,7 +591,7 @@ do_stop() {
       --expected-duration "$expected_duration" 2>"$errors")"; then
     cat "$errors" >> "$MA_LOGS/rec.log"
     if [[ "$mode" == "call" ]] && grep -q "CALL_AUDIO_SILENT" "$errors"; then
-      alert "The recording was saved, but Yarn did not hear the audio this Mac was playing. Turn on Yarn under System Settings, Privacy & Security, Screen Recording. On a newer Mac that row is called Screen & System Audio Recording. Then start the video call recording again."
+      alert "The recording was saved, but Yarn did not hear the audio this Mac was playing. Click + under Privacy & Security, Screen & System Audio Recording, choose Yarn from the Applications folder in your home folder, and turn it on. Then record the call again."
     fi
     rm -f "$errors"
     log_line "saved $finalized"

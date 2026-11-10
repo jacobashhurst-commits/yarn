@@ -979,7 +979,15 @@ def step_config(repo: Path) -> None:
     engine = "whisper_cpp" if which("whisper-cli") else "faster_whisper"
     model_path = DEFAULT_ROOT / "models" / "whisper-cpp" / "ggml-large-v3-turbo.bin"
     mic = _guess_mic()
-    own = _gecos_name().split()[0].replace('"', "")
+    own = (
+        _gecos_name()
+        .split()[0]
+        .replace('"', "")
+        .replace("\\", "")
+        .replace("[", "")
+        .replace("]", "")
+    )
+    own_names_toml = f'["{own}"]' if own else "[]"
     mic = mic.replace('"', "")
     root = DEFAULT_ROOT.expanduser()
     body = f"""# Written by Yarn Setup. Room recording on the laptop microphone.
@@ -989,6 +997,9 @@ other_label = "Other"
 room_label = "Unknown"
 collection = "meetings"
 audio_retention_days = 7
+
+[names]
+own_names = {own_names_toml}
 
 [audio]
 device_name = "{mic}"
@@ -1025,6 +1036,10 @@ when = "after_meeting"
 """
     DEFAULT_CONFIG_PATH.write_text(body, encoding="utf-8")
     _turn_on_known_speakers()
+    from .config import load_config, write_setting
+
+    # Absent means an older config, already named. False means ask once.
+    write_setting(load_config(DEFAULT_CONFIG_PATH), "own_name_confirmed", False)
     emit(
         {
             "type": "log",
@@ -1522,6 +1537,55 @@ def call_audio_grant_is_stable(signature: str) -> bool:
     return "Developer ID Application:" in text and "Signature=adhoc" not in text
 
 
+def headphones_permission_text() -> str:
+    """What to do when macOS will not show an Allow button.
+
+    Pressing Headphones does not add Yarn to the list. The + button does,
+    and the app it has to choose is in the home folder, not /Applications.
+    """
+    row = screen_recording_row()
+    return (
+        "Yarn cannot hear a headphone call until it is allowed. "
+        "macOS does not show an Allow button for this.\n\n"
+        f"Click + under Privacy & Security, {row}. "
+        "Choose Yarn in the folder that just opened. That folder is Applications "
+        "in your home folder, not the main Applications folder. Turn Yarn on. "
+        "Then quit Yarn, open it again, and press Headphones."
+    )
+
+
+def _applescript_string(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def show_headphones_permission() -> None:
+    text = headphones_permission_text()
+    emit({"type": "log", "id": "menubar", "text": " ".join(text.split())})
+    opened = run(
+        ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
+        timeout=15,
+    )
+    if opened.returncode != 0:
+        run(
+            [
+                "open",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+            ],
+            timeout=15,
+        )
+    app = Path.home() / "Applications" / "Yarn.app"
+    if app.is_dir():
+        run(["open", "-R", str(app)], timeout=15)
+    else:
+        run(["open", str(Path.home() / "Applications")], timeout=15)
+    script = (
+        "display dialog "
+        + _applescript_string(text)
+        + ' buttons {"OK"} default button "OK" with title "Yarn"'
+    )
+    run(["osascript", "-e", script], timeout=600)
+
+
 def allow_call_audio(ma: Path) -> None:
     """Ask the way a new Mac expects, on Ventura through the current macOS.
 
@@ -1562,7 +1626,8 @@ def allow_call_audio(ma: Path) -> None:
             "id": "menubar",
             "text": (
                 "If your Mac asks, click Allow. This lets Yarn hear calls "
-                "while you wear headphones. It does not record the screen."
+                "while you wear headphones. It does not record the screen. "
+                "A newer Mac has no Allow button, and Yarn will show the next step."
             ),
         }
     )
@@ -1573,7 +1638,6 @@ def allow_call_audio(ma: Path) -> None:
     granted = False
     if result.is_file():
         granted = "granted" in result.read_text(encoding="utf-8")
-    row = screen_recording_row()
     if granted:
         emit(
             {
@@ -1583,30 +1647,7 @@ def allow_call_audio(ma: Path) -> None:
             }
         )
         return
-    opened = run(
-        ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
-        timeout=15,
-    )
-    if opened.returncode != 0:
-        run(
-            [
-                "open",
-                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
-            ],
-            timeout=15,
-        )
-    run(["open", str(Path.home() / "Applications")], timeout=15)
-    emit(
-        {
-            "type": "log",
-            "id": "menubar",
-            "text": (
-                f"If Yarn is not in the list, click + under Privacy & Security, {row}, "
-                "choose Yarn, and turn it on. It is in the Applications folder "
-                "in your home folder. Then click Open Yarn."
-            ),
-        }
-    )
+    show_headphones_permission()
 
 
 def step_menubar(repo: Path) -> None:

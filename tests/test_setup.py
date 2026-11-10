@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -726,3 +728,77 @@ def test_guess_mic_uses_the_real_device_name(monkeypatch):
         "meeting_archive.audio.list_avfoundation_devices", lambda: listing
     )
     assert yarn_setup._guess_mic() == "MacBook Neo Microphone"
+
+
+def test_a_new_config_asks_for_a_name_later(tmp_path, monkeypatch):
+    root = tmp_path / "archive"
+    config = tmp_path / "config.toml"
+    real_config = Path.home() / ".config" / "meeting-archive" / "config.toml"
+    real_settings = Path.home() / "meeting-archive" / ".yarn-settings.json"
+    before_config = real_config.stat().st_mtime_ns
+    before_settings = real_settings.stat().st_mtime_ns
+    monkeypatch.delenv("MEETING_ARCHIVE_CONFIG", raising=False)
+    monkeypatch.setattr("meeting_archive.config.DEFAULT_CONFIG_PATH", config)
+    monkeypatch.setattr("meeting_archive.config.DEFAULT_ROOT", root)
+    monkeypatch.setattr(yarn_setup, "_gecos_name", lambda: "Sarah Example")
+    monkeypatch.setattr(yarn_setup, "_guess_mic", lambda: "Mic")
+    monkeypatch.setattr(yarn_setup, "which", lambda _name: None)
+    monkeypatch.setattr(yarn_setup, "emit", lambda _event: None)
+    monkeypatch.setattr(
+        "meeting_archive.resources.summary_model_choice",
+        lambda: ("qwen3.5:4b", "fast"),
+    )
+    yarn_setup.step_config(tmp_path)
+    loaded = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert loaded["own_label"] == "Sarah"
+    assert loaded["audio_retention_days"] == 7
+    assert loaded["names"]["own_names"] == ["Sarah"]
+    settings = json.loads((root / ".yarn-settings.json").read_text(encoding="utf-8"))
+    assert settings["own_name_confirmed"] is False
+    assert real_config.stat().st_mtime_ns == before_config
+    assert real_settings.stat().st_mtime_ns == before_settings
+
+    settings["own_name_confirmed"] = True
+    (root / ".yarn-settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    yarn_setup.step_config(tmp_path)
+    again = json.loads((root / ".yarn-settings.json").read_text(encoding="utf-8"))
+    assert again["own_name_confirmed"] is True
+
+
+def test_headphones_permission_says_how_to_add_yarn():
+    text = yarn_setup.headphones_permission_text()
+    assert "+" in text
+    assert "home folder" in text
+    assert "main Applications folder" in text
+    assert "turn it off" not in text.lower()
+    assert "\u2014" not in text
+
+
+def test_a_missing_headphone_grant_shows_the_plus_steps(tmp_path, monkeypatch):
+    app = tmp_path / "Applications" / "Yarn.app" / "Contents" / "MacOS"
+    app.mkdir(parents=True)
+    (app / "Yarn").write_bytes(b"")
+    monkeypatch.setattr(yarn_setup.Path, "home", lambda: tmp_path)
+    assert yarn_setup.Path.home() == tmp_path
+    calls: list[list[str]] = []
+
+    def fake_run(argv, timeout=None, env=None):
+        calls.append(list(argv))
+        code = 1 if argv and argv[0] == "pgrep" else 0
+        return subprocess.CompletedProcess(
+            argv,
+            code,
+            stdout="Developer ID Application: Example\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(yarn_setup, "run", fake_run)
+    monkeypatch.setattr(yarn_setup.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(yarn_setup, "emit", lambda _event: None)
+    yarn_setup.allow_call_audio(tmp_path / "ma")
+    flat = [" ".join(argv) for argv in calls]
+    assert not any("tccutil" in line for line in flat)
+    dialogs = [line for line in flat if line.startswith("osascript") and "+" in line]
+    assert dialogs
+    assert "home folder" in dialogs[0]
+    assert any(line.startswith("open -R ") for line in flat)

@@ -41,10 +41,13 @@ so a YouTube video or a call in the headphones is recorded and the speakers
 can stay quiet. The headphones stay in music quality: using a Bluetooth
 microphone at the same time drops them to phone quality and the recording of
 what you were hearing comes back silent. The first video call asks the
-Mac's normal way. If an Allow button appears, click it. On a newer Mac,
-turn on Yarn under Privacy & Security → Screen & System Audio Recording
-(on Ventura and Sonoma the row is still called Screen Recording).
-Recording in the room does not ask. Your channel reads `Jacob:`; the call is diarized into
+Mac's normal way. If an Allow button appears, click it. On a newer Mac
+there is no Allow button, and Headphones does not add Yarn to the list.
+Click + under Privacy & Security → Screen & System Audio Recording and
+choose Yarn from the Applications folder in your home folder (on Ventura
+and Sonoma the row is still called Screen Recording).
+Recording in the room does not ask. Your channel reads the name you give
+the first time you press Headphones. The call is diarized into
 meeting-local speakers. Wear headphones so the laptop microphone does not
 also hear the far side and the transcript says everything twice.
 
@@ -97,8 +100,11 @@ cp config.example.toml ~/.config/meeting-archive/config.toml
 everything this Mac is playing, including audio that is only going to the
 headphones. You do not build a Multi-Output Device, and you do not turn the
 speakers up. The first video call asks once. Click Allow if the Mac shows
-that button. Otherwise turn on Yarn under System Settings → Privacy &
-Security → Screen Recording (Screen & System Audio Recording on a newer Mac).
+that button. On a newer Mac there is no Allow button. Click + under
+System Settings → Privacy & Security → Screen & System Audio Recording
+and choose Yarn from the Applications folder in your home folder (the row
+is called Screen Recording on Ventura and Sonoma). The first time you
+press Headphones, Yarn asks what to call you.
 Recording in the room does not ask.
 
 A Bluetooth headset cannot do both of its jobs at once. Opening its

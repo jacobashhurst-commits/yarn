@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -583,3 +584,81 @@ def write_setting(cfg: Config, key: str, value) -> dict:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     _apply_settings_overlay(cfg)
     return data
+
+
+def name_prompt_pending(cfg: Config) -> bool:
+    """True only when Setup has written that this Mac has never given a name.
+
+    A config that predates the question has no key. That person already has a
+    name, and Headphones must not ask them again.
+    """
+    path = cfg.root / ".yarn-settings.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return data.get("own_name_confirmed") is False
+
+
+def clean_own_name(raw: str) -> str:
+    name = " ".join((raw or "").split())
+    if not name or len(name) > 80:
+        return ""
+    if any(ord(ch) < 32 for ch in name):
+        return ""
+    return name
+
+
+def own_names_for(label: str) -> list[str]:
+    """The name they typed, plus the first word when it is a real short form.
+
+    "Sam Taylor" is greeted as Sam. A one-letter first word is not a name.
+    """
+    label = clean_own_name(label)
+    if not label:
+        return []
+    names = [label]
+    first = label.split()[0]
+    if len(first) >= 2 and first.casefold() != label.casefold():
+        names.append(first)
+    return names
+
+
+def _toml_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def save_own_name(path: Path, label: str) -> None:
+    """Write the headphone name into config.toml, which is what the transcript uses.
+
+    The menu overlay does not carry own_label. Leaving Jacob in own_names would
+    keep treating his name as the owner's after someone else typed theirs.
+    """
+    label = clean_own_name(label)
+    names = own_names_for(label)
+    if not label or not names:
+        raise ValueError("name is empty")
+    text = path.read_text(encoding="utf-8")
+    label_line = f"own_label = {_toml_quote(label)}"
+    names_line = "own_names = [" + ", ".join(_toml_quote(name) for name in names) + "]"
+    if re.search(r"(?m)^own_label\s*=", text):
+        text = re.sub(r"(?m)^own_label\s*=.*$", label_line, text, count=1)
+    else:
+        text = label_line + "\n" + text
+    if re.search(r"(?m)^own_names\s*=", text):
+        text = re.sub(r"(?m)^own_names\s*=.*$", names_line, text, count=1)
+    elif re.search(r"(?m)^\[names\]\s*$", text):
+        text = re.sub(
+            r"(?m)^(\[names\]\s*)$",
+            "\\1\n" + names_line,
+            text,
+            count=1,
+        )
+    else:
+        text = text.rstrip() + "\n\n[names]\n" + names_line + "\n"
+    loaded = tomllib.loads(text)
+    if loaded.get("own_label") != label:
+        raise ValueError("own_label did not save")
+    if loaded.get("names", {}).get("own_names") != names:
+        raise ValueError("own_names did not save")
+    path.write_text(text, encoding="utf-8")

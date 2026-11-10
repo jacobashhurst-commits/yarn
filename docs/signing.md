@@ -2,7 +2,7 @@
 
 The US$99 fee does not skip the first Allow. It makes Yarn one app, so the next install does not send you through Privacy & Security again, and a downloaded zip opens without a Gatekeeper warning.
 
-Microphone permission belongs to `ma-capture`. Call audio belongs to `Yarn.app`. The fee stabilises `Yarn.app`. The first headphone call on a new Mac still needs Screen & System Audio Recording turned on once.
+Microphone permission belongs to `ma-capture`. Call audio belongs to `Yarn.app`. The fee stabilises `Yarn.app`. The first headphone call on a new Mac still needs Yarn added with + under Screen & System Audio Recording, chosen from the Applications folder in the home folder. macOS does not show an Allow button, and pressing Headphones does not add the row.
 
 ## Before the membership is active
 

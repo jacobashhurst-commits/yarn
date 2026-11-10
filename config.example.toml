@@ -3,6 +3,8 @@
 # to your machine. Run `ma devices` to find it.
 
 root = "~/meeting-archive"
+# Your name on a headphone call. A new install asks for this the first time
+# you press Headphones. Change it if you set the config up by hand.
 own_label = "Jacob"
 other_label = "Other"
 # Label for in-room recordings, where one microphone carries several people and
@@ -119,7 +121,8 @@ include_context_header = true
 [names]
 enabled = true
 # Your own names, so your self-introductions and people greeting you don't get
-# suggested as attendees. Include nicknames.
+# suggested as attendees. Include nicknames. A new install replaces these
+# with the name you enter the first time you press Headphones.
 own_names = ["Jacob", "Jake"]
 # Show a second dismissible popup with detected names, but only when the
 # on-stop popup was dismissed without an attendee list.

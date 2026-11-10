@@ -643,7 +643,7 @@ def test_no_arbitrary_speaker_cap():
     assert {p.speaker for p in profiles} == {f"room-{i}" for i in range(1, 9)}
 
 
-def test_a_trusted_voice_is_named_and_a_guess_from_the_words_is_not(cfg):
+def test_a_voice_match_waits_for_the_identify_dialog(cfg):
     from meeting_archive.models import SpeakerGuess
 
     meeting_id = "2026-10-21T09-00-00"
@@ -659,14 +659,9 @@ def test_a_trusted_voice_is_named_and_a_guess_from_the_words_is_not(cfg):
         SpeakerGuess(speaker="room-3", name="unsure", basis="voice", confidence=0.5),
     ]
     assert names_for_roster(guesses) == {"room-1": "Ada"}
-    cfg.speakers_memory.recognise_known = False
-    pipeline._keep_known_voices(cfg, meeting_id, guesses)
-    assert records.read_notes(cfg.notes_json(meeting_id)) == {}
     cfg.speakers_memory.recognise_known = True
     pipeline._keep_known_voices(cfg, meeting_id, guesses)
-    notes = records.read_notes(cfg.notes_json(meeting_id))
-    assert notes["speakers"] == {"room-1": "Ada"}
-    assert notes["applied"] is True
+    assert records.read_notes(cfg.notes_json(meeting_id)) == {}
 
 
 def test_known_speaker_suggestions_are_never_silent_assignments():
@@ -1401,3 +1396,39 @@ def test_summary_uses_confirmed_names_for_numbered_speakers():
     text = "Owner: Speaker 1. Owner: Speaker 2, for Speaker 1's use case. Speaker 12 and Speaker 3."
     named = name_speakers_in_text(text, transcript, {"room-1": "Jamie", "room-2": "Jacob"})
     assert named == "Owner: Jamie. Owner: Jacob, for Jamie's use case. Speaker 12 and Speaker 3."
+
+
+def test_headphone_confirmation_names_the_wearer_and_a_room_does_not():
+    from meeting_archive.models import SpeakerProfile
+    from meeting_archive.speakers import wearer_for_confirmation
+
+    cfg = type("Cfg", (), {"own_label": "Jacob"})()
+    call = type("T", (), {})()
+    call.speaker_profiles = [
+        SpeakerProfile(speaker="mic", channel="mic", speaking_s=7.4, first_at=2.54),
+        SpeakerProfile(speaker="sys-1", channel="sys", speaking_s=8.1, first_at=21.49),
+    ]
+    assert wearer_for_confirmation(cfg, call) == ("Jacob", 2.54)
+
+    silent = type("T", (), {})()
+    silent.speaker_profiles = [
+        SpeakerProfile(speaker="mic", channel="mic", speaking_s=0, first_at=0),
+    ]
+    assert wearer_for_confirmation(cfg, silent) == ("", 0.0)
+
+    room = type("T", (), {})()
+    room.speaker_profiles = [
+        SpeakerProfile(speaker="room-1", channel="room", speaking_s=10, first_at=1),
+    ]
+    assert wearer_for_confirmation(cfg, room) == ("", 0.0)
+
+
+def test_the_other_listed_name_beats_a_library_match_to_someone_else():
+    from meeting_archive.speakers import other_listed_name
+
+    assert other_listed_name(["Jacob", "MHTB"], ["Jacob", "Jake"], {}) == "MHTB"
+    assert other_listed_name(["Jacob", "MHTB", "Sam"], ["Jacob"], {}) == ""
+    assert other_listed_name(["Jacob"], ["Jacob", "Jake"], {}) == ""
+    assert (
+        other_listed_name(["Jacob", "MHTB"], ["Jacob"], {"sys-2": "MHTB"}) == ""
+    )
