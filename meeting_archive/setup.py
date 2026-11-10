@@ -1168,6 +1168,25 @@ def _prefetch_faster_whisper(repo: Path, model: str) -> None:
     emit({"type": "log", "id": "whisper", "text": "Speech model is on this Mac"})
 
 
+def install_bundled_model(src: Path, dest: Path, *, min_bytes: int = 100_000_000) -> bool:
+    """Move a model that shipped inside Yarn Setup into the archive.
+
+    The Hugging Face copy lives on a US server. Setup can reach GitHub and
+    still watch that server accept the connection and then send nothing, which
+    is what happened four times in a row from Japan. The installer carries
+    this one file so that hop is not required.
+    """
+    if not src.is_file() or src.stat().st_size < min_bytes:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.resolve() == src.resolve():
+        return True
+    if dest.exists():
+        dest.unlink()
+    shutil.move(str(src), dest)
+    return dest.is_file() and dest.stat().st_size >= min_bytes
+
+
 def step_whisper(repo: Path) -> None:
     from .config import load_config
 
@@ -1178,6 +1197,10 @@ def step_whisper(repo: Path) -> None:
     path = Path(cfg.whisper.model_path).expanduser()
     if path.is_file() and path.stat().st_size > 100_000_000:
         emit({"type": "log", "id": "whisper", "text": f"Already have {path.name}"})
+        return
+    bundled = repo / "models" / "ggml-large-v3-turbo.bin"
+    if install_bundled_model(bundled, path):
+        emit({"type": "log", "id": "whisper", "text": f"Saved {path.name} from the Yarn installer"})
         return
     download(WHISPER_GGML, path, "whisper", long=True)
     emit({"type": "log", "id": "whisper", "text": f"Saved {path}"})

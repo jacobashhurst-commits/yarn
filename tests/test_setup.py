@@ -12,6 +12,17 @@ import pytest
 from meeting_archive import setup as yarn_setup
 
 
+def test_the_bundled_speech_model_is_installed_without_a_download(tmp_path):
+    src = tmp_path / "models" / "ggml-large-v3-turbo.bin"
+    src.parent.mkdir()
+    src.write_bytes(b"ggml-model")
+    dest = tmp_path / "archive" / "ggml-large-v3-turbo.bin"
+
+    assert yarn_setup.install_bundled_model(src, dest, min_bytes=4)
+    assert dest.read_bytes() == b"ggml-model"
+    assert not src.exists()
+
+
 def test_a_partial_download_continues_instead_of_starting_over(tmp_path):
     fresh = yarn_setup.download_request("https://example.invalid/model.bin", 0)
     assert fresh.get_header("Range") is None

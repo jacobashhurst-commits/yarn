@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
 # Build the zip people download from the Yarn page.
-# It is the installer folder, not the whole source tree. Models are still
-# fetched by Yarn Setup after this zip is opened. That is deliberate.
+# It is the installer folder, not the whole source tree. The speech model
+# travels inside Setup: the Hugging Face server in the US can accept the
+# connection and then send nothing. Speaker models and the summary model
+# are still fetched after the zip is opened.
 #
 #   bin/yarn-release
 #   # writes dist/Yarn.Setup.Apple.Silicon.zip
@@ -64,7 +66,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>YarnSetup</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.11</string>
+  <key>CFBundleShortVersionString</key><string>0.12</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
@@ -90,8 +92,8 @@ cat > "$YARN/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Yarn</string>
   <key>CFBundleIconFile</key><string>Yarn</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.11</string>
-  <key>CFBundleVersion</key><string>0.11</string>
+  <key>CFBundleShortVersionString</key><string>0.12</string>
+  <key>CFBundleVersion</key><string>0.12</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAudioCaptureUsageDescription</key>
@@ -120,6 +122,16 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
 # bin/yarn-sign switches itself once that certificate exists.
 YARN_SIGN="$("$REPO_DIR/bin/yarn-sign" "$YARN")"
 echo "$YARN_SIGN"
+
+# Same bytes Hugging Face publishes for ggml-large-v3-turbo. Setup moves
+# this into the meeting archive instead of downloading it.
+MODEL_SRC="${YARN_WHISPER_MODEL:-$HOME/meeting-archive/models/whisper-cpp/ggml-large-v3-turbo.bin}"
+if [[ ! -f "$MODEL_SRC" ]]; then
+  echo "yarn-release: speech model not found at $MODEL_SRC" >&2
+  exit 1
+fi
+mkdir -p "$INNER/models"
+cp "$MODEL_SRC" "$INNER/models/ggml-large-v3-turbo.bin"
 
 # minos follows the SDK unless this is set. Built on a newer Mac, Launch
 # Services then refuses the app on an older one (-10825) before any window.
