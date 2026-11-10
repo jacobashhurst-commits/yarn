@@ -7,6 +7,7 @@ the current line of detail. Re-running is safe: finished work is skipped.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import platform
@@ -417,69 +418,128 @@ def promote_finished_partial(partial: Path, dest: Path, headers) -> bool:
     return True
 
 
+# A 1.6 GB speech model comes from a server in the US. One quiet minute used
+# to fail the whole install and blame the internet, which is what a Japanese
+# install saw while a Zoom call on a nearer server was fine.
+DOWNLOAD_ATTEMPTS = 4
+
+
+def _download_stopped_message(name: str) -> str:
+    return (
+        f"The download of {name} stopped before it finished. "
+        "What already arrived is saved. Run Yarn Setup again and it will continue."
+    )
+
+
+def _retryable_http(code: int) -> bool:
+    return code in {408, 429, 500, 502, 503, 504} or code == 416
+
+
 def download(url: str, dest: Path, step_id: str, *, long: bool = False) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
+    # Per read, not for the whole file. A long model can take many minutes
+    # and still be healthy; this only fires when a chunk stops arriving.
+    timeout = 180 if long else 60
+    attempts = DOWNLOAD_ATTEMPTS if long else 2
+    for attempt in range(1, attempts + 1):
+        try:
+            _download_once(
+                url,
+                dest,
+                partial,
+                step_id,
+                timeout=timeout,
+                announce=attempt == 1,
+                long=long and attempt == 1,
+            )
+            return
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and promote_finished_partial(partial, dest, exc.headers):
+                emit({"type": "progress", "id": step_id, "percent": 100})
+                return
+            if exc.code == 416 and partial.is_file():
+                # These bytes are not a prefix of the file. Start clean.
+                partial.unlink()
+            if attempt == attempts or not _retryable_http(exc.code):
+                raise RuntimeError(_download_stopped_message(dest.name)) from exc
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            http.client.IncompleteRead,
+        ) as exc:
+            if attempt == attempts:
+                raise RuntimeError(_download_stopped_message(dest.name)) from exc
+        emit(
+            {
+                "type": "log",
+                "id": step_id,
+                "text": f"Continuing {dest.name}",
+                "note": "The connection blinked. Continuing from what already arrived.",
+            }
+        )
+        time.sleep(min(8, 2 * (attempt + 1)))
+
+
+def _download_once(
+    url: str,
+    dest: Path,
+    partial: Path,
+    step_id: str,
+    *,
+    timeout: int,
+    announce: bool,
+    long: bool,
+) -> None:
     already = partial.stat().st_size if partial.is_file() else 0
     req = download_request(url, already)
-    payload: dict = {
-        "type": "log",
-        "id": step_id,
-        "text": (
-            f"Continuing {dest.name}"
-            if already
-            else f"Downloading {dest.name}"
-        ),
-    }
-    if long:
-        payload["note"] = LONG_DOWNLOAD_NOTE
-    emit(payload)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            status = getattr(resp, "status", None) or resp.getcode()
-            mode = resume_mode(int(status or 200), already)
-            if mode == "ab":
-                total = already + int(resp.headers.get("Content-Length") or 0)
-                got = already
-            else:
-                total = int(resp.headers.get("Content-Length") or 0)
-                got = 0
-            last = -1
-            with partial.open(mode) as fh:
-                while True:
-                    chunk = resp.read(256 * 1024)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    got += len(chunk)
-                    if total:
-                        percent = min(99, int(got * 100 / total))
-                        if percent != last:
-                            last = percent
-                            emit(
-                                {
-                                    "type": "progress",
-                                    "id": step_id,
-                                    "percent": percent,
-                                }
-                            )
-        partial.replace(dest)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 416 and promote_finished_partial(partial, dest, exc.headers):
-            emit({"type": "progress", "id": step_id, "percent": 100})
-            return
-        # Leave the partial. The next Setup continues it.
-        raise RuntimeError(
-            "The download did not finish. Check the internet connection "
-            "and run Yarn Setup again."
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise RuntimeError(
-            "The download did not finish. Check the internet connection "
-            "and run Yarn Setup again."
-        ) from exc
-    # The byte count can finish under the advertised length. The file is
-    # on disk, so the bar has to be allowed to reach 100.
+    if announce:
+        payload: dict = {
+            "type": "log",
+            "id": step_id,
+            "text": (
+                f"Continuing {dest.name}"
+                if already
+                else f"Downloading {dest.name}"
+            ),
+        }
+        if long:
+            payload["note"] = LONG_DOWNLOAD_NOTE
+        emit(payload)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        status = getattr(resp, "status", None) or resp.getcode()
+        mode = resume_mode(int(status or 200), already)
+        if mode == "ab":
+            total = already + int(resp.headers.get("Content-Length") or 0)
+            got = already
+        else:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got = 0
+        last = -1
+        with partial.open(mode) as fh:
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                got += len(chunk)
+                if total:
+                    percent = min(99, int(got * 100 / total))
+                    if percent != last:
+                        last = percent
+                        emit(
+                            {
+                                "type": "progress",
+                                "id": step_id,
+                                "percent": percent,
+                            }
+                        )
+    # A closed connection used to look like success and save a short file.
+    # The speech model is only finished when the server's length has arrived.
+    if total and got < total:
+        raise http.client.IncompleteRead(b"", expected=total - got)
+    partial.replace(dest)
     emit({"type": "progress", "id": step_id, "percent": 100})
 
 

@@ -102,6 +102,101 @@ def test_setup_stops_on_the_first_failed_step(tmp_path, monkeypatch, capsys):
     assert [e["id"] for e in events if e["type"] == "start"] == ["prereqs"]
 
 
+class _Chunks:
+    def __init__(self, chunks: list[bytes], length: int | None = None, status: int = 200):
+        self._chunks = list(chunks)
+        self.status = status
+        self.headers = {
+            "Content-Length": str(
+                length if length is not None else sum(len(chunk) for chunk in chunks)
+            )
+        }
+
+    def getcode(self) -> int:
+        return self.status
+
+    def read(self, _n: int) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> bool:
+        return False
+
+
+def test_a_stalled_model_download_continues(tmp_path, monkeypatch):
+    dest = tmp_path / "ggml-large-v3-turbo.bin"
+    calls = {"n": 0}
+
+    def urlopen(_req, timeout=0):
+        calls["n"] += 1
+        assert timeout == 180
+        if calls["n"] == 1:
+            raise TimeoutError("The read operation timed out")
+        return _Chunks([b"hello", b"world"])
+
+    notes: list[dict] = []
+    monkeypatch.setattr(yarn_setup.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(yarn_setup.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(yarn_setup, "emit", lambda payload: notes.append(payload))
+
+    yarn_setup.download(
+        "https://example.invalid/ggml-large-v3-turbo.bin",
+        dest,
+        "whisper",
+        long=True,
+    )
+
+    assert dest.read_bytes() == b"helloworld"
+    assert calls["n"] == 2
+    text = " ".join(str(item.get("note") or "") for item in notes)
+    assert "Continuing from what already arrived" in text
+    assert "internet" not in text.lower()
+
+
+def test_a_short_model_file_is_not_saved_as_finished(tmp_path, monkeypatch):
+    dest = tmp_path / "ggml-large-v3-turbo.bin"
+
+    def urlopen(_req, timeout=0):
+        return _Chunks([b"hi"], length=100)
+
+    monkeypatch.setattr(yarn_setup.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(yarn_setup.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(yarn_setup, "emit", lambda _payload: None)
+    monkeypatch.setattr(yarn_setup, "DOWNLOAD_ATTEMPTS", 2)
+
+    with pytest.raises(RuntimeError, match="stopped before it finished"):
+        yarn_setup.download(
+            "https://example.invalid/ggml-large-v3-turbo.bin", dest, "whisper", long=True
+        )
+
+    assert not dest.exists()
+    assert (tmp_path / "ggml-large-v3-turbo.bin.partial").read_bytes() == b"hi"
+
+
+def test_a_missing_download_is_not_retried(tmp_path, monkeypatch):
+    dest = tmp_path / "model.bin"
+    calls = {"n": 0}
+
+    def urlopen(req, timeout=0):
+        calls["n"] += 1
+        raise yarn_setup.urllib.error.HTTPError(
+            req.full_url, 404, "missing", hdrs=None, fp=None
+        )
+
+    monkeypatch.setattr(yarn_setup.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(yarn_setup.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(yarn_setup, "emit", lambda _payload: None)
+
+    with pytest.raises(RuntimeError, match="stopped before it finished"):
+        yarn_setup.download("https://example.invalid/model.bin", dest, "whisper")
+
+    assert calls["n"] == 1
+
+
 def test_install_app_skips_download_when_already_present(tmp_path, monkeypatch):
     app = tmp_path / "SwiftBar.app"
     app.mkdir()
