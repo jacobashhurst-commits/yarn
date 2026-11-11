@@ -1,7 +1,7 @@
 [project]
 name = "meeting-archive"
 version = "0.1.0"
-description = "Local, manually triggered meeting transcription and semantic search archive"
+description = "Yarn. Local meeting recording, transcripts, and search. Everything stays on this Mac."
 requires-python = ">=3.11"
 dependencies = [
     "faster-whisper>=1.1.0",

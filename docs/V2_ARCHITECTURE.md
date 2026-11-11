@@ -1,5 +1,7 @@
 # Yarn V2 architecture
 
+Later version. The current app is Yarn in the Dock and the menu bar.
+
 Yarn V2 evolves the existing local meeting archive. It does not replace
 capture, transcription, diarisation, or the on-disk transcript as source of
 truth.

@@ -1,5 +1,7 @@
 # Handoff to Claude Code
 
+Working notes from an earlier machine. The current product is the README. These paths are not the install.
+
 The source checkout is `/Users/jashhurst/yarn/meeting-archive-src`; runtime
 recordings, transcripts and Chroma data live in
 `/Users/jashhurst/yarn/meeting-archive`.

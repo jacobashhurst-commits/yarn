@@ -36,15 +36,15 @@ Microphone permission belongs to `ma-capture`. Call audio belongs to `Yarn.app`.
 
    `bin/yarn-sign` finds the certificate, signs `Yarn Setup.app` and `Yarn.app` with the hardened runtime and a timestamp, then notarizes the zip. `YARN_SKIP_NOTARIZE=1` signs and stops, which is only for checking the certificate before the notary profile exists.
 
-6. Install that build once. Setup sees `Developer ID Application` on `Yarn.app` and leaves the call-audio grant in place. The first Allow on that Mac still has to be clicked. Later rebuilds with the same certificate do not wipe it.
+6. Install that build once. Setup sees `Developer ID Application` on `Yarn.app` and leaves the call-audio grant in place. The first headphone call on that Mac still needs Yarn added with + under Screen & System Audio Recording. Later rebuilds with the same certificate do not wipe a grant that is already there.
 
 ## The day you publish
 
 The Yarn page downloads `releases/latest`. That zip opens Yarn Setup, which is signed and notarized. The program is inside the app, because macOS can open a download from a temporary folder and a folder beside the app would be left behind.
 
 1. Enrol, create the Developer ID Application certificate, and store the notary profile above.
-2. `bin/yarn-release` signs and notarizes `dist/Yarn.Setup.Apple.Silicon.zip`.
-3. Upload that zip as the new GitHub release.
+2. `bin/yarn-release` signs and notarizes the small zip. `bin/yarn-release --japan` does the same with the speech model inside.
+3. Upload both zips on the GitHub release. The Yarn page button downloads the small one.
 
 `README.md` and `docs/index.html` tell people to double-click Yarn Setup. Those lines stay only while the file on `releases/latest` is this notarized zip. An ad-hoc zip is still blocked on first open, and the note on the page would then be wrong.
 

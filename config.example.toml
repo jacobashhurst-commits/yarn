@@ -1,11 +1,9 @@
-# Copy to ~/.config/meeting-archive/config.toml and edit.
-# Everything here has a default except audio.device_index, which is specific
-# to your machine. Run `ma devices` to find it.
+# Hand-built config. Yarn Setup writes this file for you, including your name.
+# Copy it to ~/.config/meeting-archive/config.toml only if you are not using Setup.
 
 root = "~/meeting-archive"
-# Your name on a headphone call. A new install asks for this the first time
-# you press Headphones. Change it if you set the config up by hand.
-own_label = "Jacob"
+# Your name on a headphone call. Setup asks the first time you press Headphones.
+own_label = "Alex"
 other_label = "Other"
 # Label for in-room recordings, where one microphone carries several people and
 # none of them can be told apart. Don't set this to your own name: attributing
@@ -19,30 +17,18 @@ collection = "meetings"
 audio_retention_days = 7
 
 [audio]
-# Index of the macOS aggregate device combining your mic and BlackHole.
-# Prefer the stable name: AVFoundation indices change whenever devices such as
-# AirPods connect. device_index remains as a fallback for unnamed hardware.
+# Room recording uses the laptop microphone. A headphone call records that
+# microphone and the audio the Mac is playing. Neither needs an aggregate device.
+#
+# device_name is only the fallback for an older aggregate that still contains
+# BlackHole. Prefer the name: device indexes change when something like
+# AirPods connects. If you do use that fallback, the channel order is the
+# order you ticked in Audio MIDI Setup, not the order in the list. Reversed
+# channels still produce a transcript, with every speaker the wrong way round.
 device_name = "Aggregate Device"
 device_index = -1
-
-# Which channels of that device belong to whom, 0-based, in the aggregate
-# device's own channel order. The Subdevices strip in Audio MIDI Setup shows
-# the order, and it follows the order you ticked the devices, NOT the order
-# they appear in the list. Two common layouts:
-#
-#   BlackHole ticked first, mic second:   sys = [0, 1], mic = [2]
-#   mic ticked first, BlackHole second:   mic = [0],    sys = [1, 2]
-#
-# Get this backwards and everything still appears to work -- transcripts are
-# written, search returns hits -- but every speaker label is reversed. Verify
-# by playing back the two split files before trusting it.
-#
-# In room mode only mic_channels is used; system audio is ignored entirely.
-# A video call does not use this layout. It records the headset microphone
-# and the audio going to the headphones. sys_channels is only a fallback
-# when an older aggregate device still has a separate BlackHole channel.
-mic_channels = [2]
-sys_channels = [0, 1]
+mic_channels = [0]
+sys_channels = [0]
 sample_rate = 16000
 
 [whisper]
@@ -57,7 +43,7 @@ model = "large-v3-turbo"
 # converted model goes missing: set engine = "faster_whisper".
 engine = "whisper_cpp"
 command = "/opt/homebrew/bin/whisper-cli"
-model_path = "~/yarn/meeting-archive/models/whisper-cpp/ggml-model.bin"
+model_path = "~/meeting-archive/models/whisper-cpp/ggml-large-v3-turbo.bin"
 # Metal does the decoding; these threads feed it.
 num_threads = 8
 
@@ -79,13 +65,12 @@ beam_size = 5
 vad_filter = true
 vad_min_silence_ms = 700
 condition_on_previous_text = false
-# Optional hint for whisper.cpp / faster-whisper (company and product names).
-initial_prompt = "Zuora, subscription billing, revenue recognition."
+# Optional hint for whisper.cpp / faster-whisper. Names and product words.
+initial_prompt = ""
 
 [glossary]
 # Whole-word fixes after Whisper, before markdown and search. Keys are what
 # Whisper often writes; values are what you want in the archive.
-Zora = "Zuora"
 
 [diarize]
 # Distinguish individual voices on the system-audio and room channels. Runtime
@@ -123,7 +108,7 @@ enabled = true
 # Your own names, so your self-introductions and people greeting you don't get
 # suggested as attendees. Include nicknames. A new install replaces these
 # with the name you enter the first time you press Headphones.
-own_names = ["Jacob", "Jake"]
+own_names = ["Alex"]
 # Show a second dismissible popup with detected names, but only when the
 # on-stop popup was dismissed without an attendee list.
 suggest_popup = true

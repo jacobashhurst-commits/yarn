@@ -121,7 +121,7 @@ There is no mode flag threaded through the pipeline. The channel id is the fact:
 
 | Channel | Meaning | Default label |
 |---|---|---|
-| `mic` | The owner’s microphone on a call | `own_label` (Jacob, unless configured) |
+| `mic` | The owner’s microphone on a call | `own_label`, the name given the first time Headphones is pressed |
 | `sys` | Everyone else on a call | `other_label`, then Speaker N after diarisation |
 | `room` | One microphone, several people | Unknown, then Speaker N after diarisation |
 

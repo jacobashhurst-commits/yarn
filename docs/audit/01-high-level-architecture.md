@@ -48,7 +48,7 @@ Nothing joins the call. Yarn records the Mac, so it works with whatever meeting 
 
 Who spoke is part of Yarn. A live transcript is not. The record is the meeting after it ends. Watching words appear while people are still talking is a different product, and it is the wrong one unless the point is live translation.
 
-The install stops repeating Privacy & Security once Yarn is signed with an Apple Developer ID. Paying Apple for that certificate is the plan. The first Allow on a new Mac still has to be clicked. The steps are in [docs/signing.md](../signing.md).
+Yarn Setup and Yarn are signed with a Developer ID, so a downloaded zip opens without a Gatekeeper warning. The first room recording still asks for the microphone. The first headphone call still needs Yarn added with + under Screen & System Audio Recording, chosen from the Applications folder in the home folder. macOS does not show an Allow button for that row. The signing steps are in [docs/signing.md](../signing.md).
 
 ## Who said what
 
