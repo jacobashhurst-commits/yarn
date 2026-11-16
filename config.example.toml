@@ -87,6 +87,13 @@ diarize_channels = ["sys", "room"]
 min_speakers = 0
 max_speakers = 0
 min_span_s = 0.6
+# Under this many seconds of speech in total, a voice is not a participant.
+# It joins a participant only if it sounds like one. Otherwise its words stay
+# in the transcript without a speaker number, and nobody is asked to name it.
+min_participant_s = 3.0
+# Under this, in a meeting where someone spoke for longer, a voice is first
+# compared with the longer voices and joined to one it matches.
+short_voice_fold_s = 10.0
 # Once transcription finishes, show optional dialogs with one recognisable
 # quote per unidentified voice.
 identify_popup = true
@@ -98,6 +105,9 @@ max_turn_chars = 1500
 # Same speaker, gap under this, becomes one turn.
 coalesce_gap_s = 2.0
 max_turn_s = 90.0
+# A listener's "yeah" or "mm" this short does not end the speaker's turn.
+# 0 turns this off.
+backchannel_max_s = 1.5
 # Prepend "Meeting <date> | Present: ... | Notes: ..." to each chunk before
 # embedding. Costs a little precision, buys a lot of recall on queries like
 # "what did John say about pricing".
@@ -123,6 +133,9 @@ enabled = true
 command = "/usr/local/bin/ollama"
 # Probe only. Do not use `ollama list` to detect this — that starts the daemon.
 host = "http://127.0.0.1:11434"
+# Yarn refuses any host that is not this Mac, because the prompt is your
+# transcript. Only set this if you run the model on another machine you own.
+# allow_remote_host = false
 # 9B on 16 GB+ Macs. 4B on 8 GB machines (Neo): 9B needs ~7.1 GiB free.
 model = "qwen3.5:9b"
 timeout_s = 900

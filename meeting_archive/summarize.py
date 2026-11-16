@@ -213,10 +213,12 @@ class Summarizer:
         if not self.is_running():
             raise SummaryUnavailable(DEFERRED_SUMMARY)
         self._check_local_model()
+        spoken = summary_turns(turns)
         lines = [
             f"[{format_timestamp(turn.start)}] {label_fn(turn)}: {turn.text}"
-            for turn in turns
+            for turn in spoken
         ]
+        loose = unattributed_labels(spoken, label_fn)
         parts = _chunks(lines, self.config.chunk_chars)
         summaries = [
             self._run(
@@ -225,6 +227,7 @@ class Summarizer:
                     partial=len(parts) > 1,
                     profile=self.config.profile,
                     language=language,
+                    unattributed=loose,
                 )
             )
             for part in parts
@@ -379,6 +382,44 @@ def _note_token_delta(data: dict, seen: dict) -> None:
         log.debug("could not record saved tokens", exc_info=True)
 
 
+def summary_turns(turns: list[Turn]) -> list[Turn]:
+    """The turns worth showing a summary model.
+
+    A line that is only "yeah" or "mm, okay" says nothing, and a model told
+    to report what each person said will still try: "Speaker 3 agreed."
+    Those lines stay in the transcript and are left out of the prompt. If
+    that would leave nothing, the meeting really was that short, and all of
+    it is used.
+    """
+    from .merge import is_backchannel
+
+    kept = [
+        turn
+        for turn in turns
+        # No duration limit here: a drawn-out "yeeeah, okay" is still filler.
+        if not is_backchannel(turn.text, 0.0, 1.0)
+    ]
+    return kept or list(turns)
+
+
+def unattributed_labels(turns: list[Turn], label_fn) -> list[str]:
+    """Labels on lines whose speaker could not be told apart.
+
+    Only on a channel where other voices were separated. There, a line with
+    no speaker is a brief remark that matched nobody. On a channel that was
+    never separated the same label is simply everyone, and is left alone.
+    """
+    separated = {turn.channel for turn in turns if turn.speaker}
+    labels: list[str] = []
+    for turn in turns:
+        if turn.speaker or turn.channel not in separated or turn.channel == "mic":
+            continue
+        label = str(label_fn(turn))
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
 def _chunks(lines: list[str], limit: int) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
@@ -395,7 +436,11 @@ def _chunks(lines: list[str], limit: int) -> list[str]:
 
 
 def _summary_prompt(
-    transcript: str, partial: bool, profile: str = "default", language: str = ""
+    transcript: str,
+    partial: bool,
+    profile: str = "default",
+    language: str = "",
+    unattributed: list[str] | None = None,
 ) -> str:
     from .languages import summary_instruction
 
@@ -403,6 +448,15 @@ def _summary_prompt(
     extra = _PROFILE_HINTS.get(profile, _PROFILE_HINTS["default"])
     spoken = summary_instruction(language)
     spoken_line = f"{spoken}\n" if spoken else ""
+    loose_line = ""
+    if unattributed:
+        quoted = " or ".join(f'"{label}"' for label in unattributed)
+        loose_line = (
+            f"\nA line labelled {quoted} is a brief remark whose speaker "
+            "could not be told apart. It is not a participant. Do not count "
+            "it as a person, name it, or report what it said as someone's "
+            "view. Use it only if it carries a fact.\n"
+        )
     return f"""You summarize private meeting transcripts. {scope}
 Use only facts explicitly present below. Do not infer identities, motives,
 decisions, or action items. If speech is unclear, omit it.
@@ -412,7 +466,7 @@ speaks, the overview and the key points must say what each of them said.
 The person on the microphone and a person heard from the computer are
 different people. Do not leave either of them out, and do not turn one
 person's words into a description of the meeting instead of something they said.
-
+{loose_line}
 Distinguish, and never mix:
 - Decision (agreed in the meeting)
 - Suggestion (proposed, not agreed)

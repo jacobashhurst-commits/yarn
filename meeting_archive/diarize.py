@@ -46,10 +46,13 @@ log = logging.getLogger(__name__)
 # 0.6s; 4-way clustering produced 264s, 287s, 30s, 0.6s and recovered Leanne.
 MIN_SUBSTANTIVE_SPEAKER_S = 2.0
 
-# A cough or a clipped "yeah" still comes back as its own cluster. Under a
-# second in total is not another person: naming it, and listing it, makes the
-# meeting look more crowded than it was. The words stay on the channel.
-MIN_LISTED_SPEAKER_S = 1.0
+# The floors for "not a participant" (3s) and "compare with longer voices"
+# (10s) are DiarizeConfig.min_participant_s and short_voice_fold_s. They are
+# settings because the right value is a judgement about meetings, not a
+# measurement of this model.
+
+# Below this there is too little audio to fingerprint at all.
+MIN_VOICEPRINT_S = 0.8
 
 # A voice that spoke for less than this, in a meeting where someone else spoke
 # for longer, is a fragment of a person already in the room. The Seek SOW
@@ -300,25 +303,42 @@ class Diarizer:
                 after,
                 channel,
             )
+        # Blips before the longer fold. The longer fold sends a voice it
+        # could not fingerprint to whoever spoke nearest, which is right for
+        # several seconds of speech and wrong for a listener's "mm": the
+        # nearest speaker is the one person who certainly did not say it.
+        before_brief = len({span.speaker for span in spans})
+        spans = settle_brief_voices(
+            spans,
+            samples,
+            sample_rate,
+            self.config,
+            min_participant_s=self.config.min_participant_s,
+        )
+        after_brief = len({span.speaker for span in spans})
+        if after_brief < before_brief:
+            log.info(
+                "voices under %.1fs joined or left unnamed %d -> %d on channel=%s",
+                self.config.min_participant_s,
+                before_brief,
+                after_brief,
+                channel,
+            )
         before_short = len({span.speaker for span in spans})
-        spans = absorb_short_voices(spans, samples, sample_rate, self.config)
+        spans = absorb_short_voices(
+            spans,
+            samples,
+            sample_rate,
+            self.config,
+            min_speaking_s=self.config.short_voice_fold_s,
+        )
         after_short = len({span.speaker for span in spans})
         if after_short < before_short:
             log.info(
                 "folded voices under %ss %d -> %d on channel=%s",
-                int(MIN_NOTABLE_SPEAKER_S),
+                int(self.config.short_voice_fold_s),
                 before_short,
                 after_short,
-                channel,
-            )
-        before_brief = len({span.speaker for span in spans})
-        spans = drop_brief_voices(spans)
-        after_brief = len({span.speaker for span in spans})
-        if after_brief < before_brief:
-            log.info(
-                "dropped voices under one second %d -> %d on channel=%s",
-                before_brief,
-                after_brief,
                 channel,
             )
         return spans
@@ -395,7 +415,7 @@ def absorb_short_voices(
         and config is not None
     ):
         for speaker, total in totals.items():
-            if total < 0.8:
+            if total < MIN_VOICEPRINT_S:
                 continue
             clip = _speaker_waveform(
                 samples, sample_rate, spans, speaker, max_s=12.0
@@ -504,28 +524,90 @@ def _nearest_anchor(
     return max(votes, key=votes.get)
 
 
-def drop_brief_voices(
+def settle_brief_voices(
     spans: list[SpeakerSpan],
-    min_speaking_s: float = MIN_LISTED_SPEAKER_S,
+    samples=None,
+    sample_rate: int | None = None,
+    config: DiarizeConfig | None = None,
+    *,
+    min_participant_s: float = 3.0,
+    voice_scores: dict[tuple[str, str], float] | None = None,
+    keep: frozenset[str] | set[str] = frozenset(),
+    renumber: bool = True,
 ) -> list[SpeakerSpan]:
-    """Remove every voice whose speech, added up, is under a second.
+    """Decide what a voice with only a moment of speech is.
 
-    The remaining voices are renumbered by first appearance, so a blip cannot
-    hold "Speaker 1" and push the person who opened the meeting to 2.
+    It is one of two things. If its voiceprint matches a participant, it is
+    that participant, and its spans take their key. Otherwise its spans are
+    removed: the words stay in the transcript under the channel's neutral
+    label, and no numbered speaker is created for them.
+
+    The asymmetry is deliberate. A match from two seconds of audio is rare
+    by chance, so it can be believed. A mismatch from two seconds is what
+    short audio usually produces even for the same person, so it is not
+    evidence of a new one. The older rule kept every mismatch as its own
+    speaker, and that is where "Speaker 5: yep" came from.
+
+    Nothing here guesses from who was speaking nearby. A back-channel comes
+    from the listener, so the neighbour is the wrong answer more often than
+    the right one, and it would put words in a named person's mouth.
+
+    `keep` holds keys that must not be touched, such as a voice Jacob has
+    already named. Does nothing when no voice reached the floor: a very
+    short recording keeps whoever spoke. With `renumber`, the remaining
+    voices are numbered by first appearance, so a blip cannot hold
+    "Speaker 1". Leave it off when names are already stored against keys.
     """
-    if not spans:
+    if not spans or min_participant_s <= 0:
         return spans
     totals = _speaker_durations(spans)
-    brief = {speaker for speaker, total in totals.items() if total < min_speaking_s}
-    if not brief:
+    participants = {
+        speaker for speaker, total in totals.items() if total >= min_participant_s
+    }
+    brief = [
+        speaker
+        for speaker, total in totals.items()
+        if total < min_participant_s and speaker not in keep
+    ]
+    if not participants or not brief:
         return spans
-    kept = [span for span in spans if span.speaker not in brief]
+
+    vectors: dict[str, list[float]] = {}
+    if (
+        voice_scores is None
+        and samples is not None
+        and sample_rate
+        and config is not None
+    ):
+        measurable = [s for s in brief if totals[s] >= MIN_VOICEPRINT_S]
+        if measurable:
+            for speaker in [*measurable, *sorted(participants)]:
+                clip = _speaker_waveform(
+                    samples, sample_rate, spans, speaker, max_s=12.0
+                )
+                if clip is None or len(clip) < int(sample_rate * MIN_VOICEPRINT_S):
+                    continue
+                vector = _embed_samples(config, clip, sample_rate)
+                if vector:
+                    vectors[speaker] = vector
+
+    mapping: dict[str, str | None] = {}
+    for speaker in brief:
+        mapping[speaker] = _best_anchor(speaker, participants, voice_scores, vectors)
+
+    kept = [
+        (span.start, span.end, mapping.get(span.speaker, span.speaker))
+        for span in spans
+    ]
+    kept = [(start, end, speaker) for start, end, speaker in kept if speaker]
     if not kept:
         return []
-    return to_spans(
-        [(span.start, span.end, span.speaker) for span in kept],
-        kept[0].channel,
-    )
+    if renumber:
+        return to_spans(kept, spans[0].channel)
+    return [
+        SpeakerSpan(channel=spans[0].channel, start=start, end=end, speaker=speaker)
+        for start, end, speaker in kept
+    ]
 
 
 def drop_tiny_extra_cluster(
@@ -639,23 +721,49 @@ def merge_same_voices(
 
 
 def _speaker_waveform(samples, sample_rate: int, spans: list[SpeakerSpan], speaker: str, max_s: float):
+    """Up to `max_s` of one voice, taken from across the meeting.
+
+    The longest stretch from the early, middle and late third of where this
+    voice spoke comes first, then the longest of whatever is left. Taking
+    only the longest stretches fingerprinted a person from one moment of a
+    long meeting. Someone who leans back, moves seats or tires over three
+    hours then failed to match their own earlier voice and was listed twice.
+    """
     import numpy as np
+
+    mine = sorted((span for span in spans if span.speaker == speaker), key=lambda s: s.start)
+    if not mine:
+        return None
+    first, last = mine[0].start, mine[-1].end
+    third = (last - first) / 3.0
+    picked: list[SpeakerSpan] = []
+    if third > 0:
+        for index in range(3):
+            lo = first + index * third
+            hi = last if index == 2 else lo + third
+            bucket = [s for s in mine if lo <= (s.start + s.end) / 2.0 <= hi]
+            if bucket:
+                best = max(bucket, key=lambda s: s.duration)
+                if best not in picked:
+                    picked.append(best)
+    for span in sorted(mine, key=lambda s: s.duration, reverse=True):
+        if span not in picked:
+            picked.append(span)
 
     pieces = []
     remaining = int(max_s * sample_rate)
-    ordered = sorted(
-        (span for span in spans if span.speaker == speaker),
-        key=lambda span: span.duration,
-        reverse=True,
-    )
-    for span in ordered:
+    # An equal share for each third first, so one long stretch cannot use
+    # the whole allowance before the other two are heard.
+    share = max(remaining // 3, int(sample_rate * 2))
+    for index, span in enumerate(picked):
         if remaining <= 0:
             break
         start = max(0, int(span.start * sample_rate))
         end = min(len(samples), int(span.end * sample_rate))
         if end <= start:
             continue
-        piece = samples[start:end][:remaining]
+        limit = min(remaining, share) if index < 3 else remaining
+        piece = samples[start:end][:limit]
         pieces.append(piece)
         remaining -= len(piece)
     if not pieces:
@@ -739,20 +847,24 @@ def _exclusive_overlap(
     Spans are already sorted by start. A span that begins after the segment
     cannot overlap it, and nothing later can either.
     """
-    pieces: list[tuple[float, str, float, float]] = []
+    pieces: list[tuple[float, float, str, float, float]] = []
     for span in spans:
         if span.start >= segment.end:
             break
         start = max(segment.start, span.start)
         end = min(segment.end, span.end)
         if end > start:
-            pieces.append((end - start, span.speaker, start, end))
-    # Shortest claim first, so an interruption is not credited to the voice
-    # whose span happens to cover the whole stretch.
+            pieces.append((span.duration, end - start, span.speaker, start, end))
+    # Shortest span first, so an interruption is not credited to the voice
+    # whose span happens to cover the whole stretch. It has to be the
+    # span's own length, not the part inside this segment: Whisper usually
+    # cuts a segment exactly around an interruption, and then both voices
+    # cover all of it. Measured inside the segment they tie, and the tie
+    # went to whichever key sorted first, which was the person interrupted.
     pieces.sort()
     claimed: list[tuple[float, float]] = []
     totals: dict[str, float] = {}
-    for _, speaker, start, end in pieces:
+    for _, _, speaker, start, end in pieces:
         amount = 0.0
         for begin, stop in _subtract_intervals([(start, end)], claimed):
             amount += stop - begin
@@ -795,6 +907,9 @@ def _merge_intervals(pieces: list[tuple[float, float]]) -> list[tuple[float, flo
 def assign_speakers(
     segments: list[Segment],
     spans: list[SpeakerSpan],
+    *,
+    min_participant_s: float = 0.0,
+    keep: frozenset[str] | set[str] = frozenset(),
 ) -> int:
     """Attach a speaker to each segment by greatest temporal overlap, in place.
 
@@ -806,6 +921,13 @@ def assign_speakers(
 
     Segments with no overlapping span at all are left alone rather than guessed
     into the nearest speaker. Returns how many were attributed.
+
+    With `min_participant_s`, a voice that ended up holding less than that
+    much transcript is unattributed again. Spans and sentences do not line
+    up: a voice with four seconds of spans can win one two-word segment and
+    lose the rest to whoever was talking over it. Without this second look
+    that voice is a numbered speaker with a single "right". `keep` protects
+    keys Jacob has already named.
     """
     if not spans:
         return 0
@@ -817,6 +939,7 @@ def assign_speakers(
         channel_spans.sort(key=lambda s: s.start)
 
     assigned = 0
+    held: dict[str, dict[str, float]] = {}
     for segment in segments:
         candidates = by_channel.get(segment.channel)
         if not candidates:
@@ -828,6 +951,28 @@ def assign_speakers(
             # runs; an arbitrary dict order here would make tests flap.
             segment.speaker = max(sorted(totals), key=lambda k: totals[k])
             assigned += 1
+            channel_held = held.setdefault(segment.channel, {})
+            channel_held[segment.speaker] = (
+                channel_held.get(segment.speaker, 0.0) + totals[segment.speaker]
+            )
+
+    if min_participant_s > 0:
+        minor: set[str] = set()
+        for channel_held in held.values():
+            # Same exception as settle_brief_voices: with no participant on
+            # the channel, the people who spoke briefly are the meeting.
+            if not any(total >= min_participant_s for total in channel_held.values()):
+                continue
+            minor.update(
+                speaker
+                for speaker, total in channel_held.items()
+                if total < min_participant_s and speaker not in keep
+            )
+        if minor:
+            for segment in segments:
+                if segment.speaker in minor:
+                    segment.speaker = None
+                    assigned -= 1
 
     return assigned
 

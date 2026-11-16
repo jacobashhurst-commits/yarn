@@ -15,6 +15,13 @@ undiarized recordings behaving exactly as they did.
 Simultaneous speech (two people talking at once) is ordered by who started
 first. There is no way to represent true overlap in a linear transcript and
 trying to would make it unreadable, so we accept the ordering.
+
+One kind of overlap is handled, because it is most of them. A listener says
+"yeah" or "mm" while someone else is mid-thought. Read strictly by time,
+that cuts the speaker's sentence into two turns with a one-word turn
+between, and a long explanation becomes a dozen fragments. A back-channel
+is kept as its own short turn and the speaker's turn continues around it.
+The order still holds: the continued turn began before the "yeah" did.
 """
 
 from __future__ import annotations
@@ -22,19 +29,40 @@ from __future__ import annotations
 import re
 
 from .models import Segment, Turn
+from .quips import _is_all_filler
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+# "Yeah, okay, sure" is acknowledgement. Four words is starting to be a reply.
+_BACKCHANNEL_MAX_WORDS = 3
+
+
+def is_backchannel(text: str, duration_s: float, max_s: float) -> bool:
+    """A listener's acknowledgement: brief, and nothing but filler words.
+
+    The word list is English. In another language nothing matches, and
+    turns are split exactly as they were before.
+    """
+    if max_s <= 0 or duration_s > max_s:
+        return False
+    words = text.split()
+    if not words or len(words) > _BACKCHANNEL_MAX_WORDS:
+        return False
+    return _is_all_filler(text)
 
 
 def merge_segments(
     segments: list[Segment],
     coalesce_gap_s: float = 2.0,
     max_turn_s: float = 90.0,
+    backchannel_max_s: float = 0.0,
 ) -> list[Turn]:
     """Sort segments by time and collapse same-speaker runs into turns.
 
     A run is broken when the voice changes, when the gap between segments
     exceeds `coalesce_gap_s`, or when the turn would exceed `max_turn_s`.
+    With `backchannel_max_s`, another voice's brief acknowledgement does
+    not count as the voice changing.
     """
     cleaned = [s for s in segments if s.text and s.text.strip()]
     if not cleaned:
@@ -47,10 +75,30 @@ def merge_segments(
     )
 
     turns: list[Turn] = []
+    # The turn a following segment may still extend. Usually the last one.
+    # After a back-channel it is the turn before it.
+    open_turn: Turn | None = None
     for seg in ordered:
         text = seg.text.strip()
-        current = turns[-1] if turns else None
+        current = open_turn
         seg_voice = seg.speaker or seg.channel
+        if (
+            current is not None
+            and current.voice != seg_voice
+            and is_backchannel(text, seg.end - seg.start, backchannel_max_s)
+            # Only while the speaker is still within reach of carrying on.
+            and seg.start - current.end <= coalesce_gap_s
+        ):
+            turns.append(
+                Turn(
+                    channel=seg.channel,
+                    start=seg.start,
+                    end=max(seg.end, seg.start),
+                    text=text,
+                    speaker=seg.speaker,
+                )
+            )
+            continue
         if (
             current is not None
             and current.voice == seg_voice
@@ -61,15 +109,17 @@ def merge_segments(
             current.text = f"{current.text} {text}".strip()
             current.end = max(current.end, seg.end)
         else:
-            turns.append(
-                Turn(
-                    channel=seg.channel,
-                    start=seg.start,
-                    end=max(seg.end, seg.start),
-                    text=text,
-                    speaker=seg.speaker,
-                )
+            open_turn = Turn(
+                channel=seg.channel,
+                start=seg.start,
+                end=max(seg.end, seg.start),
+                text=text,
+                speaker=seg.speaker,
             )
+            turns.append(open_turn)
+    # A turn extended past a back-channel started before it, so sorting by
+    # start keeps the order anyone reading would expect.
+    turns.sort(key=lambda t: t.start)
     return turns
 
 

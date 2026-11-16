@@ -33,7 +33,7 @@ from meeting_archive.diarize import (
     DiarizationUnavailable,
     assign_speakers,
     absorb_short_voices,
-    drop_brief_voices,
+    settle_brief_voices,
     choose_richer_split,
     drop_tiny_extra_cluster,
     group_same_voices,
@@ -239,16 +239,17 @@ def test_a_voice_under_one_second_is_not_listed_as_a_speaker():
         SpeakerSpan(ROOM, 12.0, 12.4, "room-2"),
         SpeakerSpan(ROOM, 20.0, 20.5, "room-2"),
     ]
-    cleaned = drop_brief_voices(spans)
+    cleaned = settle_brief_voices(spans)
     assert [span.speaker for span in cleaned] == ["room-1"]
 
 
-def test_two_voices_who_each_spoke_for_more_than_a_second_both_stay():
+def test_two_people_who_each_said_a_little_both_stay():
+    """Nobody reached the floor, so the floor does not apply."""
     spans = [
-        SpeakerSpan(ROOM, 0.0, 4.0, "room-2"),
+        SpeakerSpan(ROOM, 0.0, 2.5, "room-2"),
         SpeakerSpan(ROOM, 4.0, 6.0, "room-1"),
     ]
-    cleaned = drop_brief_voices(spans)
+    cleaned = settle_brief_voices(spans)
     assert [span.speaker for span in cleaned] == ["room-2", "room-1"]
 
 
@@ -257,7 +258,7 @@ def test_a_blip_does_not_keep_the_first_speaker_slot():
         SpeakerSpan(ROOM, 0.0, 0.4, "room-1"),
         SpeakerSpan(ROOM, 1.0, 8.0, "room-2"),
     ]
-    cleaned = drop_brief_voices(spans)
+    cleaned = settle_brief_voices(spans)
     assert [(span.speaker, span.start) for span in cleaned] == [("room-1", 1.0)]
 
 

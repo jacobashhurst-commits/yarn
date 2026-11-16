@@ -75,6 +75,10 @@ class ChunkConfig:
     max_turn_chars: int = 1500
     coalesce_gap_s: float = 2.0
     max_turn_s: float = 90.0
+    # A listener's "yeah" or "mm" this short does not end the turn of the
+    # person who was talking. It is kept as its own line, and the speaker's
+    # sentence carries on unbroken around it. 0 turns this off.
+    backchannel_max_s: float = 1.5
     # Prefix each chunk's embedded text with a one-line meeting header
     # (date, attendees, notes). Costs a little embedding precision, buys a lot
     # of recall on queries like "what did John say about pricing".
@@ -105,6 +109,21 @@ class DiarizeConfig:
     # crosstalk blip can't take the "Speaker 1" slot from whoever opened the
     # meeting.
     min_span_s: float = 0.6
+    # Under this much speech in total, a voice is not a participant. A "yep",
+    # a cough, a laugh and a clipped half-word all come back from the
+    # diarizer as their own cluster, and each one used to be listed, counted
+    # in the summary and asked about by name. Such a voice is joined to a
+    # participant only when its voiceprint matches one. Otherwise its words
+    # stay in the transcript under the channel's neutral label, with no
+    # number and no question. It never applies when nobody reached this
+    # much: a very short recording keeps whoever spoke.
+    min_participant_s: float = 3.0
+    # Between min_participant_s and this, a voice is still a person, but in
+    # a meeting where someone spoke for longer it is first compared with the
+    # longer voices and joined to one it matches. A measured mismatch stays
+    # separate: by then there is enough audio for the comparison to mean
+    # something, which is not true below min_participant_s.
+    short_voice_fold_s: float = 10.0
     # Ask who each unidentified voice was, once the transcript exists.
     identify_popup: bool = True
     # pyannote is the default and still experimental. sherpa is the stable
@@ -451,6 +470,8 @@ def load_config(path: Path | None = None) -> Config:
         "min_speakers",
         "max_speakers",
         "min_span_s",
+        "min_participant_s",
+        "short_voice_fold_s",
         "identify_popup",
         "engine",
     ):
@@ -464,6 +485,7 @@ def load_config(path: Path | None = None) -> Config:
         "max_turn_chars",
         "coalesce_gap_s",
         "max_turn_s",
+        "backchannel_max_s",
         "include_context_header",
     ):
         if key in c:

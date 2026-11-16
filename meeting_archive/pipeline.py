@@ -39,6 +39,7 @@ from .diarize import (
     Diarizer,
     DiarizationUnavailable,
     absorb_short_voices,
+    settle_brief_voices,
     assign_speakers,
 )
 from .merge import merge_segments, split_long_turns
@@ -816,12 +817,17 @@ def rediarize(
         for segment in transcript.segments:
             if segment.channel in target_channels:
                 segment.speaker = None
-        assign_speakers(transcript.segments, spans)
+        assign_speakers(
+            transcript.segments,
+            spans,
+            min_participant_s=cfg.diarize.min_participant_s,
+        )
 
         turns = merge_segments(
             transcript.segments,
             coalesce_gap_s=cfg.chunk.coalesce_gap_s,
             max_turn_s=cfg.chunk.max_turn_s,
+            backchannel_max_s=cfg.chunk.backchannel_max_s,
         )
         transcript.turns = split_long_turns(
             turns, max_chars=cfg.chunk.max_turn_chars
@@ -995,6 +1001,7 @@ def consolidate_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int
         transcript.segments,
         coalesce_gap_s=cfg.chunk.coalesce_gap_s,
         max_turn_s=cfg.chunk.max_turn_s,
+        backchannel_max_s=cfg.chunk.backchannel_max_s,
     )
     transcript.turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
     from .quips import profile_speakers
@@ -1020,12 +1027,20 @@ def consolidate_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int
 
 
 def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
-    """Attach voices under ten seconds to a longer voice, without re-diarizing.
+    """Apply the short-voice rules to a meeting already on disk.
 
-    A long meeting can already be transcribed when this rule changes. The
-    spans on disk are enough: a fragment is moved onto the longer voice it
-    sounds like, and a name already confirmed for that longer voice stays.
-    Returns how many fragments were folded in.
+    A meeting can already be transcribed when these rules change, and its
+    audio may be gone. The spans on disk are enough to apply them. A voice
+    under `min_participant_s` joins a participant it sounds like, or loses
+    its number and becomes the channel's neutral label. A voice under
+    `short_voice_fold_s` joins a longer one it sounds like. With the audio
+    pruned nothing can be compared, so a moment of speech is unnamed rather
+    than guessed onto a neighbour.
+
+    A voice Jacob has already named is never touched, however short. He
+    told us who it was, which no duration rule can overrule. Keys are not
+    renumbered, so the names he saved still point at the same voices.
+    Returns how many voices were joined or unnamed.
     """
     import wave
 
@@ -1040,6 +1055,14 @@ def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     for span in transcript.speaker_spans:
         by_channel.setdefault(span.channel, []).append(span)
 
+    notes_path = cfg.notes_json(meeting_id)
+    notes = records.read_notes(notes_path)
+    named = {
+        speaker
+        for speaker, name in (notes.get("speakers") or {}).items()
+        if str(name or "").strip()
+    }
+    removed: set[str] = set()
     mapping: dict[str, str] = {}
     rewritten: list[SpeakerSpan] = []
     for channel, spans in by_channel.items():
@@ -1052,23 +1075,45 @@ def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
                 sample_rate = wav.getframerate()
             samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
         before = {span.speaker for span in spans}
-        folded = absorb_short_voices(spans, samples, sample_rate, cfg.diarize)
-        after = {span.speaker for span in folded}
-        for speaker in before - after:
-            # The fragment's spans now carry the longer voice's key.
-            target = next(
-                (
-                    span.speaker
-                    for old, span in zip(spans, folded)
-                    if old.speaker == speaker
-                ),
-                speaker,
-            )
-            if target != speaker:
-                mapping[speaker] = target
+        settled = settle_brief_voices(
+            spans,
+            samples,
+            sample_rate,
+            cfg.diarize,
+            min_participant_s=cfg.diarize.min_participant_s,
+            keep=named,
+            renumber=False,
+        )
+        # Which key each vanished voice went to, or that it went nowhere.
+        # Spans keep their start, end and order, so they can be matched up.
+        where = {(span.start, span.end): span.speaker for span in settled}
+        for span in spans:
+            target = where.get((span.start, span.end))
+            if target is None:
+                removed.add(span.speaker)
+            elif target != span.speaker:
+                mapping[span.speaker] = target
+        folded = absorb_short_voices(
+            settled,
+            samples,
+            sample_rate,
+            cfg.diarize,
+            min_speaking_s=cfg.diarize.short_voice_fold_s,
+        )
+        for old, span in zip(settled, folded):
+            if old.speaker != span.speaker and old.speaker not in named:
+                mapping[old.speaker] = span.speaker
+        if any(old.speaker in named and old.speaker != new.speaker for old, new in zip(settled, folded)):
+            # The longer fold would have moved a named voice. Leave this
+            # channel as the blip pass left it.
+            folded = settled
+            for speaker in [k for k in mapping if k in named]:
+                mapping.pop(speaker)
+        del before
         rewritten.extend(folded)
 
-    if not mapping:
+    removed -= set(mapping)
+    if not mapping and not removed:
         return 0
 
     def canon(speaker: str | None) -> str | None:
@@ -1081,17 +1126,29 @@ def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
         return speaker
 
     transcript.speaker_spans = rewritten
-    assign_speakers(transcript.segments, rewritten)
+    for segment in transcript.segments:
+        if segment.speaker in removed:
+            segment.speaker = None
+    assign_speakers(
+        transcript.segments,
+        rewritten,
+        min_participant_s=cfg.diarize.min_participant_s,
+        keep=named,
+    )
     for segment in transcript.segments:
         segment.speaker = canon(segment.speaker)
     turns = merge_segments(
         transcript.segments,
         coalesce_gap_s=cfg.chunk.coalesce_gap_s,
         max_turn_s=cfg.chunk.max_turn_s,
+        backchannel_max_s=cfg.chunk.backchannel_max_s,
     )
     transcript.turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
     for turn in transcript.raw_turns:
-        turn.speaker = canon(turn.speaker)
+        turn.speaker = None if turn.speaker in removed else canon(turn.speaker)
+    transcript.speaker_guesses = [
+        guess for guess in transcript.speaker_guesses if guess.speaker not in removed
+    ]
     for guess in transcript.speaker_guesses:
         guess.speaker = canon(guess.speaker) or guess.speaker
     transcript.speaker_profiles = profile_speakers(
@@ -1099,9 +1156,13 @@ def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
         audio=_channel_wavs(cfg, meeting_id, transcript.turns),
     )
     apply_guesses(transcript.speaker_profiles, speaker_guess_map(transcript.speaker_guesses))
+    # The summary was written with the old speaker numbers in it. Clearing
+    # it lets the watcher write a new one; leaving it would describe people
+    # who are no longer listed.
+    transcript.summary = ""
+    transcript.summary_model = ""
+    transcript.summary_error = DEFERRED_SUMMARY
 
-    notes_path = cfg.notes_json(meeting_id)
-    notes = records.read_notes(notes_path)
     roster = dict(notes.get("speakers") or {})
     kept: dict[str, str] = {}
     for speaker, name in roster.items():
@@ -1117,12 +1178,13 @@ def fold_short_voices(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     transcript.write(transcript_path)
     ingest(cfg, meeting_id, store)
     log.info(
-        "folded %d short voice(s) into longer ones in %s (%d voices remain)",
-        len(mapping),
+        "short voices in %s: %d joined a longer voice, %d left unnamed (%d voices remain)",
         meeting_id,
+        len(mapping),
+        len(removed),
         len({span.speaker for span in rewritten}),
     )
-    return len(mapping)
+    return len(mapping) + len(removed)
 
 
 # ---------------------------------------------------------------------------
@@ -1285,6 +1347,7 @@ def process(
             segments,
             coalesce_gap_s=cfg.chunk.coalesce_gap_s,
             max_turn_s=cfg.chunk.max_turn_s,
+            backchannel_max_s=cfg.chunk.backchannel_max_s,
         )
         turns = split_long_turns(turns, max_chars=cfg.chunk.max_turn_chars)
         spoken = resolve_spoken(requested_language, detected_language)
@@ -1847,7 +1910,9 @@ def _diarize_channels(
         stop_heartbeat.set()
         heartbeat.join(timeout=1.0)
 
-    assigned = assign_speakers(segments, spans)
+    assigned = assign_speakers(
+        segments, spans, min_participant_s=cfg.diarize.min_participant_s
+    )
     log.info(
         "diarized channels=%s spans=%d segments_attributed=%d/%d",
         ",".join(c for c, _ in targets),

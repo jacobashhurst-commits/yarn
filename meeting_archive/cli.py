@@ -920,16 +920,52 @@ def cmd_ingest(cfg: Config, args) -> int:
 
 
 def cmd_rediarize(cfg: Config, args) -> int:
-    diarizer = Diarizer(cfg.diarize)
     store = MeetingStore(cfg.chroma_dir, cfg.collection)
+    if getattr(args, "all", False):
+        # Every stored meeting, by the gentle route: the saved speaker spans
+        # are re-read under the current rules. Named voices are left alone
+        # and nothing is renumbered, so this is safe to run over an archive
+        # full of names. A full recompute of every meeting would discard
+        # them, and most of the audio is gone by now anyway.
+        changed = 0
+        for path in sorted(cfg.transcripts_dir.rglob("*.json")):
+            meeting_id = path.stem
+            try:
+                count = pipeline.fold_short_voices(cfg, meeting_id, store)
+            except Exception as exc:
+                print(f"{meeting_id}: skipped ({exc})", file=sys.stderr)
+                continue
+            if count:
+                changed += 1
+                print(f"{meeting_id}: {count} short voice(s) joined or unnamed")
+        print(f"{changed} meeting(s) updated")
+        return 0
+    if not args.meeting_id:
+        print("give a meeting id, or --all", file=sys.stderr)
+        return 1
+    diarizer = Diarizer(cfg.diarize)
     summarizer = Summarizer(cfg.summary)
-    transcript = pipeline.rediarize(
-        cfg,
-        args.meeting_id,
-        diarizer,
-        store,
-        summarizer,
-    )
+    try:
+        transcript = pipeline.rediarize(
+            cfg,
+            args.meeting_id,
+            diarizer,
+            store,
+            summarizer,
+        )
+    except FileNotFoundError as exc:
+        if not cfg.transcript_json(args.meeting_id).exists():
+            raise
+        # The audio has been pruned, so the voices cannot be separated
+        # again. The current short-voice rules can still be applied to the
+        # separation that was saved.
+        count = pipeline.fold_short_voices(cfg, args.meeting_id, store)
+        print(
+            f"{args.meeting_id}: the audio is no longer kept ({exc}). "
+            f"Applied the short-voice rules to the saved speakers instead: "
+            f"{count} joined or unnamed."
+        )
+        return 0
     print(
         f"rediarized {args.meeting_id}: "
         f"{len(transcript.speaker_profiles)} voice(s)"
@@ -1415,7 +1451,12 @@ def build_parser() -> argparse.ArgumentParser:
         "rediarize",
         help="rebuild speaker labels from retained audio without rerunning Whisper",
     )
-    p.add_argument("meeting_id")
+    p.add_argument("meeting_id", nargs="?", default="")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="apply the short-voice rules to every stored meeting; names are kept",
+    )
     p.set_defaults(func=cmd_rediarize)
 
     sub.add_parser("rebuild", help="reindex every transcript").set_defaults(
