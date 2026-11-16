@@ -235,6 +235,9 @@ class Config:
     collection: str = "meetings"
     audio_retention_days: int = 7
     audio_retention: str = "1_week"
+    # Keep a web page only for recent meetings; older ones are rendered when
+    # opened. Off by default. See space_saver.py for exactly what it removes.
+    space_saver: bool = False
     audio: AudioConfig = field(default_factory=AudioConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     diarize: DiarizeConfig = field(default_factory=DiarizeConfig)
@@ -444,6 +447,8 @@ def load_config(path: Path | None = None) -> Config:
     if "audio_retention_days" in data:
         cfg.audio_retention_days = int(data["audio_retention_days"])
         cfg.audio_retention = retention_name(cfg.audio_retention_days)
+    if "space_saver" in data:
+        cfg.space_saver = bool(data["space_saver"])
     if "audio_retention" in data:
         cfg.audio_retention = str(data["audio_retention"])
         cfg.audio_retention_days = retention_days(cfg.audio_retention)
@@ -619,6 +624,8 @@ def _apply_settings_overlay(cfg: Config) -> None:
     else:
         # The menu shows this as on until someone turns it off.
         cfg.speakers_memory.recognise_known = True
+    if "space_saver" in overlay:
+        cfg.space_saver = bool(overlay["space_saver"])
     if "speaker_engine" in overlay:
         cfg.diarize.engine = str(overlay["speaker_engine"])
     if "cleanup_enabled" in overlay:

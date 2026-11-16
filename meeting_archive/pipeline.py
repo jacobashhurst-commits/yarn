@@ -651,17 +651,23 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
         ),
     )
     html_path = cfg.transcript_html(meeting_id)
-    records.write_text_atomic(
-        html_path,
-        records.render_transcript_html(
-            transcript,
-            labeller,
-            notes,
-            titles=titles,
-            companies=companies,
-            recordings=records.meeting_recordings(cfg, meeting_id),
-        ),
-    )
+    from . import space_saver
+
+    if space_saver.keeps_page(cfg, meeting_id):
+        records.write_text_atomic(
+            html_path,
+            records.render_transcript_html(
+                transcript,
+                labeller,
+                notes,
+                titles=titles,
+                companies=companies,
+                recordings=records.meeting_recordings(cfg, meeting_id),
+            ),
+        )
+    else:
+        # Reindexing an old meeting must not quietly bring its page back.
+        html_path.unlink(missing_ok=True)
     if previous_md != md_path and previous_md.exists():
         previous_md.unlink()
         previous_md.with_suffix(".html").unlink(missing_ok=True)

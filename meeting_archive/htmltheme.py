@@ -12,7 +12,10 @@ import base64
 from functools import lru_cache
 from pathlib import Path
 
-_MARK = Path(__file__).with_name("assets") / "yarn-mark.png"
+# The page copy of the mark, 192px wide. It is shown at 96px. Embedding the
+# full 1024px artwork put 785 KB of logo into every page Yarn wrote, which
+# was 97% of a transcript page.
+_MARK = Path(__file__).with_name("assets") / "yarn-mark-page.png"
 
 CSS = """
 :root {

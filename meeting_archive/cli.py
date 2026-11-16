@@ -998,8 +998,41 @@ def cmd_rebuild(cfg: Config, args) -> int:
     return 1 if failures else 0
 
 
+def cmd_space_saver(cfg: Config, args) -> int:
+    """Show or remove the pages Space saver does not keep.
+
+    With no flag this only reports. `--purge` removes them whether or not
+    the setting is on, because asking for it here is the confirmation.
+    """
+    from . import space_saver
+
+    if args.purge:
+        done = space_saver.purge(cfg)
+        data = {**done.to_dict(), "purged": True, "on": space_saver.is_on(cfg)}
+    else:
+        sweep = space_saver.removable(cfg)
+        data = {**sweep.to_dict(), "purged": False, "on": space_saver.is_on(cfg)}
+    if args.json:
+        print(json.dumps(data))
+        return 0
+    if args.purge:
+        print(f"removed {data['summary']}" if data["count"] else data["summary"])
+    else:
+        print(f"would remove {data['summary']}" if data["count"] else data["summary"])
+        print(f"Space saver is {'on' if data['on'] else 'off'}.")
+    return 0
+
+
 def cmd_prune(cfg: Config, args) -> int:
     result = retention.prune(cfg, dry_run=args.dry_run)
+    # The daily job is what keeps Space saver true as meetings age past the
+    # window. Only when the setting is on; never as a side effect of pruning.
+    from . import space_saver
+
+    if space_saver.is_on(cfg) and not args.dry_run:
+        swept = space_saver.purge(cfg)
+        if swept.count:
+            print(f"space saver removed {swept.summary()}")
     print(("dry run -- " if args.dry_run else "") + result.summary())
     for name in result.kept_no_transcript:
         print(f"  kept (no transcript): {name}")
@@ -1071,6 +1104,11 @@ def cmd_import_transcript(cfg: Config, args) -> int:
 def cmd_transcripts(cfg: Config, args) -> int:
     from . import library
 
+    from . import space_saver
+
+    if space_saver.is_on(cfg):
+        # Older meetings link to the local server, so it has to be awake.
+        library.ensure_server(cfg)
     path = library.render_transcript_index(cfg)
     print(path)
     if getattr(args, "open", False):
@@ -1127,6 +1165,7 @@ def cmd_setting(cfg: Config, args) -> int:
         "cleanup_enabled",
         "pause_on_pressure",
         "brief_on_login",
+        "space_saver",
     }:
         if lowered not in {"on", "off", "true", "false", "1", "0"}:
             print("value must be on or off", file=sys.stderr)
@@ -1474,6 +1513,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply the short-voice rules to every stored meeting; names are kept",
     )
     p.set_defaults(func=cmd_rediarize)
+
+    p = sub.add_parser(
+        "space-saver",
+        help="show (or with --purge, remove) saved pages of older meetings",
+    )
+    p.add_argument("--purge", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_space_saver)
 
     p = sub.add_parser(
         "savings", help="tokens and disk space saved, with the assumptions"

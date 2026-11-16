@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 import secrets
@@ -12,7 +13,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 from urllib.request import urlopen
 
 from . import jobs, records
@@ -26,7 +27,9 @@ log = logging.getLogger(__name__)
 # page, so a small local server has to be awake to receive it. It listens
 # only on this Mac, and only for the token written into the page.
 LIBRARY_PORT = 47331
-_SERVER_MARK = b"yarn-library/2"
+# Bumped when the routes change, so a server left running from an older
+# Yarn is replaced instead of answering 404 to a link it does not know.
+_SERVER_MARK = b"yarn-library/3"
 
 
 @dataclass
@@ -139,18 +142,7 @@ def render_html(cfg: Config, rows: list[MeetingRow] | None = None) -> Path:
     for row in rows:
         mins = int(row.duration_s // 60)
         secs = int(row.duration_s % 60)
-        page = cfg.transcript_html(row.meeting_id)
-        if row.has_transcript:
-            try:
-                page = records.ensure_transcript_page(
-                    cfg, Transcript.read(cfg.transcript_json(row.meeting_id))
-                )
-            except (OSError, ValueError):
-                if not page.exists():
-                    page = cfg.transcript_md(row.meeting_id)
-        elif not page.exists():
-            page = cfg.transcript_md(row.meeting_id)
-        title = _title_cell(action, row, page)
+        title = _title_cell(action, row, _meeting_href(cfg, row, action[2]))
         audio = _audio_label(row)
         summary = (
             "Written"
@@ -189,25 +181,17 @@ def render_transcript_index(cfg: Config, rows: list[MeetingRow] | None = None) -
 
     rows = rows if rows is not None else list_meetings(cfg)
     items = []
+    token = _delete_action(cfg)[2]
     for row in rows:
         if not row.has_transcript:
             continue
-        path = cfg.transcript_json(row.meeting_id)
-        page = cfg.transcript_html(row.meeting_id)
-        if path.exists():
-            try:
-                transcript = Transcript.read(path)
-                page = records.ensure_transcript_page(cfg, transcript)
-            except (OSError, ValueError):
-                page = cfg.transcript_md(row.meeting_id)
-        if not page.exists():
-            page = cfg.transcript_md(row.meeting_id)
-        if not page.exists():
+        href = _meeting_href(cfg, row, token)
+        if not href:
             continue
         mins = int(row.duration_s // 60)
         secs = int(row.duration_s % 60)
         items.append(
-            f'<li><a href="{page.as_uri()}">{_esc(row.title)}</a> '
+            f'<li><a href="{_esc(href)}">{_esc(row.title)}</a> '
             f'<span class="mono">{_esc(row.date)} · {mins}m {secs:02d}s</span></li>'
         )
     body = "\n".join(
@@ -256,14 +240,68 @@ def _delete_action(cfg: Config) -> tuple[str, str, str]:
     return (f"{base}/delete", f"{base}/rename", token)
 
 
-def _title_cell(action: tuple[str, str, str], row: MeetingRow, page: Path) -> str:
+def _meeting_href(cfg: Config, row: MeetingRow, token: str) -> str:
+    """Where a meeting's title links to. Empty when there is nothing to open.
+
+    Normally the page file, written here if it is missing. With Space saver
+    on, an older meeting has no page file: the link goes to the small local
+    server, which renders the page from the transcript when it is opened.
+    Writing every page each time the library opened would undo the saving.
+    """
+    from . import space_saver
+
+    page = cfg.transcript_html(row.meeting_id)
+    if not row.has_transcript:
+        if page.exists():
+            return page.as_uri()
+        fallback = cfg.transcript_md(row.meeting_id)
+        return fallback.as_uri() if fallback.exists() else ""
+    if not space_saver.keeps_page(cfg, row.meeting_id):
+        return (
+            f"http://127.0.0.1:{LIBRARY_PORT}/meeting"
+            f"?id={quote(row.meeting_id)}&token={quote(token)}"
+        )
+    try:
+        page = records.ensure_transcript_page(
+            cfg, Transcript.read(cfg.transcript_json(row.meeting_id))
+        )
+    except (OSError, ValueError):
+        if not page.exists():
+            page = cfg.transcript_md(row.meeting_id)
+    return page.as_uri() if page.exists() else ""
+
+
+def render_meeting_page(cfg: Config, meeting_id: str) -> bytes:
+    """One meeting's page, made now and not saved.
+
+    No audio player: a page served from the local server cannot play a file
+    from disk, which the browser blocks. Recent meetings keep a real page
+    file, and that is where recordings still within their retention play.
+    """
+    from .models import speaker_display_indices
+    from .speakers import library_details
+
+    if not re.fullmatch(r"[0-9T:\-]{10,32}", meeting_id or ""):
+        raise ValueError("not a meeting id")
+    transcript = Transcript.read(cfg.transcript_json(meeting_id))
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    roster = records.speaker_roster(notes)
+    display = speaker_display_indices(transcript.speaker_profiles)
+    titles, companies = library_details(cfg)
+    return records.render_transcript_html(
+        transcript,
+        cfg.turn_labeller(roster, display),
+        notes,
+        titles=titles,
+        companies=companies,
+        recordings=[],
+    ).encode("utf-8")
+
+
+def _title_cell(action: tuple[str, str, str], row: MeetingRow, href: str) -> str:
     _, rename, token = action
     shown = row.title
-    link = (
-        f'<a href="{page.as_uri()}">{_esc(shown)}</a>'
-        if page.exists()
-        else _esc(shown)
-    )
+    link = f'<a href="{_esc(href)}">{_esc(shown)}</a>' if href else _esc(shown)
     return (
         f'<div class="name-line">{link}'
         '<button type="button" class="texty" '
@@ -525,6 +563,18 @@ def _handler(cfg: Config, token: str):
                     self._send(403, b"Refused", "text/plain")
                     return
                 self._send(200, render_html(cfg).read_bytes(), "text/html; charset=utf-8")
+                return
+            if path == "/meeting":
+                fields = parse_qs(query)
+                if not self._has_token((fields.get("token") or [""])[0]):
+                    self._send(403, b"Refused", "text/plain")
+                    return
+                try:
+                    body = render_meeting_page(cfg, (fields.get("id") or [""])[0])
+                except (OSError, ValueError):
+                    self._send(404, b"That meeting is not here.", "text/plain")
+                    return
+                self._send(200, body, "text/html; charset=utf-8")
                 return
             self._send(404, b"Not found", "text/plain")
 
