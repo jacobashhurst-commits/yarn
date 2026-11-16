@@ -142,6 +142,23 @@ do_start() {
   # A stale state file means a previous ffmpeg died. Recover, don't refuse.
   [[ -f "$STATE_FILE" ]] && rm -f "$STATE_FILE"
 
+  # A recording takes about 1 GB an hour until it has been transcribed. A
+  # disk that fills part way through loses the rest of the meeting, and
+  # nobody finds out until afterwards. This warns and still records: the
+  # free-space figure leaves out space macOS can reclaim, so it is not
+  # certain enough to refuse a recording someone has just asked for.
+  local free_kb
+  free_kb="$(df -Pk "$MA_ROOT" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+  if [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+    if (( free_kb < 1048576 )); then
+      log_line "low disk at start: ${free_kb} KB free"
+      alert "This Mac has less than 1 GB of free space. Yarn is recording, but there is room for under an hour. Free some space now if this meeting will run long."
+    elif (( free_kb < 5242880 )); then
+      log_line "low disk at start: ${free_kb} KB free"
+      alert "This Mac has less than 5 GB of free space. Yarn is recording. A recording takes about 1 GB an hour until it has been transcribed."
+    fi
+  fi
+
   # After the lock, so a second click cannot open a second name dialog.
   # Cancel leaves the flag unset and records nothing. An older Yarn without
   # the question keeps the name already in the config and still records.

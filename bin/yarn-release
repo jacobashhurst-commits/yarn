@@ -118,11 +118,12 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
   "$REPO_DIR/ui/dock/YarnChat.swift" \
   "$REPO_DIR/ui/dock/YarnMenu.swift" \
   "$REPO_DIR/ui/dock/YarnSettings.swift" \
+  "$REPO_DIR/ui/dock/YarnHotKey.swift" \
   "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
   "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
   "$REPO_DIR/ui/shared/YarnAppMenu.swift" \
   -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
-  -framework CoreAudio -framework Foundation
+  -framework CoreAudio -framework Foundation -framework Carbon
 "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$YARN"
 # Sign Yarn before it is sealed inside Setup. A later install copies this
 # bundle out, and that copy has to stay Developer ID or the headphone

@@ -140,6 +140,14 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         background = CommandLine.arguments.contains("--background")
+        YarnHotKey.shared.onPress = { [weak self] mode in
+            guard let self else { return }
+            if self.read().recording {
+                self.launch(self.paths.rec, ["stop"])
+            } else if mode == "room" || mode == "call" {
+                self.launch(self.paths.rec, ["start", mode])
+            }
+        }
         YarnStatus.shared.start()
         CallAudio.shared.begin(archiveRoot: paths.root)
         if !background {
@@ -202,8 +210,16 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var offeredWelcome = false
     private var welcomeController: YarnWelcomeWindow?
 
+    private var placed = false
+
     func show() {
-        window.center()
+        // Where it was last left. Centring every time moved the window back
+        // each time Yarn was clicked in the Dock.
+        if !placed {
+            placed = true
+            if !window.setFrameUsingName("YarnMain") { window.center() }
+            window.setFrameAutosaveName("YarnMain")
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         offerWelcome()
@@ -254,6 +270,14 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         primeRecordButton(roomButton, action: #selector(startInRoom))
         primeRecordButton(headphonesButton, action: #selector(startHeadphones))
         primeRecordButton(recordButton, action: #selector(toggleRecording))
+        // The titles are short because they sit side by side. Read aloud,
+        // "Headphones" does not say that it starts a recording.
+        roomButton.setAccessibilityLabel("Start recording, in the room")
+        roomButton.setAccessibilityHelp("Records this Mac\u{2019}s microphone. For a meeting in person.")
+        headphonesButton.setAccessibilityLabel("Start recording, headphones call")
+        headphonesButton.setAccessibilityHelp("Records your microphone and the call audio this Mac is playing.")
+        recordButton.setAccessibilityLabel("Stop recording")
+        bar.setAccessibilityLabel("Processing progress")
         recordButton.isHidden = true
 
         let starts = NSStackView(views: [roomButton, headphonesButton])
@@ -554,8 +578,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         snap.meetings = meetingCount
         snap.space = spaceSaved
         snap.failed = countFiles(root + "/recordings/failed", suffix: ".json")
-        let model = text(json(root + "/.yarn-settings.json")["summary_model"])
+        let settings = json(root + "/.yarn-settings.json")
+        let model = text(settings["summary_model"])
         snap.model = model
+        YarnHotKey.shared.apply(text(settings["record_hotkey"]))
         snap.tokens = integer(json(root + "/.tokens-saved.json")["total"]) ?? 0
         let summaries = integer(queue["summaries_pending"]) ?? 0
         let ollama = NSWorkspace.shared.runningApplications.contains {

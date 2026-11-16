@@ -11,6 +11,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let language = SettingChoices()
     private let floor = SettingChoices()
+    private let hotkey = SettingChoices()
     private let profile = SettingChoices()
     private let evening = SettingChoices()
     private let nameField = NSTextField(string: "")
@@ -82,7 +83,8 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         build()
-        window.center()
+        if !window.setFrameUsingName("YarnSettings") { window.center() }
+        window.setFrameAutosaveName("YarnSettings")
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -121,6 +123,10 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         language.onPick = { [weak self] id in
             self?.language.select(id)
             self?.write("meeting_language", id)
+        }
+        hotkey.onPick = { [weak self] id in
+            self?.hotkey.select(id)
+            self?.write("record_hotkey", id)
         }
         floor.onPick = { [weak self] id in
             self?.floor.select(id)
@@ -190,6 +196,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             ("de", "German", true),
             ("ko", "Korean", true),
         ], selected: "en")
+        hotkey.show([
+            ("off", "Off", true),
+            ("room", "Starts In the room", true),
+            ("call", "Starts Headphones", true),
+        ], selected: "off")
         floor.show([
             ("2", "2 seconds", true),
             ("3", "3 seconds", true),
@@ -252,6 +263,12 @@ final class YarnSettings: NSObject, NSWindowDelegate {
                 "Your name",
                 caption: "On a headphone call, your microphone is labelled with this. Press Return to save.",
                 body: nameField
+            ),
+
+            group(
+                "Keyboard shortcut",
+                caption: "Control-Option-Command-R from any app. Press it again to stop. Yarn has to be open. Recording still only starts when you press something.",
+                body: hotkey
             ),
 
             section("Speakers"),
@@ -410,6 +427,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         let languageID = text(data["meeting_language"])
         language.select(known(languageID, fallback: "en", allowed: ["en", "auto", "ja", "zh", "es", "fr", "de", "ko"]))
         recognise.setOn(data["recognise_known"] == nil ? true : boolean(data["recognise_known"]))
+        hotkey.select(known(text(data["record_hotkey"]), fallback: "off", allowed: ["off", "room", "call"]))
         // A missing key means the default the pipeline itself uses.
         identify.setOn(data["identify_popup"] == nil ? true : boolean(data["identify_popup"]))
         suggest.setOn(data["suggest_names_popup"] == nil ? true : boolean(data["suggest_names_popup"]))

@@ -51,7 +51,8 @@ final class AskChat: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         build()
-        window.center()
+        if !window.setFrameUsingName("YarnAsk") { window.center() }
+        window.setFrameAutosaveName("YarnAsk")
     }
 
     private func build() {

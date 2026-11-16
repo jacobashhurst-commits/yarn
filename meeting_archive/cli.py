@@ -1196,6 +1196,12 @@ def cmd_setting(cfg: Config, args) -> int:
             print("value must be 1_week, 1_month, or never", file=sys.stderr)
             return 1
         value = lowered
+    elif args.key == "record_hotkey":
+        # Read by the Yarn app, which owns the shortcut. Not a pipeline setting.
+        if lowered not in {"off", "room", "call"}:
+            print("value must be off, room, or call", file=sys.stderr)
+            return 1
+        value = lowered
     elif args.key == "summary_profile":
         from .config import SUMMARY_PROFILES
 
@@ -1723,6 +1729,7 @@ def build_parser() -> argparse.ArgumentParser:
             "evening_hour",
             "min_participant_s",
             "own_name",
+            "record_hotkey",
         ),
     )
     p.add_argument("value")
