@@ -36,6 +36,8 @@ bin/rec              start/stop/toggle, writes a state file, calls `ma finalize`
 bin/meeting-popup    AppleScript dialogs, calls `ma notes`
 bin/speaker-popup    post-transcription voice naming with quips
 ui/                  SwiftBar menu bar plugin template + LaunchAgent installer
+ui/shared/           the main menu every Swift app compiles in
+ui/dock/             the Yarn app: main window, Settings, Ask, record shortcut
 
 meeting_archive/
   config.py          TOML config, all derived paths
@@ -54,6 +56,8 @@ meeting_archive/
   pipeline.py        finalize() on stop, process() in watcher, ingest()
   watcher.py         polling loop over inbox/ and notes/
   retention.py       prune archived audio past the window
+  space_saver.py     remove rebuildable pages of older meetings (opt-in)
+  space_saved.py     the one copy of the "tokens/GB saved" arithmetic
   cli.py             the `ma` command
 ```
 
@@ -176,6 +180,35 @@ the same words on `room` are somebody else. There are tests for both.
   argument. A fresh `uv pip install -e` (no lock) pulled 19 and every meeting
   died in VAD before Whisper ran. Channel wavs are decoded with `wave` now;
   Setup uses `uv sync --frozen` when `uv.lock` is present.
+- **A moment of speech is not a participant, and a neighbour is not its
+  speaker.** Under `diarize.min_participant_s` (3s) a voice joins a
+  participant only on a voiceprint match; otherwise its words stay under
+  the neutral channel label with no number, no place in the speaker list
+  and no naming question. A *mismatch* from that little audio is not
+  evidence of a new person; keeping every mismatch is where "Speaker 5:
+  yep" came from. Do not fold a blip onto whoever spoke nearest: a
+  back-channel comes from the listener. Above 3s a measured mismatch still
+  stays separate (MHTB Room 1). A voice Jacob has named is never touched.
+- **An interruption is the shorter span, measured whole.** `_exclusive_overlap`
+  sorts by the span's own length. Sorting by the part inside the segment
+  tied whenever Whisper cut a segment exactly around the interruption,
+  and the tie went to the person interrupted.
+- **Summaries only go to a model on this Mac.** `Summarizer` refuses any
+  host that is not loopback unless `summary.allow_remote_host` is set by
+  hand in config.toml. The prompt is the transcript. No menu or window
+  sets that switch; keep it that way.
+- **Setup verifies what it downloads.** URLs in `setup.py` are pinned to a
+  version or commit and checked against `DOWNLOAD_SHA256`. Changing a URL
+  means changing its checksum. Never point one at `latest` or `main`.
+- **The archive root is owner-only (0700).** `Config.ensure_dirs` sets it.
+- **Pages embed the 192px mark, not the 1024px one.** The full artwork was
+  785 KB of base64 in every page Yarn wrote.
+- **Space saver finds pages from transcripts, never by globbing `*.html`.**
+  It may only remove what `ensure_transcript_page` can make again.
+- **One copy of the savings arithmetic.** `space_saved.py`. The Dock reads
+  `ma savings --json`; do not put the formula back into Swift.
+- **Every Swift app compiles `ui/shared/YarnAppMenu.swift`.** Without a
+  main menu, Cmd-C/V/X/A/Z do nothing in that app's text boxes.
 - **A Chroma collection handle is pinned to a uuid.** `ma rebuild` drops and
   recreates the collection, which invalidates the handle held by the running
   watcher. `MeetingStore._run` reopens on that error; without it a rebuild
@@ -184,7 +217,7 @@ the same words on `room` are somebody else. There are tests for both.
 ## Tests
 
 ```bash
-python -m pytest          # 236 tests, ~9s
+python -m pytest          # 548 tests, ~20s
 ```
 
 Whisper and sherpa-onnx inference are stubbed dependencies. Their orchestration is

@@ -28,6 +28,63 @@ Ideas already in the brief, plus the ones Jacob wants remembered:
 
 Add more of Jacob’s ideas here as they come.
 
+### Where V2 stands (November 2026)
+
+Most of the list above is built. Written down so nobody builds it twice:
+
+- Returning-voice roster: done. `speakers/library.json` keeps an averaged
+  voiceprint and a clip per confirmed person; `recognise_known` suggests them.
+- Typed attendees narrowing suggestions: done. `usable_dialog_guess` and
+  `dialog_prediction` only pre-fill a listed person, and a near-tie stays blank.
+- Mapping the last listed name to the last unnamed voice: done
+  (`leftover_assignment`), and the user is told.
+- Several quotes and a playable clip per voice: done (`identity_clips`).
+- Junk speakers: done. Under `min_participant_s` (3s) a voice is not a
+  participant; see `settle_brief_voices` in `diarize.py`.
+
+Still open, in the order worth doing:
+
+1. **Split a sentence at a speaker change.** Whisper's segments are still
+   authoritative, so a segment that straddles two people goes whole to
+   whoever holds more of it. Word timestamps would let a clean change of
+   speaker inside one segment be cut at the word. Needs checking that
+   whisper.cpp's word times are steady enough on real calls first.
+2. **Several voiceprints per person, not one average.** Someone on a
+   laptop mic and the same person on a headset are averaged into a print
+   that matches neither well. Keep up to a few prints per person and match
+   the closest. Needs real cross-meeting audio to set the bar.
+3. **Stronger handoffs.** "Over to you, John" should weight the next new
+   voice as John more than it does now.
+
+## Next for the Mac app
+
+Ideas from the November 2026 polish pass, ranked by how much they would
+change a normal day against how much work they are.
+
+1. **Search and read inside the app.** The library, transcripts and brief
+   open in a browser. A native list with search-as-you-type over the
+   existing index would make Yarn one window instead of three.
+2. **Export a meeting.** Markdown already exists on disk; add "Export" for
+   plain text and PDF with speakers and timestamps, from the app.
+3. **Correct a line.** Edit a transcript line or reassign its speaker, save
+   to the JSON, reindex that one meeting. The JSON stays the record.
+4. **Glossary in Settings.** The word list that fixes names Whisper mishears
+   is still `[glossary]` in config.toml. It is the last common setting that
+   needs a text editor.
+5. **Audio on pages rendered on demand.** With Space saver on, an older
+   meeting opened from the library has no audio player. Serving the kept
+   audio from the same local server would close that gap.
+6. **Recovery in the app.** Stranded and failed recordings are listed in the
+   menu bar and fixed with `ma recover`. A "Needs attention" row in the main
+   window with Publish and Discard would mean never opening Terminal.
+7. **A chosen shortcut.** The record shortcut is fixed at
+   Control-Option-Command-R. Let it be recorded in Settings.
+
+## Windows
+
+See [docs/PLATFORM_BOUNDARY.md](docs/PLATFORM_BOUNDARY.md) for where the
+Mac-only code is today and the boundary to cut along. Not started.
+
 ## V2 / V3 — home server (opt-in)
 
 The laptop always records and, by default, processes locally. A home server
