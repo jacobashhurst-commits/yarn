@@ -826,7 +826,7 @@ def test_cleanup_maps_lines_without_inventing_turns():
         Turn(ROOM, 1.0, 2.0, "we should meet tuesday", speaker="room-2"),
     ]
     cleaned = _parse_cleaned(
-        "[00:00:00] Speaker 1: Hello there.\n[00:00:01] Speaker 2: We should meet Tuesday.\n",
+        "1| Hello there.\n2| Speaker 2: We should meet Tuesday.\n",
         original,
     )
     assert len(cleaned) == 2

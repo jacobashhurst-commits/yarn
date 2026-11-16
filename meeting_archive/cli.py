@@ -542,6 +542,7 @@ def cmd_notes(cfg: Config, args) -> int:
         meeting_id=args.meeting_id,
         notes=args.notes or "",
         attendees=args.attendees or "",
+        detail=args.detail,
         applied=False,
     )
     print(f"saved notes for {args.meeting_id}")
@@ -1006,11 +1007,20 @@ def cmd_space_saver(cfg: Config, args) -> int:
     """
     from . import space_saver
 
+    days = None
+    if getattr(args, "keep", ""):
+        from .config import normalise_retention, retention_days
+
+        name = normalise_retention(args.keep)
+        if not name:
+            print("--keep must be one of the retention choices", file=sys.stderr)
+            return 1
+        days = retention_days(name, default=0)
     if args.purge:
-        done = space_saver.purge(cfg)
+        done = space_saver.purge(cfg, days=days)
         data = {**done.to_dict(), "purged": True, "on": space_saver.is_on(cfg)}
     else:
-        sweep = space_saver.removable(cfg)
+        sweep = space_saver.removable(cfg, days=days)
         data = {**sweep.to_dict(), "purged": False, "on": space_saver.is_on(cfg)}
     if args.json:
         print(json.dumps(data))
@@ -1165,9 +1175,9 @@ def cmd_setting(cfg: Config, args) -> int:
         "cleanup_enabled",
         "pause_on_pressure",
         "brief_on_login",
-        "space_saver",
         "identify_popup",
         "suggest_names_popup",
+        "external_apps",
     }:
         if lowered not in {"on", "off", "true", "false", "1", "0"}:
             print("value must be on or off", file=sys.stderr)
@@ -1190,12 +1200,29 @@ def cmd_setting(cfg: Config, args) -> int:
             return 1
         value = lowered
     elif args.key == "audio_retention":
-        # "week" and "month" are what older settings files hold.
-        lowered = {"week": "1_week", "month": "1_month"}.get(lowered, lowered)
-        if lowered not in {"1_week", "1_month", "never"}:
-            print("value must be 1_week, 1_month, or never", file=sys.stderr)
+        from .config import RETENTION_CHOICES, normalise_retention
+
+        value = normalise_retention(lowered)
+        if not value:
+            names = ", ".join(name for name, _l, _d in RETENTION_CHOICES)
+            print(f"value must be one of: {names}", file=sys.stderr)
             return 1
-        value = lowered
+    elif args.key == "page_retention":
+        from .config import RETENTION_CHOICES, normalise_retention
+
+        value = normalise_retention(lowered)
+        if not value:
+            names = ", ".join(name for name, _l, _d in RETENTION_CHOICES)
+            print(f"value must be one of: {names}", file=sys.stderr)
+            return 1
+    elif args.key == "space_saver":
+        # The old on/off switch. On meant a month; kept so nothing that
+        # still sends it breaks.
+        if lowered not in {"on", "off", "true", "false", "1", "0"}:
+            print("value must be on or off", file=sys.stderr)
+            return 1
+        args.key = "page_retention"
+        value = "1_month" if lowered in {"on", "true", "1"} else "never"
     elif args.key == "record_hotkey":
         # Read by the Yarn app, which owns the shortcut. Not a pipeline setting.
         if lowered not in {"off", "room", "call"}:
@@ -1341,7 +1368,41 @@ def cmd_ask(cfg: Config, args) -> int:
 
 def cmd_connect(cfg: Config, args) -> int:
     """Point a desktop chat app at the local meeting search index."""
+    from . import connect as connect_mod
     from .connect import ConnectError, connect_target
+
+    if args.target == "status":
+        print(
+            json.dumps(
+                {
+                    "enabled": connect_mod.external_enabled(cfg),
+                    "connected": connect_mod.connected_apps(),
+                }
+            )
+        )
+        return 0
+    if args.target == "disconnect":
+        changed = connect_mod.disconnect_all()
+        write_setting(cfg, "external_apps", False)
+        text = (
+            "Yarn is disconnected from " + " and ".join(changed) + ". Restart "
+            "that app for it to take effect. If you added Yarn to ChatGPT by "
+            "hand, remove it there under Settings, Connectors."
+            if changed
+            else "No app was connected. If you added Yarn to ChatGPT by hand, "
+            "remove it there under Settings, Connectors."
+        )
+        print(text)
+        return 0
+    # Ollama's own client stays on this Mac, so it is not an external app.
+    if args.target != "ollama" and not connect_mod.external_enabled(cfg):
+        text = (
+            "Connecting other AI apps is turned off, so Yarn stays fully on "
+            "this Mac. Turn on Connect external AI apps in Yarn Settings first."
+        )
+        print(text, file=sys.stderr)
+        _tell(text, alert=True)
+        return 1
 
     try:
         text = connect_target(cfg, args.target, notify=_tell)
@@ -1522,8 +1583,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("notes", help="save notes for a meeting")
     p.add_argument("meeting_id")
-    p.add_argument("--notes", default="")
+    p.add_argument("--notes", default="", help="the short name of the meeting")
     p.add_argument("--attendees", default="")
+    p.add_argument(
+        "--detail",
+        default=None,
+        help="your own free-text notes; shown on the transcript and searchable",
+    )
     p.set_defaults(func=cmd_notes)
 
     p = sub.add_parser("watch", help="run the processor continuously")
@@ -1570,6 +1636,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--purge", action="store_true")
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--keep",
+        default="",
+        help="preview or apply a choice not saved yet, e.g. 1_week or 3_months",
+    )
     p.set_defaults(func=cmd_space_saver)
 
     p = sub.add_parser(
@@ -1730,6 +1801,8 @@ def build_parser() -> argparse.ArgumentParser:
             "min_participant_s",
             "own_name",
             "record_hotkey",
+            "page_retention",
+            "external_apps",
         ),
     )
     p.add_argument("value")
@@ -1772,7 +1845,10 @@ def build_parser() -> argparse.ArgumentParser:
         "connect",
         help="let Claude, Cursor, or ChatGPT search this Mac's meetings",
     )
-    p.add_argument("target", choices=("claude", "ollama", "cursor", "chatgpt"))
+    p.add_argument(
+        "target",
+        choices=("claude", "ollama", "cursor", "chatgpt", "status", "disconnect"),
+    )
     p.set_defaults(func=cmd_connect)
 
     sub.add_parser(

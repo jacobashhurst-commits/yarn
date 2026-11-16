@@ -235,9 +235,14 @@ class Config:
     collection: str = "meetings"
     audio_retention_days: int = 7
     audio_retention: str = "1_week"
-    # Keep a web page only for recent meetings; older ones are rendered when
-    # opened. Off by default. See space_saver.py for exactly what it removes.
-    space_saver: bool = False
+    # How long a meeting keeps its saved web page. "never" means never remove
+    # it, which is the default. After that the page is rendered when opened.
+    # Same names as audio_retention. See space_saver.py for what is removed.
+    page_retention: str = "never"
+    # Whether other AI apps (Claude, Cursor, ChatGPT) may be connected to
+    # search this archive. Off by default: with it off Yarn is local end to
+    # end. An app connected here receives the passages it searches for.
+    external_apps: bool = False
     audio: AudioConfig = field(default_factory=AudioConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     diarize: DiarizeConfig = field(default_factory=DiarizeConfig)
@@ -249,6 +254,15 @@ class Config:
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
     savings: SavingsConfig = field(default_factory=SavingsConfig)
+
+    @property
+    def page_retention_days(self) -> int:
+        """Days a page is kept. 0 means pages are never removed."""
+        return retention_days(self.page_retention, default=0)
+
+    @property
+    def space_saver(self) -> bool:
+        return self.page_retention_days > 0
 
     # --- derived paths ---
     @property
@@ -447,8 +461,8 @@ def load_config(path: Path | None = None) -> Config:
     if "audio_retention_days" in data:
         cfg.audio_retention_days = int(data["audio_retention_days"])
         cfg.audio_retention = retention_name(cfg.audio_retention_days)
-    if "space_saver" in data:
-        cfg.space_saver = bool(data["space_saver"])
+    if "page_retention" in data:
+        cfg.page_retention = str(data["page_retention"])
     if "audio_retention" in data:
         cfg.audio_retention = str(data["audio_retention"])
         cfg.audio_retention_days = retention_days(cfg.audio_retention)
@@ -583,27 +597,49 @@ def load_config(path: Path | None = None) -> Config:
 
 SUMMARY_PROFILES = ("default", "short", "detailed", "actions", "sales", "technical")
 
+# One list for both things Yarn can clear out on a timer: recorded audio and
+# saved web pages. "never" means never delete.
+RETENTION_CHOICES = (
+    ("1_week", "1 week", 7),
+    ("2_weeks", "2 weeks", 14),
+    ("1_month", "1 month", 30),
+    ("3_months", "3 months", 90),
+    ("6_months", "6 months", 180),
+    ("1_year", "1 year", 365),
+    ("never", "Never", 0),
+)
 RETENTION_DAYS = {
-    "1_week": 7,
+    **{name: days for name, _label, days in RETENTION_CHOICES},
+    # What older settings files hold.
     "week": 7,
-    "1_month": 30,
     "month": 30,
-    "never": 0,
 }
 
 
-def retention_days(name: str) -> int:
+def normalise_retention(name: str) -> str:
+    """The stored name for a retention choice, or "" if it is not one."""
+    key = str(name).strip().lower()
+    key = {"week": "1_week", "month": "1_month"}.get(key, key)
+    return key if any(key == choice for choice, _l, _d in RETENTION_CHOICES) else ""
+
+
+def retention_label(name: str) -> str:
+    key = normalise_retention(name)
+    return next((label for choice, label, _d in RETENTION_CHOICES if choice == key), "")
+
+
+def retention_days(name: str, default: int = 7) -> int:
     if str(name).isdigit() or (str(name).startswith("-") and str(name)[1:].isdigit()):
         return int(name)
-    return RETENTION_DAYS.get(str(name), 7)
+    return RETENTION_DAYS.get(str(name), default)
 
 
 def retention_name(days: int) -> str:
+    """The nearest named choice for a number of days from an old config."""
     if days <= 0:
         return "never"
-    if days >= 28:
-        return "1_month"
-    return "1_week"
+    named = [(d, name) for name, _label, d in RETENTION_CHOICES if d > 0]
+    return min(named, key=lambda pair: abs(pair[0] - days))[1]
 
 
 def _apply_settings_overlay(cfg: Config) -> None:
@@ -626,12 +662,22 @@ def _apply_settings_overlay(cfg: Config) -> None:
     else:
         # The menu shows this as on until someone turns it off.
         cfg.speakers_memory.recognise_known = True
-    if "space_saver" in overlay:
-        cfg.space_saver = bool(overlay["space_saver"])
+    if "external_apps" in overlay:
+        cfg.external_apps = bool(overlay["external_apps"])
+    if "page_retention" in overlay:
+        cfg.page_retention = str(overlay["page_retention"])
+    elif "space_saver" in overlay:
+        # The first version of this was an on/off switch that meant a month.
+        cfg.page_retention = "1_month" if overlay["space_saver"] else "never"
     if "speaker_engine" in overlay:
         cfg.diarize.engine = str(overlay["speaker_engine"])
     if "cleanup_enabled" in overlay:
         cfg.cleanup.enabled = bool(overlay["cleanup_enabled"])
+    else:
+        # On until someone turns it off, like recognising known speakers.
+        # It only ever runs when the local model is already open, and every
+        # line it returns is checked against what was said (cleanup.py).
+        cfg.cleanup.enabled = True
     if "pause_on_pressure" in overlay:
         cfg.processing.pause_on_pressure = bool(overlay["pause_on_pressure"])
     if "summarize_when" in overlay:

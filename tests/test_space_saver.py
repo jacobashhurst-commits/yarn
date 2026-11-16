@@ -63,7 +63,7 @@ def test_it_is_off_by_default(cfg):
 def test_only_old_pages_are_listed_and_the_size_is_theirs(cfg):
     old_page = make_meeting(cfg, OLD)
     make_meeting(cfg, RECENT)
-    sweep = space_saver.removable(cfg, NOW)
+    sweep = space_saver.removable(cfg, NOW, days=30)
     assert sweep.paths == [old_page]
     assert sweep.bytes == old_page.stat().st_size
     assert "1 page" in sweep.summary()
@@ -72,7 +72,7 @@ def test_only_old_pages_are_listed_and_the_size_is_theirs(cfg):
 def test_looking_removes_nothing(cfg):
     make_meeting(cfg, OLD)
     before = everything(cfg)
-    space_saver.removable(cfg, NOW)
+    space_saver.removable(cfg, NOW, days=30)
     assert everything(cfg) == before
 
 
@@ -88,7 +88,7 @@ def test_purge_removes_only_the_pages(cfg):
     audio.write_bytes(b"RIFF")
     before = set(everything(cfg))
 
-    done = space_saver.purge(cfg, NOW)
+    done = space_saver.purge(cfg, NOW, days=30)
 
     gone = before - set(everything(cfg))
     assert len(gone) == 1 and next(iter(gone)).endswith(".html")
@@ -107,7 +107,7 @@ def test_old_briefs_go_and_the_current_one_stays(cfg):
     (briefs / "2026-11-15.html").write_text("recent")
     (briefs / "latest.html").write_text("current")
     (briefs / "notes.html").write_text("not a brief")
-    space_saver.purge(cfg, NOW)
+    space_saver.purge(cfg, NOW, days=30)
     assert sorted(p.name for p in briefs.iterdir()) == [
         "2026-11-15.html",
         "latest.html",
@@ -118,18 +118,18 @@ def test_old_briefs_go_and_the_current_one_stays(cfg):
 def test_what_was_freed_is_counted_in_space_saved(cfg):
     page = make_meeting(cfg, OLD)
     size = page.stat().st_size
-    space_saver.purge(cfg, NOW)
+    space_saver.purge(cfg, NOW, days=30)
     assert report(cfg)["space"]["pages_bytes"] == size
     make_meeting(cfg, "2026-07-01T09-00-00")
     second = cfg.transcript_html("2026-07-01T09-00-00").stat().st_size
-    space_saver.purge(cfg, NOW)
+    space_saver.purge(cfg, NOW, days=30)
     assert report(cfg)["space"]["pages_bytes"] == size + second
 
 
 def test_a_removed_page_can_be_made_again_from_the_transcript(cfg):
     page = make_meeting(cfg, OLD)
     before = page.read_text()
-    space_saver.purge(cfg, NOW)
+    space_saver.purge(cfg, NOW, days=30)
     assert not page.exists()
     again = ensure_transcript_page(cfg, Transcript.read(cfg.transcript_json(OLD)))
     assert again.read_text() == before
@@ -138,7 +138,7 @@ def test_a_removed_page_can_be_made_again_from_the_transcript(cfg):
 def test_an_old_meeting_opens_from_the_library_without_a_saved_page(cfg):
     make_meeting(cfg, OLD)
     make_meeting(cfg, RECENT)
-    write_setting(cfg, "space_saver", True)
+    write_setting(cfg, "page_retention", "1_month")
     space_saver.purge(cfg)
     html = library.render_transcript_index(cfg).read_text()
     # The library did not write the old page back.
@@ -159,7 +159,7 @@ def test_with_it_off_the_library_writes_pages_as_before(cfg):
 
 def test_reindexing_an_old_meeting_does_not_bring_its_page_back(cfg):
     make_meeting(cfg, OLD)
-    write_setting(cfg, "space_saver", True)
+    write_setting(cfg, "page_retention", "1_month")
     pipeline.ingest(cfg, OLD, FakeStore())
     assert not cfg.transcript_html(OLD).exists()
     assert cfg.transcript_md(OLD).exists()
@@ -174,3 +174,44 @@ def test_the_on_demand_page_refuses_anything_that_is_not_a_meeting_id(cfg):
 def test_a_page_is_no_longer_mostly_logo(cfg):
     page = make_meeting(cfg, RECENT)
     assert page.stat().st_size < 120_000
+
+
+def test_never_removes_nothing(cfg):
+    make_meeting(cfg, OLD)
+    assert space_saver.removable(cfg, NOW).count == 0
+    assert space_saver.purge(cfg, NOW).count == 0
+    assert cfg.transcript_html(OLD).exists()
+
+
+@pytest.mark.parametrize(
+    "choice, old_goes, recent_goes",
+    [
+        ("1_week", True, False),
+        ("2_weeks", True, False),
+        ("1_month", True, False),
+        ("3_months", True, False),
+        ("6_months", False, False),
+        ("1_year", False, False),
+        ("never", False, False),
+    ],
+)
+def test_each_choice_keeps_pages_for_its_own_length(cfg, choice, old_goes, recent_goes):
+    """OLD is 107 days before NOW and RECENT is 6."""
+    make_meeting(cfg, OLD)
+    make_meeting(cfg, RECENT)
+    write_setting(cfg, "page_retention", choice)
+    space_saver.purge(cfg, NOW)
+    assert cfg.transcript_html(OLD).exists() is not old_goes
+    assert cfg.transcript_html(RECENT).exists() is not recent_goes
+
+
+def test_a_choice_can_be_previewed_before_it_is_saved(cfg):
+    make_meeting(cfg, OLD)
+    assert space_saver.removable(cfg, NOW, days=7).count == 1
+    assert not space_saver.is_on(cfg)
+    assert cfg.transcript_html(OLD).exists()
+
+
+def test_the_old_switch_still_means_a_month(cfg):
+    write_setting(cfg, "space_saver", True)
+    assert cfg.page_retention == "1_month" and space_saver.keep_days(cfg) == 30

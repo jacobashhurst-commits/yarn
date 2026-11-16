@@ -97,6 +97,75 @@ def install_search_server(cfg: Config) -> list[Path]:
     return written
 
 
+# The config files of apps outside Yarn that can be pointed at the archive.
+# Ollama's own client file under the archive root is not in this list: that
+# one stays on this Mac.
+def _external_configs() -> list[tuple[str, Path]]:
+    found = [("Claude", path) for path in claude_config_paths()]
+    found.append(("Cursor", config_path("cursor")))
+    return found
+
+
+def _has_yarn(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return isinstance(servers, dict) and SERVER_NAME in servers
+
+
+def connected_apps() -> list[str]:
+    """Apps whose config currently points at Yarn. ChatGPT cannot be seen:
+    it is set up by hand inside that app and leaves no file to read."""
+    names: list[str] = []
+    for name, path in _external_configs():
+        if _has_yarn(path) and name not in names:
+            names.append(name)
+    return names
+
+
+def external_enabled(cfg: Config) -> bool:
+    """Whether connecting other apps is switched on.
+
+    Someone who connected Claude before this switch existed has no setting
+    saved. They are treated as on, because that is the truth of their Mac:
+    showing "off" while Claude can still search would be the wrong way round.
+    """
+    path = cfg.root / ".yarn-settings.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    if isinstance(saved, dict) and "external_apps" in saved:
+        return bool(saved["external_apps"])
+    return bool(connected_apps())
+
+
+def disconnect_all() -> list[str]:
+    """Take Yarn out of every app config it was written into.
+
+    Only Yarn's own entry is removed. Everything else in those files is
+    written back as it was. Returns the apps that were changed.
+    """
+    changed: list[str] = []
+    for name, path in _external_configs():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(servers, dict) or SERVER_NAME not in servers:
+            continue
+        del servers[SERVER_NAME]
+        tmp = path.with_name(path.name + ".yarn-tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        if name not in changed:
+            changed.append(name)
+    return changed
+
+
 def connect_client(cfg: Config, target: str) -> Path:
     return merge_mcp_config(config_path(target), server_spec(cfg))
 

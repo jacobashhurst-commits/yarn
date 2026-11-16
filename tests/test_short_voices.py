@@ -422,3 +422,106 @@ def test_a_name_already_saved_survives_the_rule(old_meeting):
         "room-4": "Priya",
         "room-1": "Sam",
     }
+
+
+# --- tidying the transcript cannot move or invent words -----------------------
+
+from meeting_archive.cleanup import _parse_numbered, _same_words, cleanup_turns
+from meeting_archive.summarize import SummaryUnavailable
+
+
+def _three():
+    return [
+        Turn(ROOM, 0.0, 4.0, "so the the plan is we ship on thursday", "room-1"),
+        Turn(ROOM, 4.0, 6.0, "is the build green", "room-2"),
+        Turn(ROOM, 6.0, 9.0, "it went green this morning", "room-1"),
+    ]
+
+
+def test_a_dropped_line_does_not_shift_the_ones_after_it():
+    """The old matching was by position: one missing line renamed every later speaker."""
+    cleaned = _parse_numbered(
+        "1| So the plan is we ship on Thursday.\n3| It went green this morning.\n",
+        _three(),
+    )
+    assert [t.text for t in cleaned] == [
+        "So the plan is we ship on Thursday.",
+        "is the build green",
+        "It went green this morning.",
+    ]
+    assert [t.speaker for t in cleaned] == ["room-1", "room-2", "room-1"]
+
+
+def test_a_rewritten_line_is_refused_and_the_original_kept():
+    cleaned = _parse_numbered(
+        "1| The team agreed to release the product later this week after review.\n"
+        "2| Is the build green?\n"
+        "3| It went green this morning.\n",
+        _three(),
+    )
+    assert cleaned[0].text == "so the the plan is we ship on thursday"
+    assert cleaned[1].text == "Is the build green?"
+
+
+def test_added_words_are_refused():
+    assert not _same_words("is the build green", "Is the build green, and did Sam approve it?")
+    assert _same_words("is the build green", "Is the build green?")
+    assert _same_words("yeah yeah yeah yeah we can do that", "Yeah, we can do that.")
+
+
+def test_a_line_answered_twice_is_left_alone():
+    cleaned = _parse_numbered("2| Is the build green?\n2| Is it green?\n", _three())
+    assert cleaned[1].text == "is the build green"
+
+
+def test_the_speaker_and_time_never_come_from_the_model():
+    cleaned = _parse_numbered("2| Speaker 9: Is the build green?\n", _three())
+    assert (cleaned[1].speaker, cleaned[1].start, cleaned[1].text) == (
+        "room-2",
+        4.0,
+        "Is the build green?",
+    )
+
+
+class _Echo:
+    """A model that proofreads by capitalising, one prompt per chunk."""
+
+    enabled = True
+
+    def __init__(self):
+        self.prompts = 0
+
+    def is_running(self):
+        return True
+
+    def _run(self, prompt):
+        self.prompts += 1
+        body = prompt.split("TRANSCRIPT\n", 1)[1]
+        lines = []
+        for line in body.splitlines():
+            number, _, rest = line.partition("| ")
+            text = rest.split(": ", 1)[1]
+            lines.append(f"{number}| {text[:1].upper()}{text[1:]}.")
+        return "\n".join(lines)
+
+
+def test_a_long_meeting_is_tidied_in_pieces_and_stays_in_order():
+    turns = [
+        Turn(ROOM, float(i), float(i) + 1, f"line number {i} " + "word " * 60, f"room-{i % 2 + 1}")
+        for i in range(60)
+    ]
+    model = _Echo()
+    cleaned = cleanup_turns(turns, lambda t: t.speaker, model)
+    assert model.prompts > 1
+    assert len(cleaned) == 60
+    assert [t.speaker for t in cleaned] == [t.speaker for t in turns]
+    assert all(c.text.startswith(f"Line number {i} ") for i, c in enumerate(cleaned))
+
+
+def test_a_model_that_returns_nothing_usable_leaves_the_transcript_raw():
+    class Silent(_Echo):
+        def _run(self, prompt):
+            return "Here is your cleaned transcript!"
+
+    with pytest.raises(SummaryUnavailable):
+        cleanup_turns(_three(), lambda t: t.speaker, Silent())

@@ -423,6 +423,7 @@ def render_markdown(
         lines.append(f"- **Names heard in conversation:** {suggested}")
     if notes.get("notes"):
         lines.append(f"- **Notes:** {notes['notes']}")
+    own_notes = str(notes.get("detail") or "").strip()
     if transcript.model:
         engine = f" ({transcript.whisper_engine})" if transcript.whisper_engine else ""
         lines.append(f"- **Model:** {transcript.model}{engine}")
@@ -452,6 +453,14 @@ def render_markdown(
         if parts:
             lines.append(f"- **Processing:** {' · '.join(parts)}")
     lines.append("")
+
+    if own_notes:
+        # Above the summary: these are the reader's own words about the
+        # meeting, and the one part of the page no model wrote.
+        lines.append("## Your notes")
+        lines.append("")
+        lines.append(own_notes)
+        lines.append("")
 
     lines.append("## Summary")
     lines.append("")
@@ -795,10 +804,20 @@ def render_transcript_html(
                 "</article>"
             )
     overview = summary_html
+    own_notes = str(notes.get("detail") or "").strip()
+    notes_card = ""
+    if own_notes:
+        paragraphs = "".join(
+            f"<p>{htmltheme.html_escape(part.strip())}</p>"
+            for part in own_notes.split("\n")
+            if part.strip()
+        )
+        notes_card = f'<section class="card"><h2>Your notes</h2>{paragraphs}</section>'
     body = f"""
   {htmltheme.masthead("Transcript", heading)}
   <p class="when">{htmltheme.html_escape(when)} · {minutes}m {seconds:02d}s · saved on this Mac</p>
   {attendee_line}
+  {notes_card}
   {overview}
   <div class="grid">
     {listen}
@@ -974,8 +993,16 @@ def write_notes(
     speakers: dict | None = None,
     applied: bool = False,
     keep_audio: bool | None = None,
+    detail: str | None = None,
 ) -> dict:
-    """Save popup output. `applied=False` tells the watcher to reindex."""
+    """Save popup output. `applied=False` tells the watcher to reindex.
+
+    `notes` is the short name of the meeting: it became the title, which
+    left nowhere to write anything longer. `detail` is that place. None
+    means "not sent" and keeps what is there; an empty string from the
+    window is also kept, for the same reason blank input never wipes the
+    other answers.
+    """
     existing = read_notes(path)
     merged_speakers = dict(existing.get("speakers") or {})
     for key, value in (speakers or {}).items():
@@ -990,6 +1017,7 @@ def write_notes(
         # Blank input never wipes an earlier answer.
         "notes": notes or existing.get("notes", ""),
         "attendees": attendees or existing.get("attendees", ""),
+        "detail": (detail or "").strip() or existing.get("detail", ""),
         "speakers": merged_speakers,
         "keep_audio": (
             bool(existing.get("keep_audio")) if keep_audio is None else bool(keep_audio)

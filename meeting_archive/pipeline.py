@@ -599,36 +599,55 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     except ValueError:
         epoch, date_only = 0, ""
 
-    metadatas = []
-    for chunk in chunks:
-        metadatas.append(
-            {
-                "meeting_id": meeting_id,
-                "date": date_only,
-                "date_label": label,
-                "epoch": epoch,
-                "chunk_index": chunk.index,
-                "start_s": round(chunk.start, 2),
-                "end_s": round(chunk.end, 2),
-                # The resolved labels actually used in the chunk text, so
-                # filtering on a speaker and reading the chunk agree.
-                "speakers": chunk.speakers or [cfg.label(c) for c in chunk.channels],
-                "attendees": notes.get("attendees", ""),
-                "notes": notes.get("notes", ""),
-                "detected_names": detected,
-                "identified_speakers": ", ".join(
-                    sorted({v for v in roster.values() if v})
-                ),
-                "has_notes": bool(notes.get("notes") or notes.get("attendees")),
-                "duration_s": round(transcript.duration_s, 1),
-                "title": transcript.title,
-                "transcript_path": str(cfg.transcript_md(meeting_id)),
-            }
+    def describe(index: int, start: float, end: float, speakers: list) -> dict:
+        return {
+            "meeting_id": meeting_id,
+            "date": date_only,
+            "date_label": label,
+            "epoch": epoch,
+            "chunk_index": index,
+            "start_s": round(start, 2),
+            "end_s": round(end, 2),
+            # The resolved labels actually used in the chunk text, so
+            # filtering on a speaker and reading the chunk agree.
+            "speakers": speakers,
+            "attendees": notes.get("attendees", ""),
+            "notes": notes.get("notes", ""),
+            "detected_names": detected,
+            "identified_speakers": ", ".join(
+                sorted({v for v in roster.values() if v})
+            ),
+            "has_notes": bool(
+                notes.get("notes") or notes.get("attendees") or notes.get("detail")
+            ),
+            "duration_s": round(transcript.duration_s, 1),
+            "title": transcript.title,
+            "transcript_path": str(cfg.transcript_md(meeting_id)),
+        }
+
+    documents = [c.text for c in chunks]
+    metadatas = [
+        describe(
+            chunk.index,
+            chunk.start,
+            chunk.end,
+            chunk.speakers or [cfg.label(c) for c in chunk.channels],
         )
+        for chunk in chunks
+    ]
+    # What the person wrote about the meeting, as a passage of its own. It
+    # is not speech, so it is labelled as written notes and never as a
+    # speaker, and it is kept out of the spoken chunks so a search hit on
+    # the transcript is still only what was said.
+    own_notes = str(notes.get("detail") or "").strip()
+    if own_notes:
+        prefix = f"{header}\n" if header else ""
+        documents.append(f"{prefix}Written notes on this meeting: {own_notes}")
+        metadatas.append(describe(len(chunks), 0.0, 0.0, ["Written notes"]))
 
     count = store.replace_meeting(
         meeting_id,
-        documents=[c.text for c in chunks],
+        documents=documents,
         metadatas=metadatas,
     )
 

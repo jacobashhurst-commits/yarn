@@ -31,10 +31,10 @@ from pathlib import Path
 
 from .space_saved import SPACE_SAVER_FILE, format_bytes
 
-# A meeting newer than this keeps its page. Recent meetings are the ones
-# opened from the brief and the library, and while their audio is still kept
-# the page is also where it plays. An older one is rendered when opened.
-KEEP_PAGES_DAYS = 30
+# How long a page is kept is Config.page_retention, chosen in Settings from
+# the same list as audio retention. Recent meetings are the ones opened from
+# the brief and the library, and while their audio is still kept the page is
+# also where it plays. An older one is rendered when opened.
 
 _BRIEF_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.html$")
 
@@ -63,11 +63,18 @@ class Sweep:
         }
 
 
+def keep_days(cfg) -> int:
+    """Days a page is kept, or 0 when pages are never removed."""
+    return max(0, int(getattr(cfg, "page_retention_days", 0) or 0))
+
+
 def is_on(cfg) -> bool:
-    return bool(getattr(cfg, "space_saver", False))
+    return keep_days(cfg) > 0
 
 
-def meeting_is_recent(meeting_id: str, now: datetime | None = None) -> bool:
+def meeting_is_recent(
+    meeting_id: str, now: datetime | None = None, days: int = 30
+) -> bool:
     """Whether this meeting still keeps its page. Unreadable ids count as recent.
 
     Keeping a page that could have gone costs a few kilobytes. Removing one
@@ -79,17 +86,24 @@ def meeting_is_recent(meeting_id: str, now: datetime | None = None) -> bool:
         when = parse_meeting_id(meeting_id)
     except (ValueError, TypeError):
         return True
-    return when >= (now or datetime.now()) - timedelta(days=KEEP_PAGES_DAYS)
+    return when >= (now or datetime.now()) - timedelta(days=days)
 
 
 def keeps_page(cfg, meeting_id: str, now: datetime | None = None) -> bool:
     """True when this meeting's page should exist on disk."""
-    return not is_on(cfg) or meeting_is_recent(meeting_id, now)
+    return not is_on(cfg) or meeting_is_recent(meeting_id, now, keep_days(cfg))
 
 
-def removable(cfg, now: datetime | None = None) -> Sweep:
-    """The pages Space saver would remove right now, and their size."""
+def removable(cfg, now: datetime | None = None, days: int | None = None) -> Sweep:
+    """The pages that would be removed right now, and their size.
+
+    `days` previews a choice that has not been saved yet. Without it the
+    saved setting is used, and "never" removes nothing.
+    """
     now = now or datetime.now()
+    days = keep_days(cfg) if days is None else max(0, int(days))
+    if days <= 0:
+        return Sweep()
     sweep = Sweep()
     seen: set[Path] = set()
 
@@ -105,7 +119,7 @@ def removable(cfg, now: datetime | None = None) -> Sweep:
     if cfg.transcripts_dir.exists():
         for record in sorted(cfg.transcripts_dir.rglob("*.json")):
             meeting_id = record.stem
-            if meeting_is_recent(meeting_id, now):
+            if meeting_is_recent(meeting_id, now, days):
                 continue
             # The page is named after the markdown, which may carry the
             # meeting's title. Both possible names are checked; nothing else.
@@ -114,7 +128,7 @@ def removable(cfg, now: datetime | None = None) -> Sweep:
 
     briefs = cfg.briefs_dir
     if briefs.exists():
-        cutoff = (now - timedelta(days=KEEP_PAGES_DAYS)).date()
+        cutoff = (now - timedelta(days=days)).date()
         for path in sorted(briefs.iterdir()):
             match = _BRIEF_NAME.match(path.name)
             if not match:
@@ -128,9 +142,9 @@ def removable(cfg, now: datetime | None = None) -> Sweep:
     return sweep
 
 
-def purge(cfg, now: datetime | None = None) -> Sweep:
+def purge(cfg, now: datetime | None = None, days: int | None = None) -> Sweep:
     """Remove those pages and add what was freed to the running total."""
-    planned = removable(cfg, now)
+    planned = removable(cfg, now, days)
     done = Sweep()
     for path in planned.paths:
         try:

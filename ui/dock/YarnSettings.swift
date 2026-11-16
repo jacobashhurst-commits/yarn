@@ -25,7 +25,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
     )
     private let cleanup = SettingSwitch(
         title: "Tidy the transcript",
-        caption: "The local model fixes punctuation and obvious mishearings. The original wording is kept beside it."
+        caption: "The local model fixes punctuation and obvious mishearings, and every line is checked against what was said. The original wording is kept. On a long meeting this adds a few minutes before the transcript appears."
     )
     private let pressure = SettingSwitch(
         title: "Wait when the Mac is busy",
@@ -431,7 +431,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         // A missing key means the default the pipeline itself uses.
         identify.setOn(data["identify_popup"] == nil ? true : boolean(data["identify_popup"]))
         suggest.setOn(data["suggest_names_popup"] == nil ? true : boolean(data["suggest_names_popup"]))
-        cleanup.setOn(boolean(data["cleanup_enabled"]))
+        cleanup.setOn(data["cleanup_enabled"] == nil ? true : boolean(data["cleanup_enabled"]))
         pressure.setOn(data["pause_on_pressure"] == nil ? true : boolean(data["pause_on_pressure"]))
         saver.setOn(boolean(data["space_saver"]))
         let floorValue = (data["min_participant_s"] as? NSNumber)?.doubleValue ?? 3
