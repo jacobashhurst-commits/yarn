@@ -581,6 +581,8 @@ def load_config(path: Path | None = None) -> Config:
     return cfg
 
 
+SUMMARY_PROFILES = ("default", "short", "detailed", "actions", "sales", "technical")
+
 RETENTION_DAYS = {
     "1_week": 7,
     "week": 7,
@@ -640,6 +642,24 @@ def _apply_settings_overlay(cfg: Config) -> None:
         from .languages import normalise_language
 
         cfg.whisper.language = normalise_language(str(overlay["meeting_language"]))
+    # The switches below only existed in config.toml. They are here so the
+    # Settings window can change them through `ma setting`, the same way
+    # the menu bar changes the others, and nobody has to edit a file.
+    if "identify_popup" in overlay:
+        cfg.diarize.identify_popup = bool(overlay["identify_popup"])
+    if "suggest_names_popup" in overlay:
+        cfg.names.suggest_popup = bool(overlay["suggest_names_popup"])
+    if "summary_profile" in overlay:
+        profile = str(overlay["summary_profile"])
+        if profile in SUMMARY_PROFILES:
+            cfg.summary.profile = profile
+    if "min_participant_s" in overlay:
+        try:
+            floor = float(overlay["min_participant_s"])
+            if 0 <= floor <= 30:
+                cfg.diarize.min_participant_s = floor
+        except (TypeError, ValueError):
+            pass
     if "evening_hour" in overlay:
         try:
             hour = int(overlay["evening_hour"])

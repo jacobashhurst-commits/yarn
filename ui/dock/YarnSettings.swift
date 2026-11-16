@@ -1,6 +1,8 @@
-// Settings, in the same window style as Ask Yarn. The choices are the ones
-// in the menu bar, written with `ma setting`, so the menu and this window
-// stay on the same file.
+// Settings, in the same window style as Ask Yarn. This is the full control
+// panel: everything the menu bar offers, plus the options that used to need
+// a text editor. Every change goes through `ma setting`, the same command
+// the menu bar runs, so the menu, this window and the command line read and
+// write one file and cannot disagree.
 
 import AppKit
 
@@ -8,7 +10,30 @@ final class YarnSettings: NSObject, NSWindowDelegate {
     private let paths: Paths
     private let window: NSWindow
     private let language = SettingChoices()
-    private let voices = SettingChoices()
+    private let floor = SettingChoices()
+    private let profile = SettingChoices()
+    private let evening = SettingChoices()
+    private let nameField = NSTextField(string: "")
+    private let identify = SettingSwitch(
+        title: "Ask me to name voices",
+        caption: "After a meeting is transcribed, Yarn asks who each separate voice was. Closing the window changes nothing."
+    )
+    private let suggest = SettingSwitch(
+        title: "Suggest who was there",
+        caption: "If you left the attendees empty, Yarn offers the names it heard. It never fills them in for you."
+    )
+    private let cleanup = SettingSwitch(
+        title: "Tidy the transcript",
+        caption: "The local model fixes punctuation and obvious mishearings. The original wording is kept beside it."
+    )
+    private let pressure = SettingSwitch(
+        title: "Wait when the Mac is busy",
+        caption: "While you are recording and memory is tight, transcription and summaries wait. The recording always comes first."
+    )
+    private let saver = SettingSwitch(
+        title: "Space saver",
+        caption: "Keeps a web page only for meetings from the last 30 days. Older ones are made when you open them. Transcripts, notes and audio are never touched."
+    )
     private let retention = SettingChoices()
     private let process = SettingChoices()
     private let summary = SettingChoices()
@@ -97,10 +122,39 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             self?.language.select(id)
             self?.write("meeting_language", id)
         }
-        voices.onPick = { [weak self] id in
-            self?.voices.select(id)
-            self?.write("speaker_engine", id)
+        floor.onPick = { [weak self] id in
+            self?.floor.select(id)
+            self?.write("min_participant_s", id)
         }
+        profile.onPick = { [weak self] id in
+            self?.profile.select(id)
+            self?.write("summary_profile", id)
+        }
+        evening.onPick = { [weak self] id in
+            self?.evening.select(id)
+            self?.write("evening_hour", id)
+        }
+        identify.onChange = { [weak self] on in
+            self?.write("identify_popup", on ? "on" : "off")
+        }
+        suggest.onChange = { [weak self] on in
+            self?.write("suggest_names_popup", on ? "on" : "off")
+        }
+        cleanup.onChange = { [weak self] on in
+            self?.write("cleanup_enabled", on ? "on" : "off")
+        }
+        pressure.onChange = { [weak self] on in
+            self?.write("pause_on_pressure", on ? "on" : "off")
+        }
+        saver.onChange = { [weak self] on in
+            self?.spaceSaverChanged(on)
+        }
+        nameField.placeholderString = "Your name"
+        nameField.font = .systemFont(ofSize: 13)
+        nameField.target = self
+        nameField.action = #selector(saveName)
+        nameField.setAccessibilityLabel("Your name on headphone recordings")
+        nameField.translatesAutoresizingMaskIntoConstraints = false
         retention.onPick = { [weak self] id in
             self?.retention.select(id)
             self?.write("audio_retention", id)
@@ -136,11 +190,27 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             ("de", "German", true),
             ("ko", "Korean", true),
         ], selected: "en")
-        voices.show([
-            ("pyannote", "Accurate", true),
-            ("sherpa", "Stable", true),
-            ("compare", "Compare both", true),
-        ], selected: "pyannote")
+        floor.show([
+            ("2", "2 seconds", true),
+            ("3", "3 seconds", true),
+            ("5", "5 seconds", true),
+            ("0", "Off: list every voice", true),
+        ], selected: "3")
+        profile.show([
+            ("default", "Balanced", true),
+            ("short", "Short", true),
+            ("detailed", "Detailed", true),
+            ("actions", "Action items first", true),
+            ("sales", "Customer and commercial", true),
+            ("technical", "Technical", true),
+        ], selected: "default")
+        evening.show([
+            ("17", "5 pm", true),
+            ("18", "6 pm", true),
+            ("19", "7 pm", true),
+            ("20", "8 pm", true),
+            ("21", "9 pm", true),
+        ], selected: "18")
         retention.show([
             ("1_week", "1 week", true),
             ("1_month", "1 month", true),
@@ -171,27 +241,73 @@ final class YarnSettings: NSObject, NSWindowDelegate {
                 caption: "Tell Yarn a little about yourself and how you like your answers. It'll use this when you Ask Yarn.",
                 body: thread
             ),
+
+            section("Recording"),
             group(
                 "Meeting language",
                 caption: "The app stays in English. This is the language of the next recording.",
                 body: language
             ),
-            settingsCard(stack([recognise], spacing: 0)),
-            group("Voice recognition model", body: voices),
+            group(
+                "Your name",
+                caption: "On a headphone call, your microphone is labelled with this. Press Return to save.",
+                body: nameField
+            ),
+
+            section("Speakers"),
+            settingsCard(stack([recognise, identify, suggest], spacing: 16)),
+            group(
+                "Who counts as a speaker",
+                caption: "A voice with less speech than this in total is not listed, numbered or asked about. Its words stay in the transcript.",
+                body: floor
+            ),
+
+            section("Transcription and models"),
+            group("Summary model", body: summary),
+            group(
+                "Summary style",
+                caption: "What a summary leans towards. It never adds anything that was not said.",
+                body: profile
+            ),
+            settingsCard(stack([cleanup], spacing: 0)),
+
+            section("Storage and retention"),
             group(
                 "Audio retention",
                 caption: "When do you want Yarn to automatically delete your audio recordings? It saves space and increases privacy. A recording that never became a transcript is kept.",
                 body: retention
             ),
+            settingsCard(stack([saver], spacing: 0)),
+
+            section("Brief and summaries"),
             group("Process when", body: process),
+            group(
+                "Evening starts at",
+                caption: "Used when Process when is set to Evening.",
+                body: evening
+            ),
+            settingsCard(stack([pressure], spacing: 0)),
             settingsCard(briefRows),
-            group("Summary model", body: summary),
-            group("Also search from another app", body: stack([
-                link("Claude", #selector(connectClaude), self),
-                link("Cursor", #selector(connectCursor), self),
-                link("ChatGPT", #selector(connectChatGPT), self),
-            ], spacing: 2)),
+
+            section("Integrations"),
+            group(
+                "Also search from another app",
+                caption: "Ask Yarn stays on this Mac. An app you connect here receives the passages it searches for, and they go wherever that app sends them.",
+                body: stack([
+                    link("Claude", #selector(connectClaude), self),
+                    link("Cursor", #selector(connectCursor), self),
+                    link("ChatGPT", #selector(connectChatGPT), self),
+                ], spacing: 2)
+            ),
+
+            section("Tools"),
             settingsCard(stack([
+                link("Import a recording", #selector(importRecording), self),
+                link("Import a transcript", #selector(importTranscript), self),
+                link("Pause processing", #selector(pauseProcessing), self),
+                link("Resume processing", #selector(resumeProcessing), self),
+                link("Open transcripts folder", #selector(openTranscripts), self),
+                link("Open Ollama", #selector(openOllama), self),
                 link("Diagnostics", #selector(diagnostics), self),
                 link("Logs", #selector(showLogs), self),
             ], spacing: 2)),
@@ -242,6 +358,22 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         ])
     }
 
+    private func section(_ title: String) -> NSView {
+        let heading = label(title.uppercased(), size: 11, weight: .semibold, color: YarnColor.slate)
+        heading.setAccessibilityRole(.staticText)
+        heading.setAccessibilityLabel(title + " settings")
+        let box = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(heading)
+        NSLayoutConstraint.activate([
+            heading.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
+            heading.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 4),
+            heading.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+        ])
+        return box
+    }
+
     private func group(_ title: String, caption: String? = nil, body: NSView) -> NSView {
         var rows: [NSView] = [label(title, size: 13, weight: .semibold, color: YarnColor.ink)]
         if let caption {
@@ -278,7 +410,19 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         let languageID = text(data["meeting_language"])
         language.select(known(languageID, fallback: "en", allowed: ["en", "auto", "ja", "zh", "es", "fr", "de", "ko"]))
         recognise.setOn(data["recognise_known"] == nil ? true : boolean(data["recognise_known"]))
-        voices.select(known(text(data["speaker_engine"]), fallback: "pyannote", allowed: ["pyannote", "sherpa", "compare"]))
+        // A missing key means the default the pipeline itself uses.
+        identify.setOn(data["identify_popup"] == nil ? true : boolean(data["identify_popup"]))
+        suggest.setOn(data["suggest_names_popup"] == nil ? true : boolean(data["suggest_names_popup"]))
+        cleanup.setOn(boolean(data["cleanup_enabled"]))
+        pressure.setOn(data["pause_on_pressure"] == nil ? true : boolean(data["pause_on_pressure"]))
+        saver.setOn(boolean(data["space_saver"]))
+        let floorValue = (data["min_participant_s"] as? NSNumber)?.doubleValue ?? 3
+        floor.select(known(String(Int(floorValue)), fallback: "3", allowed: ["0", "2", "3", "5"]))
+        profile.select(known(text(data["summary_profile"]), fallback: "default", allowed: ["default", "short", "detailed", "actions", "sales", "technical"]))
+        evening.select(known(text(data["evening_hour"]), fallback: "18", allowed: ["17", "18", "19", "20", "21"]))
+        if window.firstResponder !== nameField.currentEditor() {
+            nameField.stringValue = Self.ownName()
+        }
         let kept = text(data["audio_retention"])
         retention.select(kept == "month" ? "1_month" : known(kept, fallback: "1_week", allowed: ["1_week", "1_month", "never"]))
         process.select(known(text(data["summarize_when"]), fallback: "after_meeting", allowed: ["after_meeting", "evening", "manual"]))
@@ -327,6 +471,142 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             guard let self, generation == self.writeGeneration, self.status.stringValue == text else { return }
             self.status.stringValue = ""
         }
+    }
+
+    /// The name is in config.toml with the other names, not in the settings
+    /// file, because it is part of how every transcript is labelled.
+    private static func ownName() -> String {
+        let env = ProcessInfo.processInfo.environment["MEETING_ARCHIVE_CONFIG"] ?? ""
+        let path = env.isEmpty
+            ? NSHomeDirectory() + "/.config/meeting-archive/config.toml"
+            : env
+        guard let body = try? String(contentsOfFile: path, encoding: .utf8) else { return "" }
+        for line in body.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("own_label"), let eq = trimmed.firstIndex(of: "=") else { continue }
+            var value = trimmed[trimmed.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+                value = String(value.dropFirst().dropLast())
+            }
+            return value.replacingOccurrences(of: "\\\"", with: "\"")
+        }
+        return ""
+    }
+
+    @objc private func saveName() {
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != Self.ownName() else { return }
+        window.makeFirstResponder(nil)
+        write("own_name", name)
+    }
+
+    /// Turning it on is the one setting that removes files, so it says what
+    /// will go and how much, and waits for a yes. Turning it off removes
+    /// nothing and pages come back the next time they are opened.
+    private func spaceSaverChanged(_ on: Bool) {
+        guard on else {
+            write("space_saver", "off")
+            return
+        }
+        let ma = paths.ma
+        writer.async { [weak self] in
+            let preview = Self.capture(ma, ["space-saver", "--json"])
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let count = integer(preview["count"]) ?? 0
+                let size = text(preview["label"])
+                let alert = NSAlert()
+                alert.messageText = "Turn on Space saver?"
+                alert.informativeText = count > 0
+                    ? "This removes \(count) saved web page\(count == 1 ? "" : "s") of meetings older than 30 days and frees \(size). They are made again whenever you open one. Your transcripts, notes, summaries and audio are not touched."
+                    : "Nothing needs removing right now. From here on, Yarn keeps a web page only for meetings from the last 30 days. Your transcripts, notes, summaries and audio are not touched."
+                alert.addButton(withTitle: "Turn On")
+                alert.addButton(withTitle: "Cancel")
+                alert.beginSheetModal(for: self.window) { answer in
+                    guard answer == .alertFirstButtonReturn else {
+                        self.saver.setOn(false)
+                        return
+                    }
+                    self.write("space_saver", "on")
+                    self.writer.async {
+                        let done = Self.capture(ma, ["space-saver", "--purge", "--json"])
+                        DispatchQueue.main.async {
+                            let freed = text(done["label"])
+                            if (integer(done["count"]) ?? 0) > 0 {
+                                self.flash("Space saver is on. Freed \(freed).")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func importRecording() { importFile("audio") }
+    @objc private func importTranscript() { importFile("transcript") }
+
+    private func importFile(_ kind: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = kind == "audio"
+            ? "Choose a recording to add to Yarn. It is copied in and transcribed on this Mac."
+            : "Choose a transcript to add to Yarn."
+        panel.beginSheetModal(for: window) { [weak self] answer in
+            guard let self, answer == .OK, let url = panel.url else { return }
+            let ma = self.paths.ma
+            self.flash("Importing \(url.lastPathComponent)\u{2026}")
+            self.writer.async {
+                let result = Self.run(ma, [kind == "audio" ? "import-audio" : "import-transcript", url.path])
+                DispatchQueue.main.async {
+                    self.flash(
+                        result.ok ? "Imported. It will appear once it has been processed." : (result.err.isEmpty ? "That file could not be imported." : result.err),
+                        warn: !result.ok
+                    )
+                }
+            }
+        }
+    }
+
+    @objc private func pauseProcessing() { simple(["pause"], done: "Processing is paused. Recording is not affected.") }
+    @objc private func resumeProcessing() { simple(["resume"], done: "Processing resumed.") }
+
+    private func simple(_ args: [String], done: String) {
+        let ma = paths.ma
+        writer.async { [weak self] in
+            let result = Self.run(ma, args)
+            DispatchQueue.main.async {
+                self?.flash(result.ok ? done : (result.err.isEmpty ? "That didn\u{2019}t work." : result.err), warn: !result.ok)
+            }
+        }
+    }
+
+    @objc private func openTranscripts() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: paths.root + "/transcripts", isDirectory: true))
+    }
+
+    @objc private func openOllama() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-a", "Ollama"]
+        do { try task.run() } catch { flash("Ollama isn\u{2019}t installed on this Mac.", warn: true) }
+    }
+
+    /// Run `ma` and read the JSON it prints. Empty on any failure.
+    private static func capture(_ bin: String, _ args: [String]) -> [String: Any] {
+        guard FileManager.default.isExecutableFile(atPath: bin) else { return [:] }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: bin)
+        task.arguments = args
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = FileHandle.nullDevice
+        guard (try? task.run()) != nil else { return [:] }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj
     }
 
     @objc private func connectClaude() { connect("claude") }

@@ -1166,6 +1166,8 @@ def cmd_setting(cfg: Config, args) -> int:
         "pause_on_pressure",
         "brief_on_login",
         "space_saver",
+        "identify_popup",
+        "suggest_names_popup",
     }:
         if lowered not in {"on", "off", "true", "false", "1", "0"}:
             print("value must be on or off", file=sys.stderr)
@@ -1187,6 +1189,48 @@ def cmd_setting(cfg: Config, args) -> int:
             )
             return 1
         value = lowered
+    elif args.key == "audio_retention":
+        # "week" and "month" are what older settings files hold.
+        lowered = {"week": "1_week", "month": "1_month"}.get(lowered, lowered)
+        if lowered not in {"1_week", "1_month", "never"}:
+            print("value must be 1_week, 1_month, or never", file=sys.stderr)
+            return 1
+        value = lowered
+    elif args.key == "summary_profile":
+        from .config import SUMMARY_PROFILES
+
+        if lowered not in SUMMARY_PROFILES:
+            print("value must be one of: " + ", ".join(SUMMARY_PROFILES), file=sys.stderr)
+            return 1
+        value = lowered
+    elif args.key == "evening_hour":
+        if not lowered.isdigit() or not 0 <= int(lowered) <= 23:
+            print("value must be an hour from 0 to 23", file=sys.stderr)
+            return 1
+        value = int(lowered)
+    elif args.key == "min_participant_s":
+        try:
+            value = float(lowered)
+        except ValueError:
+            value = -1.0
+        if not 0 <= value <= 30:
+            print("value must be a number of seconds from 0 to 30", file=sys.stderr)
+            return 1
+    elif args.key == "own_name":
+        # The name is the label on every headphone transcript, and it lives
+        # in config.toml with the other names, not in the settings overlay.
+        name = clean_own_name(raw)
+        if not name:
+            print("type the name to use for you", file=sys.stderr)
+            return 1
+        try:
+            save_own_name(_config_path(args), name)
+        except (OSError, ValueError) as exc:
+            print(f"that name could not be saved: {exc}", file=sys.stderr)
+            return 1
+        write_setting(cfg, "own_name_confirmed", True)
+        print(f"own_name = {name}")
+        return 0
     elif args.key == "thread":
         from .ask import THREAD_MAX
 
@@ -1672,6 +1716,13 @@ def build_parser() -> argparse.ArgumentParser:
             "brief_on_login",
             "summary_model",
             "thread",
+            "space_saver",
+            "identify_popup",
+            "suggest_names_popup",
+            "summary_profile",
+            "evening_hour",
+            "min_participant_s",
+            "own_name",
         ),
     )
     p.add_argument("value")
