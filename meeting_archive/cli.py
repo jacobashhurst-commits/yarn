@@ -1265,6 +1265,22 @@ def cmd_connect(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_savings(cfg: Config, args) -> int:
+    """What the Dock footer shows, and why. The Dock reads the JSON form."""
+    from . import space_saved
+
+    data = space_saved.report(cfg)
+    if args.json:
+        print(json.dumps(data))
+        return 0
+    print(f"{data['tokens']['total']:,} tokens saved")
+    print(data["tokens"]["tooltip"])
+    print()
+    print(data["space"]["label"])
+    print(data["space"]["tooltip"])
+    return 0
+
+
 def cmd_benchmark(cfg: Config, args) -> int:
     from .benchmark import run_benchmark
 
@@ -1458,6 +1474,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply the short-voice rules to every stored meeting; names are kept",
     )
     p.set_defaults(func=cmd_rediarize)
+
+    p = sub.add_parser(
+        "savings", help="tokens and disk space saved, with the assumptions"
+    )
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_savings)
 
     sub.add_parser("rebuild", help="reindex every transcript").set_defaults(
         func=cmd_rebuild

@@ -187,7 +187,11 @@ def test_token_deltas_count_only_new_tokens():
     import meeting_archive.summarize as summarize
 
     original = summarize.adjust_saved_tokens
+    original_split = summarize.adjust_token_split
     summarize.adjust_saved_tokens = capture
+    split = []
+    # Patched as well, or the test writes into the real archive.
+    summarize.adjust_token_split = lambda i, o, *, root: split.append((i, o))
     try:
         _note_token_delta({"done": False, "response": "Hi"}, seen)
         _note_token_delta({"eval_count": 4}, seen)
@@ -196,8 +200,11 @@ def test_token_deltas_count_only_new_tokens():
         _note_token_delta({"prompt_eval_count": 10, "eval_count": 9}, seen)
     finally:
         summarize.adjust_saved_tokens = original
+        summarize.adjust_token_split = original_split
     # "Hi" is an estimate of 1, then Ollama's counts replace it.
     assert recorded == [1, 3, 10, 5]
+    # Read and written tokens end where Ollama said: 10 read, 9 written.
+    assert (sum(i for i, _ in split), sum(o for _, o in split)) == (10, 9)
 
 
 def test_saved_tokens_add_up(tmp_path):

@@ -146,3 +146,15 @@ chunk_chars = 12000
 # from a closed lid). manual = only the menu button.
 when = "after_meeting"
 evening_hour = 18
+
+# The assumptions behind "tokens saved" and "GB saved" in the Dock. Hover over
+# either figure to see them. They are comparisons, so they are approximate.
+[savings]
+# What the same tokens would cost on a hosted model. US dollars per million
+# tokens, list price, checked November 2026. Update these when prices change.
+reference_model = "Claude Sonnet 5.5"
+input_usd_per_million = 2.0
+output_usd_per_million = 10.0
+# A recording of a video call. 1 GB an hour is ordinary 720p; 1080p is nearer 2.
+video_gb_per_hour = 1.0
+video_label = "720p video"

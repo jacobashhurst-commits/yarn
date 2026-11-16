@@ -204,6 +204,27 @@ class SummaryConfig:
 
 
 @dataclass
+class SavingsConfig:
+    """The assumptions behind "tokens saved" and "GB saved" in the Dock.
+
+    These are comparisons with things Yarn does not do, so they are
+    assumptions and are labelled that way wherever they are shown. They live
+    here so the figures can be kept current without touching code.
+    """
+
+    # What the same tokens would have cost on a hosted model. List prices in
+    # US dollars per million tokens, checked November 2026. Prices change;
+    # update these three together.
+    reference_model: str = "Claude Sonnet 5.5"
+    input_usd_per_million: float = 2.0
+    output_usd_per_million: float = 10.0
+    # A screen recording of a video call. 1 GB an hour is about 2.2 Mbit/s,
+    # which is ordinary 720p. 1080p is nearer 2 GB an hour.
+    video_gb_per_hour: float = 1.0
+    video_label: str = "720p video"
+
+
+@dataclass
 class Config:
     root: Path = DEFAULT_ROOT
     own_label: str = "Jacob"
@@ -224,6 +245,7 @@ class Config:
     speakers_memory: SpeakersMemoryConfig = field(default_factory=SpeakersMemoryConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
+    savings: SavingsConfig = field(default_factory=SavingsConfig)
 
     # --- derived paths ---
     @property
@@ -526,6 +548,19 @@ def load_config(path: Path | None = None) -> Config:
     p = data.get("processing", {})
     if "pause_on_pressure" in p:
         cfg.processing.pause_on_pressure = bool(p["pause_on_pressure"])
+
+    sv = data.get("savings", {})
+    for key in ("reference_model", "video_label"):
+        if key in sv:
+            setattr(cfg.savings, key, str(sv[key]))
+    for key in ("input_usd_per_million", "output_usd_per_million", "video_gb_per_hour"):
+        if key in sv:
+            try:
+                value = float(sv[key])
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                setattr(cfg.savings, key, value)
 
     g = data.get("glossary", {})
     if isinstance(g, dict):

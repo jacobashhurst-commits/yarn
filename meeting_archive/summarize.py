@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 import subprocess
@@ -327,7 +328,7 @@ def saved_token_total(root: Path) -> int:
         return 0
     try:
         total = int(json.loads(path.read_text(encoding="utf-8")).get("total") or 0)
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, AttributeError):
         return 0
     return max(0, total)
 
@@ -337,13 +338,61 @@ def record_saved_tokens(count: int, *, root: Path) -> None:
     adjust_saved_tokens(count, root=root)
 
 
+def _read_token_file(root: Path) -> dict:
+    try:
+        data = json.loads((root / ".tokens-saved.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_token_file(root: Path, data: dict) -> None:
+    # Whole-file replace. The Dock reads this once a second while the model
+    # is writing, and a half-written file read as zero tokens.
+    path = root / ".tokens-saved.json"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _count(data: dict, key: str) -> int:
+    try:
+        return max(0, int(data.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def adjust_saved_tokens(delta: int, *, root: Path) -> None:
     """Move the running total by delta. A negative delta corrects an estimate."""
     if delta == 0:
         return
-    path = root / ".tokens-saved.json"
-    total = max(0, saved_token_total(root) + delta)
-    path.write_text(json.dumps({"total": total}) + "\n", encoding="utf-8")
+    data = _read_token_file(root)
+    data["total"] = max(0, _count(data, "total") + delta)
+    _write_token_file(root, data)
+
+
+def adjust_token_split(input_delta: int, output_delta: int, *, root: Path) -> None:
+    """Keep how much of the total was read and how much was written.
+
+    Hosted models charge several times more for what they write than for
+    what they read, so a cost comparison needs the two apart. The total
+    stays where it always was; these sit beside it.
+    """
+    if input_delta == 0 and output_delta == 0:
+        return
+    data = _read_token_file(root)
+    data["input"] = max(0, _count(data, "input") + input_delta)
+    data["output"] = max(0, _count(data, "output") + output_delta)
+    _write_token_file(root, data)
+
+
+def saved_token_split(root: Path) -> tuple[int, int, int]:
+    """(read, written, unsplit). Unsplit is the total counted before the split existed."""
+    data = _read_token_file(root)
+    total = _count(data, "total")
+    read = min(_count(data, "input"), total)
+    written = min(_count(data, "output"), total - read)
+    return read, written, total - read - written
 
 
 def _note_token_delta(data: dict, seen: dict) -> None:
@@ -371,13 +420,26 @@ def _note_token_delta(data: dict, seen: dict) -> None:
         return
     written = int(seen.get("written") or 0)
     delta = desired - written
-    if delta == 0:
+    # Until Ollama's own counts arrive, everything seen is text it wrote.
+    if official:
+        want_in = int(seen.get("prompt_eval_count") or 0)
+        want_out = int(seen.get("eval_count") or 0)
+    else:
+        want_in, want_out = 0, desired
+    delta_in = want_in - int(seen.get("written_in") or 0)
+    delta_out = want_out - int(seen.get("written_out") or 0)
+    if delta == 0 and delta_in == 0 and delta_out == 0:
         return
     seen["written"] = desired
+    seen["written_in"] = want_in
+    seen["written_out"] = want_out
     try:
         from .config import load_config
 
-        adjust_saved_tokens(delta, root=load_config().root)
+        root = load_config().root
+        if delta:
+            adjust_saved_tokens(delta, root=root)
+        adjust_token_split(delta_in, delta_out, root=root)
     except (OSError, ValueError, TypeError):
         log.debug("could not record saved tokens", exc_info=True)
 

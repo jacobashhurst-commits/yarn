@@ -100,7 +100,15 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let processButton = NSButton(title: "Process waiting", target: nil, action: nil)
     let resumeButton = NSButton(title: "Resume", target: nil, action: nil)
     let noteLabel = NSTextField(wrappingLabelWithString: "")
-    let footer = NSTextField(labelWithString: "")
+    // The footer is separate labels so "tokens saved" and "GB saved" can
+    // each explain themselves on hover. One label has one tooltip.
+    let footMeetings = NSTextField(labelWithString: "")
+    let footTokens = NSTextField(labelWithString: "")
+    let footSpace = NSTextField(labelWithString: "")
+    let footRest = NSTextField(labelWithString: "")
+    var tokensTip = ""
+    var spaceTip = ""
+    var savingsRunning = false
     var meetingCount = 0
     var spaceSaved = ""
     var countedAt = Date.distantPast
@@ -309,10 +317,19 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         noteLabel.preferredMaxLayoutWidth = 340
         noteLabel.wantsLayer = true
         quips = QuipLine(label: noteLabel)
-        style(footer, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
-        footer.maximumNumberOfLines = 1
-        footer.lineBreakMode = .byTruncatingTail
-        footer.preferredMaxLayoutWidth = 360
+        for part in [footMeetings, footTokens, footSpace, footRest] {
+            style(part, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
+            part.maximumNumberOfLines = 1
+            part.lineBreakMode = .byTruncatingTail
+            part.setContentHuggingPriority(.required, for: .horizontal)
+        }
+        // The model name is the part that gives way when the window is narrow.
+        footRest.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        footRest.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        footTokens.setAccessibilityHelp("Approximate cost if this had run on a hosted AI model")
+        footSpace.setAccessibilityHelp("Disk space saved compared with keeping video recordings")
+        let footer = stack([footMeetings, footTokens, footSpace, footRest], spacing: 0, horizontal: true)
+        footer.detachesHiddenViews = true
 
         let root = stack([header, now, progress, actions, noteLabel, footer], spacing: 14)
         root.detachesHiddenViews = true
@@ -410,13 +427,21 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         progressCard?.isHidden = !showProgress
         progressTitle.isHidden = snap.heading.isEmpty
 
-        var foot = "\(snap.meetings) meeting\(snap.meetings == 1 ? "" : "s")"
-        foot += " · \(formatTokens(snap.tokens)) tokens saved"
-        if !snap.space.isEmpty { foot += " · \(snap.space)" }
-        if !snap.model.isEmpty { foot += " · \(snap.model)" }
-        if snap.failed > 0 { foot += " · \(snap.failed) kept their audio" }
-        footer.stringValue = foot
-        footer.textColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
+        footMeetings.stringValue = "\(snap.meetings) meeting\(snap.meetings == 1 ? "" : "s")"
+        footTokens.stringValue = " · \(formatTokens(snap.tokens)) tokens saved"
+        footTokens.toolTip = tokensTip.isEmpty ? nil : tokensTip
+        footSpace.stringValue = snap.space.isEmpty ? "" : " · \(snap.space)"
+        footSpace.isHidden = snap.space.isEmpty
+        footSpace.toolTip = spaceTip.isEmpty ? nil : spaceTip
+        var rest = ""
+        if !snap.model.isEmpty { rest += " · \(snap.model)" }
+        if snap.failed > 0 { rest += " · \(snap.failed) kept their audio" }
+        footRest.stringValue = rest
+        footRest.isHidden = rest.isEmpty
+        let footColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
+        for part in [footMeetings, footTokens, footSpace, footRest] {
+            part.textColor = footColor
+        }
         if snap.ollamaDown {
             quips.hold(
                 "Summaries need Ollama. Open it from the menu bar if a summary is waiting.",
@@ -523,7 +548,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if countedAt.timeIntervalSinceNow < -30 || meetingCount == 0 {
             meetingCount = countFiles(root + "/transcripts", suffix: ".json")
-            spaceSaved = formatSaved(spaceNotStored(root))
+            refreshSavings()
             countedAt = Date()
         }
         snap.meetings = meetingCount
@@ -538,6 +563,42 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         snap.ollamaDown = summaries > 0 && !ollama
         return snap
+    }
+
+    /// The figures and their explanations come from `ma savings --json`, so
+    /// the Dock, the command line and the tests all use one calculation.
+    /// It runs off the main thread: starting Python takes about a second.
+    private func refreshSavings() {
+        let ma = paths.ma
+        guard !savingsRunning, FileManager.default.isExecutableFile(atPath: ma) else { return }
+        savingsRunning = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: ma)
+            task.arguments = ["savings", "--json"]
+            let out = Pipe()
+            task.standardOutput = out
+            task.standardError = FileHandle.nullDevice
+            var parsed: [String: Any] = [:]
+            if (try? task.run()) != nil {
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                task.waitUntilExit()
+                if task.terminationStatus == 0,
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    parsed = obj
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.savingsRunning = false
+                guard !parsed.isEmpty else { return }
+                let tokens = parsed["tokens"] as? [String: Any] ?? [:]
+                let space = parsed["space"] as? [String: Any] ?? [:]
+                self.tokensTip = text(tokens["tooltip"])
+                self.spaceTip = text(space["tooltip"])
+                self.spaceSaved = text(space["label"])
+            }
+        }
     }
 
     @objc func startInRoom() {
@@ -962,40 +1023,6 @@ private func countFiles(_ dir: String, suffix: String) -> Int {
     return count
 }
 
-/// Same rates as meeting_archive/space_saved.py. Video is 1 GB an hour.
-/// Audio is 320 KB a second, and only counts once the recording is gone.
-private func spaceNotStored(_ root: String) -> Int64 {
-    let transcripts = root + "/transcripts"
-    let archive = root + "/recordings/archive"
-    guard let enumerator = FileManager.default.enumerator(atPath: transcripts) else { return 0 }
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: archive)) ?? []
-    var total: Int64 = 0
-    while let name = enumerator.nextObject() as? String {
-        guard name.hasSuffix(".json") else { continue }
-        let path = transcripts + "/" + name
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-        let seconds = doubleValue(obj["duration_s"])
-        if seconds <= 0 { continue }
-        let meeting = text(obj["meeting_id"])
-        let id = meeting.isEmpty
-            ? URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
-            : meeting
-        let prefix = id + "__"
-        let kept = names.contains { $0.hasPrefix(prefix) }
-        total += Int64((seconds * 1_000_000_000 / 3600).rounded())
-        if !kept { total += Int64((seconds * 320_000).rounded()) }
-    }
-    return total
-}
-
-private func doubleValue(_ value: Any?) -> Double {
-    if let value = value as? Double { return value }
-    if let value = value as? NSNumber { return value.doubleValue }
-    if let value = value as? String { return Double(value) ?? 0 }
-    return 0
-}
-
 /// 648,255 is "648k". A million is "1.2M", ten million is "12M".
 private func formatTokens(_ count: Int) -> String {
     let n = Double(max(0, count))
@@ -1015,23 +1042,6 @@ private func tokenUnit(_ value: Double, _ suffix: String) -> String {
         return "\(whole)\(suffix)"
     }
     return String(format: "%.1f\(suffix)", value)
-}
-
-private func formatSaved(_ bytes: Int64) -> String {
-    if bytes >= 1_000_000_000_000 {
-        return savedUnit(Double(bytes) / 1_000_000_000_000, "TB")
-    }
-    if bytes >= 1_000_000_000 {
-        return savedUnit(Double(bytes) / 1_000_000_000, "GB")
-    }
-    return savedUnit(Double(bytes) / 1_000_000, "MB")
-}
-
-private func savedUnit(_ value: Double, _ name: String) -> String {
-    if value >= 10 {
-        return "\(Int(value.rounded())) \(name) saved"
-    }
-    return String(format: "%.1f \(name) saved", value)
 }
 
 func markImage() -> NSImage? {
