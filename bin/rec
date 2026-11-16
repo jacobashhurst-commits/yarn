@@ -60,7 +60,7 @@ log_line() {
 alert() {
   nohup /usr/bin/osascript \
     -e 'on run argv' \
-    -e 'display alert "Meeting Archive" message (item 1 of argv) as critical' \
+    -e 'display alert "Yarn" message (item 1 of argv) as critical' \
     -e 'end run' \
     -- "$1" >/dev/null 2>&1 &
   disown 2>/dev/null || true

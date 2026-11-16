@@ -204,7 +204,8 @@ def capture(request: Request, stop: threading.Event) -> WavWriter:
     writer: WavWriter | None = None
     started = 0.0
     try:
-        with sd.RawInputStream(
+        with _open_stream(
+            sd,
             samplerate=sample_rate,
             channels=channels,
             dtype="int16",
@@ -250,8 +251,10 @@ def capture(request: Request, stop: threading.Event) -> WavWriter:
                 except Empty:
                     break
     except sd.PortAudioError as exc:
+        # After the stream was running, this is a device that went away
+        # mid-meeting, and what was recorded is kept by the finally below.
         raise CaptureError(
-            f'could not open audio device "{request.device}": {exc}'
+            f'the microphone "{request.device}" stopped: {exc}'
         ) from exc
     finally:
         if writer is not None:
@@ -272,6 +275,88 @@ def capture(request: Request, stop: threading.Event) -> WavWriter:
             overflows, request.raw.name,
         )
     return writer
+
+
+# How many times to ask macOS for the microphone before giving up, and how
+# long to wait between. On 2026-11-16 two starts in a row failed with
+# "Unspecified Audio Hardware Error" (PaErrorCode -9986) while nothing was
+# being transcribed, and the same microphone opened normally minutes later.
+# That error is the Mac's audio system declining to start, not a setting.
+# A short second and third try costs under two seconds and only happens
+# after a failure, so a normal start is exactly as fast as before.
+OPEN_ATTEMPTS = 3
+OPEN_RETRY_SECONDS = 0.8
+
+
+class _Started:
+    """A stream that is already running, usable in a `with` like the original."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def __enter__(self):
+        return self._stream
+
+    def __exit__(self, *exc):
+        return self._stream.__exit__(*exc)
+
+
+def _open_stream(sd, **kwargs):
+    """Open and start the input stream, trying again if macOS refuses.
+
+    Raises CaptureError with words a person can act on. The technical
+    detail, and what else the Mac was doing, go to the log, because the
+    cause of this refusal is not yet known and the next one should say.
+    """
+    last: Exception | None = None
+    for attempt in range(1, OPEN_ATTEMPTS + 1):
+        try:
+            stream = sd.RawInputStream(**kwargs)
+            stream.__enter__()
+            return _Started(stream)
+        except sd.PortAudioError as exc:
+            last = exc
+            log.warning(
+                "microphone did not start (attempt %d of %d): %s",
+                attempt, OPEN_ATTEMPTS, exc,
+            )
+            if attempt < OPEN_ATTEMPTS:
+                time.sleep(OPEN_RETRY_SECONDS)
+    log.warning("state when the microphone would not start: %s", _machine_state())
+    raise CaptureError(
+        f'macOS would not start the microphone ("{kwargs.get("device")}"), '
+        f"so nothing was recorded. Yarn tried {OPEN_ATTEMPTS} times. This is "
+        "the Mac's audio system refusing, not a Yarn setting, and it was not "
+        "because Yarn was busy with another meeting. Wait a few seconds and "
+        "press record again. If it keeps refusing, quit other apps that are "
+        f"using the microphone or playing sound, then try again. ({last})"
+    ) from last
+
+
+def _machine_state() -> str:
+    """One line on what the Mac was doing, for the log. Never raises."""
+    import subprocess
+
+    parts: list[str] = []
+    try:
+        out = subprocess.run(
+            ["/usr/bin/memory_pressure"], capture_output=True, text=True, timeout=3
+        ).stdout.strip().splitlines()
+        if out:
+            parts.append(out[-1].strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        # Names only. These are the things that were open the first time.
+        out = subprocess.run(
+            ["/usr/bin/pgrep", "-lf", "YarnSpeakers|afplay|ollama|whisper-cli|coreaudiod"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        names = sorted({line.split()[1].rsplit("/", 1)[-1] for line in out.splitlines() if len(line.split()) > 1})
+        parts.append("running: " + (", ".join(names) or "none of the usual suspects"))
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    return "; ".join(parts) or "unknown"
 
 
 def _collect_preflight(

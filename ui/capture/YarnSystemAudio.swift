@@ -93,7 +93,10 @@ private func report(_ error: Error) -> String {
     let detail = String(describing: error)
     let message = isPermission(error)
         ? permissionDenied()
-        : "Yarn could not record the audio this Mac is playing. \(detail)"
+        // Not a permission problem: the switch is on and macOS still would
+        // not start the stream. Say that it is the Mac, what to do, and
+        // keep the system's own words last for the log.
+        : "macOS would not start recording the sound this Mac is playing, so the headphone recording was not started. This is the Mac's audio system refusing, not a missing permission, and it was not because Yarn was busy with another meeting. Wait a few seconds and press Headphones again. If it keeps refusing, quit and reopen Yarn. (\(detail))"
     say(message)
     return message
 }

@@ -17,7 +17,7 @@ from queue import Queue
 
 import pytest
 
-from meeting_archive import pipeline
+from meeting_archive import capture, pipeline
 from meeting_archive.capture import (
     SAMPLE_WIDTH,
     CaptureError,
@@ -347,3 +347,67 @@ def test_ffprobe_in_yarns_folder_is_found(tmp_path, monkeypatch):
     monkeypatch.setattr(audio, "tool_directories", lambda: (bin_dir,))
     monkeypatch.setattr(audio.shutil, "which", lambda _name: None)
     assert audio.require_tool("ffprobe") == str(probe)
+
+
+# --- a microphone that will not start ---------------------------------------
+
+
+class _RefusingSoundDevice:
+    """PortAudio saying no `fail` times, then a stream that never yields audio."""
+
+    class PortAudioError(Exception):
+        pass
+
+    def __init__(self, fail):
+        self.fail = fail
+        self.opened = 0
+
+    def RawInputStream(self, **kwargs):
+        outer = self
+
+        class Stream:
+            def __enter__(self):
+                outer.opened += 1
+                if outer.opened <= outer.fail:
+                    raise outer.PortAudioError(
+                        "Error starting stream: Internal PortAudio error [PaErrorCode -9986]"
+                    )
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Stream()
+
+
+def test_a_microphone_that_refuses_once_is_tried_again(monkeypatch):
+    monkeypatch.setattr(capture, "OPEN_RETRY_SECONDS", 0)
+    sd = _RefusingSoundDevice(fail=1)
+    with capture._open_stream(sd, device="Mic"):
+        pass
+    assert sd.opened == 2
+
+
+def test_a_microphone_that_keeps_refusing_says_so_in_plain_words(monkeypatch):
+    monkeypatch.setattr(capture, "OPEN_RETRY_SECONDS", 0)
+    monkeypatch.setattr(capture, "_machine_state", lambda: "test")
+    sd = _RefusingSoundDevice(fail=99)
+    with pytest.raises(capture.CaptureError) as caught:
+        capture._open_stream(sd, device="MacBook Neo Microphone")
+    message = str(caught.value)
+    assert sd.opened == capture.OPEN_ATTEMPTS
+    assert "nothing was recorded" in message
+    assert "press record again" in message
+    assert "not because Yarn was busy" in message
+    # The system's own code is still there for whoever reads the log.
+    assert "-9986" in message
+
+
+def test_the_machine_state_line_never_raises(monkeypatch):
+    import subprocess
+
+    def boom(*a, **k):
+        raise OSError("no such tool")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert capture._machine_state() == "unknown"
