@@ -820,6 +820,7 @@ enum YarnSetup {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.regular)
+        YarnAppMenu.install(appName: "Yarn Setup")
         app.run()
     }
 }

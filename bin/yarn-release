@@ -120,6 +120,7 @@ swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$YARN/Contents/Mac
   "$REPO_DIR/ui/dock/YarnSettings.swift" \
   "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
   "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
+  "$REPO_DIR/ui/shared/YarnAppMenu.swift" \
   -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
   -framework CoreAudio -framework Foundation
 "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$YARN"
@@ -148,6 +149,7 @@ fi
 swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP/Contents/MacOS/YarnSetup" \
   "$REPO_DIR/ui/setup/YarnSetup.swift" \
   "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
+  "$REPO_DIR/ui/shared/YarnAppMenu.swift" \
   -framework AppKit
 ditto "$INNER" "$APP/Contents/Resources/yarn"
 "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP" Setup

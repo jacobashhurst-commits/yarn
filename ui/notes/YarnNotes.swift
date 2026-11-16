@@ -288,6 +288,7 @@ enum YarnNotesApp {
         let delegate = Controller(ma: ma, meetingID: meeting, attendees: attendees)
         app.delegate = delegate
         app.setActivationPolicy(.regular)
+        YarnAppMenu.install(appName: "Yarn Notes")
         app.run()
     }
 }

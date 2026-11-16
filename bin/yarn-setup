@@ -103,6 +103,7 @@ PLIST
   "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" "Setup" || return 1
   swiftc "${SWIFT_TARGET[@]}" -parse-as-library -O -o "$APP_BIN.partial" \
     "$SWIFT_SRC" "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
+    "$REPO_DIR/ui/shared/YarnAppMenu.swift" \
     -framework AppKit >/dev/null 2>&1 || return 1
   mv -f "$APP_BIN.partial" "$APP_BIN"
 }

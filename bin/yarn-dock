@@ -115,6 +115,7 @@ elif command -v swiftc >/dev/null 2>&1 && [[ -f "$SWIFT_SRC" ]]; then
     "$(dirname "$SWIFT_SRC")/YarnSettings.swift" \
     "$REPO_DIR/ui/welcome/YarnWelcome.swift" \
     "$REPO_DIR/ui/capture/YarnSystemAudio.swift" \
+    "$REPO_DIR/ui/shared/YarnAppMenu.swift" \
     -framework AppKit -framework ScreenCaptureKit -framework CoreMedia \
     -framework CoreAudio -framework Foundation
   mv -f "$APP_BIN.partial" "$APP_BIN"

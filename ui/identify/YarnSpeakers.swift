@@ -1388,8 +1388,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+// An entry point rather than top-level statements, so the shared menu file
+// can be compiled in beside this one.
+@main
+enum YarnSpeakersApp {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.regular)
+        YarnAppMenu.install(appName: "Yarn Speakers")
+        app.run()
+    }
+}

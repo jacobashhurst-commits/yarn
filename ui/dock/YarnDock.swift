@@ -176,6 +176,21 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         false
     }
 
+    /// The sound of a headphone call is captured inside this app. Cmd-Q in
+    /// the middle of one would cut the other side of the meeting off with
+    /// nothing on screen to say so. The microphone job is separate and is
+    /// not affected either way.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let snap = read()
+        guard snap.recording, snap.mode == "call" else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "A headphone recording is running"
+        alert.informativeText = "Quitting Yarn now stops recording the other people on the call. Stop the recording first to keep the whole meeting."
+        alert.addButton(withTitle: "Keep Recording")
+        alert.addButton(withTitle: "Quit Anyway")
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateCancel : .terminateNow
+    }
+
     private var offeredWelcome = false
     private var welcomeController: YarnWelcomeWindow?
 
@@ -1019,30 +1034,6 @@ private func savedUnit(_ value: Double, _ name: String) -> String {
     return String(format: "%.1f \(name) saved", value)
 }
 
-/// Cmd-C and Cmd-V only fire when the app has an Edit menu. Without it,
-/// the chat field and the answer text cannot copy or paste.
-private func editMenu() -> NSMenu {
-    let main = NSMenu()
-    let editItem = NSMenuItem()
-    editItem.title = "Edit"
-    let edit = NSMenu(title: "Edit")
-    func item(_ title: String, _ action: Selector, _ key: String, shift: Bool = false) -> NSMenuItem {
-        let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        entry.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]
-        return entry
-    }
-    edit.addItem(item("Undo", Selector(("undo:")), "z"))
-    edit.addItem(item("Redo", Selector(("redo:")), "Z", shift: true))
-    edit.addItem(.separator())
-    edit.addItem(item("Cut", #selector(NSText.cut(_:)), "x"))
-    edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c"))
-    edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v"))
-    edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a"))
-    editItem.submenu = edit
-    main.addItem(editItem)
-    return main
-}
-
 func markImage() -> NSImage? {
     guard let url = Bundle.main.url(forResource: "yarn-mark", withExtension: "png") else { return nil }
     return NSImage(contentsOf: url)
@@ -1174,7 +1165,7 @@ enum YarnDock {
         let delegate = Panel()
         app.delegate = delegate
         app.setActivationPolicy(.regular)
-        app.mainMenu = editMenu()
+        YarnAppMenu.install(settings: (delegate, #selector(Panel.settings)))
         app.run()
     }
 }

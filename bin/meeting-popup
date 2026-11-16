@@ -30,6 +30,8 @@ done
 # ask them one after another, and those dialogs are not the Yarn window.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SWIFT_SRC="$REPO_DIR/ui/notes/YarnNotes.swift"
+# Shared Edit menu. Without it Cmd-C and Cmd-V do nothing in the window.
+MENU_SRC="$REPO_DIR/ui/shared/YarnAppMenu.swift"
 APP_DIR="$HOME/Library/Application Support/Yarn/Yarn Notes.app"
 APP_BIN="$APP_DIR/Contents/MacOS/YarnNotes"
 
@@ -57,13 +59,14 @@ PLIST
     "$APP_DIR/Contents/Resources/yarn-mark.png" || return 1
   "$REPO_DIR/bin/yarn-icon" "$REPO_DIR/meeting_archive/assets/yarn-mark.png" "$APP_DIR" || return 1
   swiftc -target arm64-apple-macos13.0 -parse-as-library -O -o "$APP_BIN.partial" "$SWIFT_SRC" \
+    "$MENU_SRC" \
     -framework AppKit >/dev/null 2>&1 || return 1
   mv -f "$APP_BIN.partial" "$APP_BIN"
   codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
 }
 
 if [[ -f "$SWIFT_SRC" ]]; then
-  if [[ ! -x "$APP_BIN" || ! -f "$APP_DIR/Contents/Info.plist" || "$SWIFT_SRC" -nt "$APP_BIN" ]]; then
+  if [[ ! -x "$APP_BIN" || ! -f "$APP_DIR/Contents/Info.plist" || "$SWIFT_SRC" -nt "$APP_BIN" || "$MENU_SRC" -nt "$APP_BIN" ]]; then
     build_notes_app || echo "meeting-popup: could not build the window, using dialogs" >&2
   fi
   if [[ -x "$APP_BIN" ]]; then
