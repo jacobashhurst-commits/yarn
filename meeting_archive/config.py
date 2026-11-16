@@ -165,6 +165,10 @@ class SummaryConfig:
     # Used only to detect whether Ollama is already running. `ollama list`
     # would start the daemon; a short HTTP probe will not.
     host: str = "http://127.0.0.1:11434"
+    # The summary prompt is the transcript. A host that is not this Mac
+    # would be sent every meeting, so anything else is refused unless this
+    # is turned on by hand in config.toml. No menu or window sets it.
+    allow_remote_host: bool = False
     model: str = "qwen3.5:9b"
     timeout_s: int = 900
     # Longer transcripts are summarized in local chunks, then combined.
@@ -269,6 +273,14 @@ class Config:
     def ensure_dirs(self) -> None:
         for d in self.all_dirs():
             d.mkdir(parents=True, exist_ok=True)
+        # Transcripts, notes, audio and voice clips all live under here. The
+        # default mode let every other account on this Mac read them. Owner
+        # only on the top folder closes everything beneath it in one place,
+        # including files written by tools that never heard of this rule.
+        try:
+            os.chmod(self.root, 0o700)
+        except OSError:
+            pass
 
     def label(self, channel: str) -> str:
         return {
@@ -467,6 +479,7 @@ def load_config(path: Path | None = None) -> Config:
         "enabled",
         "command",
         "host",
+        "allow_remote_host",
         "model",
         "timeout_s",
         "chunk_chars",
@@ -581,7 +594,12 @@ def write_setting(cfg: Config, key: str, value) -> dict:
         except (OSError, ValueError):
             data = {}
     data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # The menu bar, the Settings window and the watcher all read this file
+    # every few seconds. Writing it in place let one of them read half a
+    # file, which loads as no settings at all.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     _apply_settings_overlay(cfg)
     return data
 

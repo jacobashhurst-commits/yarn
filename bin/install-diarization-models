@@ -30,10 +30,21 @@ echo "downloading local speaker segmentation model..."
 curl -fL --retry 3 -o "$tmp/segmentation.tar.bz2" \
   "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
 tar -xjf "$tmp/segmentation.tar.bz2" -C "$model_dir"
+# Same checks as meeting_archive/setup.py. A model that is not the expected
+# file is removed, not used.
+check() {
+  if [[ "$(shasum -a 256 "$1" | cut -d' ' -f1)" != "$2" ]]; then
+    rm -f "$1"
+    echo "$(basename "$1") is not the file Yarn expects and was removed. Run this again." >&2
+    exit 1
+  fi
+}
+check "$segmentation" 220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079
 
 echo "downloading local speaker embedding model..."
 curl -fL --retry 3 -o "$embedding.partial" \
   "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+check "$embedding.partial" 1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b
 mv "$embedding.partial" "$embedding"
 
 echo "installed local diarization models in $model_dir"

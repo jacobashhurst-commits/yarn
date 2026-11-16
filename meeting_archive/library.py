@@ -484,19 +484,54 @@ def serve(cfg: Config) -> None:
     httpd.serve_forever()
 
 
+def _is_local_host_header(value: str) -> bool:
+    host = value.strip().casefold()
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def _handler(cfg: Config, token: str):
     class Handler(BaseHTTPRequestHandler):
+        def _from_this_mac(self) -> bool:
+            """Refuse a request a web page reached through another name.
+
+            The server only listens on 127.0.0.1, but a page on the internet
+            can point its own domain at that address. Its requests then
+            arrive here carrying that domain as Host. A browser opening the
+            library does not.
+            """
+            return _is_local_host_header(self.headers.get("Host") or "")
+
+        def _has_token(self, given: str) -> bool:
+            return len(given) == len(token) and secrets.compare_digest(given, token)
+
         def do_GET(self) -> None:  # noqa: N802
-            path = self.path.split("?", 1)[0]
+            if not self._from_this_mac():
+                self._send(403, b"Refused", "text/plain")
+                return
+            path, _, query = self.path.partition("?")
             if path == "/status":
                 self._send(200, _SERVER_MARK, "text/plain")
                 return
             if path in ("/", "/library"):
+                # The page lists every meeting by title. Any program on this
+                # Mac could ask for it, so it needs the same token the
+                # delete button does.
+                given = (parse_qs(query).get("token") or [""])[0]
+                if not self._has_token(given):
+                    self._send(403, b"Refused", "text/plain")
+                    return
                 self._send(200, render_html(cfg).read_bytes(), "text/html; charset=utf-8")
                 return
             self._send(404, b"Not found", "text/plain")
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._from_this_mac():
+                self._send(403, b"Refused", "text/plain")
+                return
             path = self.path.split("?", 1)[0]
             if path not in ("/delete", "/rename"):
                 self._send(404, b"Not found", "text/plain")
@@ -506,7 +541,7 @@ def _handler(cfg: Config, token: str):
             fields = parse_qs(raw.decode("utf-8", "replace"))
             given = (fields.get("token") or [""])[0]
             meeting_id = (fields.get("meeting") or [""])[0]
-            if len(given) != len(token) or not secrets.compare_digest(given, token):
+            if not self._has_token(given):
                 self._send(403, b"Refused", "text/plain")
                 return
             try:

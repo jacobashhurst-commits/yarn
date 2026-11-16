@@ -184,6 +184,11 @@ def probe_server(cfg: Config) -> str | None:
 
 def ollama_problem(cfg: Config) -> str | None:
     """None when the configured local model answers on the Ollama host."""
+    from .summarize import remote_host_refusal
+
+    refused = remote_host_refusal(cfg.summary)
+    if refused:
+        return refused
     host = cfg.summary.host.rstrip("/")
     model = cfg.summary.model
     try:

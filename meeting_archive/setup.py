@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import re
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -20,8 +21,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# A commit, not "main". "main" is whatever the repository holds today, and
+# the checksum below is for one exact file.
 WHISPER_GGML = (
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+    "5359861c739e955e79d9a303bcbc70fb988958b1/"
     "ggml-large-v3-turbo.bin"
 )
 DIARIZE_SEG = (
@@ -47,8 +51,10 @@ OLLAMA_ZIP = "https://ollama.com/download/Ollama-darwin.zip"
 # macOS /usr/bin/python3 is still 3.9. It has no tomllib, and Setup used to
 # stop on the first step with that raw import error. uv installs a current
 # CPython into this user's Library, with no admin password.
+# A fixed release. "latest" is a different file every few days, so it could
+# never be checked against anything.
 UV_ARM64 = (
-    "https://github.com/astral-sh/uv/releases/latest/download/"
+    "https://github.com/astral-sh/uv/releases/download/0.12.15/"
     "uv-aarch64-apple-darwin.tar.gz"
 )
 SWIFTBAR_ZIP = (
@@ -56,6 +62,29 @@ SWIFTBAR_ZIP = (
     "v2.1.1/SwiftBar.v2.1.1.b597.zip"
 )
 MIN_FREE_BYTES = 10 * 1024 ** 3
+
+# What each download must be, byte for byte. These programs and models run
+# over every meeting on this Mac, so a file swapped on the way here, or on
+# the host, is refused instead of installed. The values are the ones the
+# publishers list (GitHub release digests, Hugging Face's file hash, uv's
+# own .sha256). The speaker embedding has no published digest; its value was
+# taken from a copy downloaded from this same release.
+# Changing a URL above means changing its line here.
+DOWNLOAD_SHA256 = {
+    WHISPER_GGML: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    DIARIZE_EMB: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+    FFMPEG_STATIC: "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
+    FFPROBE_STATIC: "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64",
+    UV_ARM64: "dc304b9ed1b24174572290fba60ac3f6fe63c73a671f0439e62a91375841964d",
+    SWIFTBAR_ZIP: "fcdec490782d6587046304044951c63de49ac422fc63892a6fab2dd7bc70c0cd",
+}
+# The segmentation model arrives inside an archive with no published digest,
+# so the model file that comes out of it is what gets checked.
+SEGMENTATION_MODEL_SHA256 = (
+    "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"
+)
+# Ollama's download has no fixed version to pin. It is a signed Mac app, and
+# install_app_from_zip refuses one whose signature does not verify.
 
 STEPS: list[tuple[str, str]] = [
     ("prereqs", "System prerequisites"),
@@ -435,7 +464,41 @@ def _retryable_http(code: int) -> bool:
     return code in {408, 429, 500, 502, 503, 504} or code == 416
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_file(path: Path, expected: str, name: str = "") -> None:
+    """Delete and refuse a file that is not the one Yarn expects.
+
+    Deleting matters: every step skips a file that is already on disk, so a
+    wrong one left in place would be used by the next run of Setup.
+    """
+    actual = file_sha256(path)
+    if actual == expected:
+        return
+    path.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"The download of {name or path.name} is not the file Yarn expects, "
+        "so it was removed and not installed. Run Yarn Setup again. If this "
+        "keeps happening, the network may be changing downloads on the way."
+    )
+
+
 def download(url: str, dest: Path, step_id: str, *, long: bool = False) -> None:
+    _download_unverified(url, dest, step_id, long=long)
+    expected = DOWNLOAD_SHA256.get(url)
+    if expected:
+        verify_file(dest, expected)
+
+
+def _download_unverified(
+    url: str, dest: Path, step_id: str, *, long: bool = False
+) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
     # Per read, not for the whole file. A long model can take many minutes
@@ -1255,6 +1318,7 @@ def step_speakers(repo: Path) -> None:
     if not seg.is_file():
         download(DIARIZE_SEG, archive, "speakers", long=True)
         extract_segmentation_archive(archive, seg)
+        verify_file(seg, SEGMENTATION_MODEL_SHA256, "the speaker model")
         emit({"type": "log", "id": "speakers", "text": f"Segmentation model in {seg.parent}"})
     if not emb.is_file():
         download(DIARIZE_EMB, emb, "speakers", long=True)

@@ -57,8 +57,14 @@ install_python() {
     local tmp found
     tmp="$(mktemp -d)"
     if ! curl -fsSL -o "$tmp/uv.tar.gz" \
-      "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz"; then
+      "https://github.com/astral-sh/uv/releases/download/0.12.15/uv-aarch64-apple-darwin.tar.gz"; then
       echo "Yarn needs Python 3.11 or newer, and downloading it did not work. Check the internet connection and run Setup again." >&2
+      rm -rf "$tmp"
+      exit 1
+    fi
+    # Same pinned release and checksum as meeting_archive/setup.py.
+    if [[ "$(shasum -a 256 "$tmp/uv.tar.gz" | cut -d' ' -f1)" != "dc304b9ed1b24174572290fba60ac3f6fe63c73a671f0439e62a91375841964d" ]]; then
+      echo "The Python installer download is not the file Yarn expects, so it was not used. Run Setup again." >&2
       rm -rf "$tmp"
       exit 1
     fi

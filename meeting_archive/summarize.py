@@ -7,6 +7,7 @@ import logging
 import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 import time
 from datetime import datetime
@@ -78,6 +79,28 @@ def should_attempt_summary(cfg, meeting_id: str = "", now: datetime | None = Non
     return False
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def is_local_host(url: str) -> bool:
+    """True when this address is a model server on this Mac."""
+    try:
+        name = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return name.casefold() in _LOOPBACK_HOSTS
+
+
+def remote_host_refusal(config) -> str:
+    """Why this summary model address is refused, or "" when it is allowed."""
+    if is_local_host(config.host) or getattr(config, "allow_remote_host", False):
+        return ""
+    return (
+        "The summary model address is not this Mac, so nothing was sent to "
+        "it. Yarn only sends a transcript to a model on this computer."
+    )
+
+
 class SummaryUnavailable(RuntimeError):
     pass
 
@@ -147,6 +170,8 @@ class Summarizer:
         Must not start the daemon. `ollama list` and `ollama run` will, which
         is exactly what we are trying to avoid by keeping it off during the day.
         """
+        if remote_host_refusal(self.config):
+            return False
         url = self.config.host.rstrip("/") + "/api/tags"
         try:
             urllib.request.urlopen(url, timeout=0.4)
@@ -259,6 +284,11 @@ class Summarizer:
     def _generate(self, url: str, payload: dict) -> str:
         # Stream so each new token is written while the model is still
         # talking. The Dock reads that file once a second.
+        # The last line before a transcript leaves this process. Checked
+        # here as well as in is_running so no caller can skip it.
+        refused = remote_host_refusal(self.config)
+        if refused:
+            raise SummaryUnavailable(refused)
         payload = dict(payload)
         payload["stream"] = True
         body = json.dumps(payload).encode("utf-8")
