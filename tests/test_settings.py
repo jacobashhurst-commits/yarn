@@ -102,3 +102,21 @@ def test_settings_do_not_overwrite_each_other(home):
     setting("evening_hour", "19")
     cfg = load_config()
     assert (cfg.space_saver, cfg.summary.profile, cfg.summary.evening_hour) == (True, "short", 19)
+
+
+def test_the_retention_choices_are_the_same_everywhere():
+    """Python owns the list. The Settings window and the menu bar each spell
+    it out again, and a choice in one that the others lack would be a setting
+    you can pick in one place and not see in another."""
+    from pathlib import Path
+
+    from meeting_archive.config import RETENTION_CHOICES
+
+    repo = Path(__file__).resolve().parents[1]
+    swift = (repo / "ui" / "dock" / "YarnSettings.swift").read_text()
+    menu = (repo / "ui" / "meeting.5s.sh.template").read_text()
+    for name, label, _days in RETENTION_CHOICES:
+        assert f'("{name}", "{label}", true)' in swift, name
+        assert f'"{name}:{label}"' in menu, name
+    assert swift.count('", true),\n        ("never", "Never", true),') >= 1
+    assert len(RETENTION_CHOICES) == 7

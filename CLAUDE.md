@@ -209,6 +209,27 @@ the same words on `room` are somebody else. There are tests for both.
   `ma savings --json`; do not put the formula back into Swift.
 - **Every Swift app compiles `ui/shared/YarnAppMenu.swift`.** Without a
   main menu, Cmd-C/V/X/A/Z do nothing in that app's text boxes.
+- **Tidy-up matches lines by number and checks each one.** `cleanup.py`
+  numbers every line, sends the meeting in pieces, and keeps a returned
+  line only if it still says what was said (`_same_words`). The speaker
+  and the time never come from the model. Matching by position let one
+  dropped line move every later line onto the wrong speaker. It is on by
+  default, so do not loosen these checks.
+- **A refused microphone is retried, explained, and logged.** PortAudio
+  -9986 ("Unspecified Audio Hardware Error") and ScreenCaptureKit -3818
+  both happened on 2026-11-16 on an 8 GB MacBook Neo while nothing was
+  being processed. The cause is not known: it did not reproduce with a
+  clip playing or with the summary model loaded. `capture._open_stream`
+  tries three times and logs `_machine_state()`. If it happens again,
+  read `logs/recorder.log` before guessing.
+- **Retention has one list.** `config.RETENTION_CHOICES`, used for audio
+  and for saved pages. The Settings window and the menu template repeat
+  it, and a test fails if they drift.
+- **External apps are behind one switch.** `connect.external_enabled`.
+  Off on a new install; `ma connect` refuses while it is off. Ollama's
+  own client is local and is not gated.
+- **Written notes are never speech.** `notes["detail"]` is indexed as its
+  own passage labelled "Written notes", outside the spoken chunks.
 - **A Chroma collection handle is pinned to a uuid.** `ma rebuild` drops and
   recreates the collection, which invalidates the handle held by the running
   watcher. `MeetingStore._run` reopens on that error; without it a rebuild
@@ -217,7 +238,7 @@ the same words on `room` are somebody else. There are tests for both.
 ## Tests
 
 ```bash
-python -m pytest          # 548 tests, ~20s
+python -m pytest          # 591 tests, ~20s
 ```
 
 Whisper and sherpa-onnx inference are stubbed dependencies. Their orchestration is

@@ -77,6 +77,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let window: NSWindow
     let nameField = NSTextField(string: "")
     let peopleField = NSTextField(string: "")
+    /// Free text. The first box is the meeting's name, which left nowhere
+    /// to write an actual note.
+    let detailView = NSTextView()
     let ma: String
     let meetingID: String
 
@@ -84,7 +87,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.ma = ma
         self.meetingID = meetingID
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -123,7 +126,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let word = label("Yarn", size: 13, weight: .medium, color: YarnColor.navy, mono: true)
         let heading = label("This meeting", size: 26, weight: .semibold, color: YarnColor.navy, mono: false)
         let intro = label(
-            "Both are optional. Save what you know, or leave them for later.",
+            "All optional. Save what you know, or leave them for later.",
             size: 13,
             weight: .regular,
             color: YarnColor.slate,
@@ -143,6 +146,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             peopleField,
             placeholder: "separated by comma"
         )
+
+        let remember = notesSection()
 
         let skip = YarnButton(title: "Not now", filled: false)
         skip.target = self
@@ -169,7 +174,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         header.alignment = .centerY
         header.spacing = 12
 
-        let root = NSStackView(views: [header, intro, about, who, buttons])
+        let root = NSStackView(views: [header, intro, about, who, remember, buttons])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 16
@@ -177,6 +182,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.translatesAutoresizingMaskIntoConstraints = false
         about.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -56).isActive = true
         who.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -56).isActive = true
+        remember.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -56).isActive = true
         buttons.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -56).isActive = true
 
         let content = NSView()
@@ -229,6 +235,56 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return card
     }
 
+    /// A few lines of your own, shown above the summary on the transcript
+    /// and found by search. Return makes a new line here; Save is the button.
+    func notesSection() -> NSView {
+        let heading = label("Anything to remember?", size: 15, weight: .semibold, color: YarnColor.navy, mono: false)
+        let detail = label("Your own notes. They go on the transcript, above the summary.", size: 13, weight: .regular, color: YarnColor.slate, mono: false)
+        detail.maximumNumberOfLines = 2
+
+        detailView.isRichText = false
+        detailView.allowsUndo = true
+        detailView.font = NSFont.systemFont(ofSize: 14)
+        detailView.textColor = YarnColor.ink
+        detailView.drawsBackground = false
+        detailView.isVerticallyResizable = true
+        detailView.isHorizontallyResizable = false
+        detailView.autoresizingMask = [.width]
+        detailView.textContainer?.widthTracksTextView = true
+        detailView.textContainerInset = NSSize(width: 4, height: 6)
+        detailView.setAccessibilityLabel("Your notes on this meeting")
+
+        let scroll = NSScrollView()
+        scroll.documentView = detailView
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .bezelBorder
+        scroll.drawsBackground = true
+        scroll.backgroundColor = YarnColor.canvas
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(equalToConstant: 84).isActive = true
+
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.backgroundColor = YarnColor.cloud.cgColor
+        card.layer?.cornerRadius = 12
+        let stack = NSStackView(views: [heading, detail, scroll])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: card.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+        ])
+        return card
+    }
+
     func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, mono: Bool) -> NSTextField {
         let field = NSTextField(wrappingLabelWithString: text)
         field.font = mono
@@ -246,13 +302,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func saveNotes() {
         let notes = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let people = peopleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if notes.isEmpty && people.isEmpty {
+        let detail = detailView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        if notes.isEmpty && people.isEmpty && detail.isEmpty {
             NSApp.terminate(nil)
             return
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ma)
-        process.arguments = ["notes", meetingID, "--notes", notes, "--attendees", people]
+        var arguments = ["notes", meetingID, "--notes", notes, "--attendees", people]
+        // Left off when empty, so an older `ma` that has no such option
+        // still saves the name and the attendees.
+        if !detail.isEmpty { arguments += ["--detail", detail] }
+        process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try? process.run()

@@ -31,10 +31,24 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         title: "Wait when the Mac is busy",
         caption: "While you are recording and memory is tight, transcription and summaries wait. The recording always comes first."
     )
-    private let saver = SettingSwitch(
-        title: "Space saver",
-        caption: "Keeps a web page only for meetings from the last 30 days. Older ones are made when you open them. Transcripts, notes and audio are never touched."
+    private let pages = SettingChoices()
+    private let external = SettingSwitch(
+        title: "Connect external AI apps",
+        caption: "Lets Claude, Cursor or ChatGPT search your meetings. Off, Yarn is local from end to end."
     )
+    private var externalBody: NSView?
+    private var externalOn = false
+    private var savedPages = "never"
+    private static let retentionChoices: [(String, String, Bool)] = [
+        ("1_week", "1 week", true),
+        ("2_weeks", "2 weeks", true),
+        ("1_month", "1 month", true),
+        ("3_months", "3 months", true),
+        ("6_months", "6 months", true),
+        ("1_year", "1 year", true),
+        ("never", "Never", true),
+    ]
+    private static let retentionIDs = retentionChoices.map { $0.0 }
     private let retention = SettingChoices()
     private let process = SettingChoices()
     private let summary = SettingChoices()
@@ -152,8 +166,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         pressure.onChange = { [weak self] on in
             self?.write("pause_on_pressure", on ? "on" : "off")
         }
-        saver.onChange = { [weak self] on in
-            self?.spaceSaverChanged(on)
+        pages.onPick = { [weak self] id in
+            self?.pagesChanged(id)
+        }
+        external.onChange = { [weak self] on in
+            self?.externalChanged(on)
         }
         nameField.placeholderString = "Your name"
         nameField.font = .systemFont(ofSize: 13)
@@ -222,11 +239,8 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             ("20", "8 pm", true),
             ("21", "9 pm", true),
         ], selected: "18")
-        retention.show([
-            ("1_week", "1 week", true),
-            ("1_month", "1 month", true),
-            ("never", "Never", true),
-        ], selected: "1_week")
+        retention.show(Self.retentionChoices, selected: "1_week")
+        pages.show(Self.retentionChoices, selected: "never")
         process.show([
             ("after_meeting", "After each meeting", true),
             ("evening", "Evening (when the laptop is free)", true),
@@ -294,7 +308,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
                 caption: "When do you want Yarn to automatically delete your audio recordings? It saves space and increases privacy. A recording that never became a transcript is kept.",
                 body: retention
             ),
-            settingsCard(stack([saver], spacing: 0)),
+            group(
+                "Saved web pages",
+                caption: "Space saver. How long a meeting keeps its saved page before Yarn removes it. After that the page is made again whenever you open the meeting from the Library. Transcripts, notes, summaries and audio are never touched by this.",
+                body: pages
+            ),
 
             section("Brief and summaries"),
             group("Process when", body: process),
@@ -306,16 +324,8 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             settingsCard(stack([pressure], spacing: 0)),
             settingsCard(briefRows),
 
-            section("Integrations"),
-            group(
-                "Also search from another app",
-                caption: "Ask Yarn stays on this Mac. An app you connect here receives the passages it searches for, and they go wherever that app sends them.",
-                body: stack([
-                    link("Claude", #selector(connectClaude), self),
-                    link("Cursor", #selector(connectCursor), self),
-                    link("ChatGPT", #selector(connectChatGPT), self),
-                ], spacing: 2)
-            ),
+            section("External AI apps"),
+            externalCard(),
 
             section("Tools"),
             settingsCard(stack([
@@ -373,6 +383,32 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             form.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -12),
             form.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -8),
         ])
+    }
+
+    /// The switch, and under it the apps and what switching it on means.
+    /// The apps only show once it is on, so the warning is read first.
+    private func externalCard() -> NSView {
+        let warning = label(
+            "With this on, Yarn is no longer a fully local setup. Recording, transcription, summaries and Ask Yarn still run on this Mac, but an app you connect receives the meeting passages it searches for, and they go wherever that app sends them. Yarn cannot see or control that.",
+            size: 12,
+            weight: .regular,
+            color: YarnColor.warn
+        )
+        warning.maximumNumberOfLines = 8
+        warning.preferredMaxLayoutWidth = 380
+        let pick = label("Choose an app to connect:", size: 12, weight: .regular, color: YarnColor.slate)
+        let body = stack([
+            warning,
+            pick,
+            link("Claude", #selector(connectClaude), self),
+            link("Cursor", #selector(connectCursor), self),
+            link("ChatGPT", #selector(connectChatGPT), self),
+        ], spacing: 6)
+        body.isHidden = true
+        externalBody = body
+        let rows = stack([external, body], spacing: 12)
+        rows.detachesHiddenViews = true
+        return settingsCard(rows)
     }
 
     private func section(_ title: String) -> NSView {
@@ -433,7 +469,6 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         suggest.setOn(data["suggest_names_popup"] == nil ? true : boolean(data["suggest_names_popup"]))
         cleanup.setOn(data["cleanup_enabled"] == nil ? true : boolean(data["cleanup_enabled"]))
         pressure.setOn(data["pause_on_pressure"] == nil ? true : boolean(data["pause_on_pressure"]))
-        saver.setOn(boolean(data["space_saver"]))
         let floorValue = (data["min_participant_s"] as? NSNumber)?.doubleValue ?? 3
         floor.select(known(String(Int(floorValue)), fallback: "3", allowed: ["0", "2", "3", "5"]))
         profile.select(known(text(data["summary_profile"]), fallback: "default", allowed: ["default", "short", "detailed", "actions", "sales", "technical"]))
@@ -442,7 +477,13 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             nameField.stringValue = Self.ownName()
         }
         let kept = text(data["audio_retention"])
-        retention.select(kept == "month" ? "1_month" : known(kept, fallback: "1_week", allowed: ["1_week", "1_month", "never"]))
+        retention.select(kept == "month" ? "1_month" : known(kept, fallback: "1_week", allowed: Self.retentionIDs))
+        // The first version of Space saver was a switch that meant a month.
+        var keptPages = text(data["page_retention"])
+        if keptPages.isEmpty, boolean(data["space_saver"]) { keptPages = "1_month" }
+        savedPages = known(keptPages, fallback: "never", allowed: Self.retentionIDs)
+        pages.select(savedPages)
+        refreshExternal(saved: data["external_apps"])
         process.select(known(text(data["summarize_when"]), fallback: "after_meeting", allowed: ["after_meeting", "evening", "manual"]))
         let briefOn = boolean(data["brief_on_login"])
         brief.setOn(briefOn)
@@ -518,45 +559,92 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         write("own_name", name)
     }
 
-    /// Turning it on is the one setting that removes files, so it says what
-    /// will go and how much, and waits for a yes. Turning it off removes
-    /// nothing and pages come back the next time they are opened.
-    private func spaceSaverChanged(_ on: Bool) {
-        guard on else {
-            write("space_saver", "off")
+    /// Shortening how long pages are kept is the one setting that removes
+    /// files, so it says what will go and how much, and waits for a yes.
+    /// Choosing Never removes nothing.
+    private func pagesChanged(_ id: String) {
+        guard id != savedPages else { return }
+        if id == "never" {
+            pages.select(id)
+            write("page_retention", id)
             return
         }
         let ma = paths.ma
+        let wording = Self.retentionChoices.first { $0.0 == id }?.1.lowercased() ?? id
         writer.async { [weak self] in
-            let preview = Self.capture(ma, ["space-saver", "--json"])
+            let preview = Self.capture(ma, ["space-saver", "--json", "--keep", id])
             DispatchQueue.main.async {
                 guard let self else { return }
                 let count = integer(preview["count"]) ?? 0
                 let size = text(preview["label"])
                 let alert = NSAlert()
-                alert.messageText = "Turn on Space saver?"
+                alert.messageText = "Keep saved pages for \(wording)?"
                 alert.informativeText = count > 0
-                    ? "This removes \(count) saved web page\(count == 1 ? "" : "s") of meetings older than 30 days and frees \(size). They are made again whenever you open one. Your transcripts, notes, summaries and audio are not touched."
-                    : "Nothing needs removing right now. From here on, Yarn keeps a web page only for meetings from the last 30 days. Your transcripts, notes, summaries and audio are not touched."
-                alert.addButton(withTitle: "Turn On")
+                    ? "This removes \(count) saved web page\(count == 1 ? "" : "s") of older meetings now and frees \(size). Each one is made again when you open that meeting from the Library. Your transcripts, notes, summaries and audio are not touched."
+                    : "Nothing needs removing right now. From here on a meeting keeps its saved page for \(wording). Your transcripts, notes, summaries and audio are not touched."
+                alert.addButton(withTitle: "Keep for \(wording)")
                 alert.addButton(withTitle: "Cancel")
                 alert.beginSheetModal(for: self.window) { answer in
                     guard answer == .alertFirstButtonReturn else {
-                        self.saver.setOn(false)
+                        self.pages.select(self.savedPages)
                         return
                     }
-                    self.write("space_saver", "on")
+                    self.pages.select(id)
+                    self.savedPages = id
+                    self.write("page_retention", id)
                     self.writer.async {
-                        let done = Self.capture(ma, ["space-saver", "--purge", "--json"])
+                        let done = Self.capture(ma, ["space-saver", "--purge", "--json", "--keep", id])
                         DispatchQueue.main.async {
-                            let freed = text(done["label"])
                             if (integer(done["count"]) ?? 0) > 0 {
-                                self.flash("Space saver is on. Freed \(freed).")
+                                self.flash("Freed \(text(done["label"])).")
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// The saved switch if there is one. Otherwise ask whether an app is
+    /// already connected: someone who connected Claude before this switch
+    /// existed should see it on, because on their Mac it is.
+    private func refreshExternal(saved: Any?) {
+        if saved != nil {
+            showExternal(boolean(saved))
+            return
+        }
+        let ma = paths.ma
+        writer.async { [weak self] in
+            let status = Self.capture(ma, ["connect", "status"])
+            DispatchQueue.main.async { self?.showExternal(boolean(status["enabled"])) }
+        }
+    }
+
+    private func showExternal(_ on: Bool) {
+        externalOn = on
+        external.setOn(on)
+        externalBody?.isHidden = !on
+    }
+
+    private func externalChanged(_ on: Bool) {
+        if on {
+            showExternal(true)
+            write("external_apps", "on")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Disconnect external AI apps?"
+        alert.informativeText = "Yarn removes itself from Claude and Cursor, so they can no longer search your meetings. Restart those apps afterwards. If you added Yarn to ChatGPT by hand, remove it there under Settings, Connectors. Nothing on this Mac is deleted."
+        alert.addButton(withTitle: "Disconnect")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] answer in
+            guard let self else { return }
+            guard answer == .alertFirstButtonReturn else {
+                self.showExternal(true)
+                return
+            }
+            self.showExternal(false)
+            self.simple(["connect", "disconnect"], done: "Disconnected. Yarn is fully on this Mac again.")
         }
     }
 

@@ -486,16 +486,22 @@ fi
 # the choice: the same speaker separation ran whichever was ticked. A setting
 # that does nothing is worse than no setting, so it is gone from the menu
 # and from the Settings window.
-week_mark=""; month_mark=""; never_mark=""
-case "$retention" in
-  1_month|month) retention_label="1 month"; month_mark="checked=true" ;;
-  never) retention_label="Never"; never_mark="checked=true" ;;
-  *) retention_label="1 week"; week_mark="checked=true" ;;
-esac
+# Same seven choices as Settings. The list is here once and looped, so a
+# choice cannot exist in one place and not the other.
+[[ "$retention" == "month" ]] && retention="1_month"
+[[ "$retention" == "week" ]] && retention="1_week"
+retention_label="1 week"
+retention_choices=("1_week:1 week" "2_weeks:2 weeks" "1_month:1 month" "3_months:3 months" "6_months:6 months" "1_year:1 year" "never:Never")
+for pair in "${retention_choices[@]}"; do
+  [[ "$retention" == "${pair%%:*}" ]] && retention_label="${pair#*:}"
+done
 echo "Audio retention: ${retention_label} | size=11 color=#888888"
-echo "-- 1 week | bash=\"$MA\" param1=setting param2=audio_retention param3=1_week terminal=false refresh=true ${week_mark}"
-echo "-- 1 month | bash=\"$MA\" param1=setting param2=audio_retention param3=1_month terminal=false refresh=true ${month_mark}"
-echo "-- Never | bash=\"$MA\" param1=setting param2=audio_retention param3=never terminal=false refresh=true ${never_mark}"
+for pair in "${retention_choices[@]}"; do
+  code="${pair%%:*}"
+  mark=""
+  [[ "$retention" == "$code" ]] && mark="checked=true"
+  echo "-- ${pair#*:} | bash=\"$MA\" param1=setting param2=audio_retention param3=${code} terminal=false refresh=true ${mark}"
+done
 case "$summarize_when" in
   evening) summarize_label="Evening" ;;
   manual) summarize_label="Manual" ;;
@@ -541,10 +547,15 @@ if $can_accurate; then
 else
   echo "-- Accurate (9B) needs about 16 GB | disabled=true size=11 color=#617188"
 fi
-echo "Also search from another app | size=11 color=#617188"
-echo "-- Claude | bash=\"$MA\" param1=connect param2=claude terminal=false refresh=true"
-echo "-- Cursor | bash=\"$MA\" param1=connect param2=cursor terminal=false refresh=true"
-echo "-- ChatGPT | bash=\"$MA\" param1=connect param2=chatgpt terminal=false refresh=true"
+# Only once it has been switched on in Settings, where the warning is. With
+# it off Yarn is local end to end, and the menu should not offer otherwise.
+external_apps="$(json_raw "$SETTINGS" external_apps)"
+if [[ "$external_apps" == "true" || "$external_apps" == "1" ]]; then
+  echo "External AI apps: On | size=11 color=#617188"
+  echo "-- Claude | bash=\"$MA\" param1=connect param2=claude terminal=false refresh=true"
+  echo "-- Cursor | bash=\"$MA\" param1=connect param2=cursor terminal=false refresh=true"
+  echo "-- ChatGPT | bash=\"$MA\" param1=connect param2=chatgpt terminal=false refresh=true"
+fi
 echo "Diagnostics | bash=\"$MA\" param1=doctor terminal=true"
 echo "Logs | bash=/usr/bin/open param1=\"$MA_ROOT/logs\" terminal=false"
 echo "Refresh | refresh=true"

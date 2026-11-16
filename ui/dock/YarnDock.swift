@@ -332,7 +332,6 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             link("Daily brief", #selector(brief), self),
             link("Library", #selector(library), self),
             link("Speakers", #selector(speakers), self),
-            link("Transcripts", #selector(transcripts), self),
             link("Settings", #selector(settings), self),
         ], spacing: 2)
 
@@ -347,13 +346,20 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             part.lineBreakMode = .byTruncatingTail
             part.setContentHuggingPriority(.required, for: .horizontal)
         }
-        // The model name is the part that gives way when the window is narrow.
+        // The model name has its own line. On one line it was cut to "·…"
+        // on a 13-inch screen, which is the one part nobody could read.
         footRest.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         footRest.setContentHuggingPriority(.defaultLow, for: .horizontal)
         footTokens.setAccessibilityHelp("Approximate cost if this had run on a hosted AI model")
         footSpace.setAccessibilityHelp("Disk space saved compared with keeping video recordings")
-        let footer = stack([footMeetings, footTokens, footSpace, footRest], spacing: 0, horizontal: true)
+        let footTop = stack([footMeetings, footTokens, footSpace], spacing: 0, horizontal: true)
+        footTop.detachesHiddenViews = true
+        let footer = NSStackView(views: [footTop, footRest])
+        footer.orientation = .vertical
+        footer.alignment = .leading
+        footer.spacing = 3
         footer.detachesHiddenViews = true
+        footer.translatesAutoresizingMaskIntoConstraints = false
 
         let root = stack([header, now, progress, actions, noteLabel, footer], spacing: 14)
         root.detachesHiddenViews = true
@@ -457,9 +463,10 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         footSpace.stringValue = snap.space.isEmpty ? "" : " · \(snap.space)"
         footSpace.isHidden = snap.space.isEmpty
         footSpace.toolTip = spaceTip.isEmpty ? nil : spaceTip
-        var rest = ""
-        if !snap.model.isEmpty { rest += " · \(snap.model)" }
-        if snap.failed > 0 { rest += " · \(snap.failed) kept their audio" }
+        var restParts: [String] = []
+        if !snap.model.isEmpty { restParts.append("summaries by \(snap.model)") }
+        if snap.failed > 0 { restParts.append("\(snap.failed) kept their audio") }
+        let rest = restParts.joined(separator: " · ")
         footRest.stringValue = rest
         footRest.isHidden = rest.isEmpty
         let footColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
