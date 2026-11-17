@@ -214,7 +214,9 @@ the same words on `room` are somebody else. There are tests for both.
   line only if it still says what was said (`_same_words`). The speaker
   and the time never come from the model. Matching by position let one
   dropped line move every later line onto the wrong speaker. It is on by
-  default, so do not loosen these checks.
+  default, so do not loosen these checks. It runs after the transcript is
+  saved and indexed, so a long tidy-up cannot leave the meeting with no
+  transcript. Do not move it back in front of that save.
 - **A refused microphone is retried, explained, and logged.** PortAudio
   -9986 ("Unspecified Audio Hardware Error") and ScreenCaptureKit -3818
   both happened on 2026-11-16 on an 8 GB MacBook Neo while nothing was

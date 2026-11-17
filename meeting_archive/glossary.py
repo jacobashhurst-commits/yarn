@@ -19,6 +19,48 @@ class GlossaryConfig:
     replacements: dict[str, str] = field(default_factory=dict)
 
 
+def parse_glossary_lines(text: str, *, strict: bool = False) -> dict[str, str]:
+    """`heard = correct`, one per line. Blank lines and # comments are skipped.
+
+    Strict is for the Settings box, which should say what to fix. A stored
+    file that has one bad line keeps the lines that are still readable.
+    """
+    reps: dict[str, str] = {}
+    for lineno, raw_line in enumerate(str(text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            if strict:
+                raise ValueError(f"Line {lineno} needs an equals sign: heard = correct")
+            continue
+        heard, correct = (part.strip() for part in line.split("=", 1))
+        if not heard or not correct:
+            if strict:
+                raise ValueError(
+                    f"Line {lineno} needs a word on both sides of the equals sign"
+                )
+            continue
+        if len(heard) > 80 or len(correct) > 80:
+            if strict:
+                raise ValueError("Keep each word under 80 characters")
+            continue
+        reps[heard] = correct
+        if len(reps) > 200:
+            if strict:
+                raise ValueError("200 words is the limit")
+            break
+    return reps
+
+
+def format_glossary_lines(replacements: dict[str, str]) -> str:
+    return "\n".join(
+        f"{heard} = {correct}"
+        for heard, correct in replacements.items()
+        if str(heard).strip() and str(correct).strip()
+    )
+
+
 def apply_glossary(text: str, replacements: dict[str, str]) -> str:
     if not text or not replacements:
         return text

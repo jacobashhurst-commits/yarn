@@ -351,7 +351,11 @@ def test_a_call_page_lists_the_microphone_and_the_computer(cfg):
         ),
         diarize_model="test-model",
     )
-    notes = {"speakers": {"sys-1": "Marquess"}, "attendees": "Jacob, Marquess"}
+    notes = {
+        "speakers": {"sys-1": "Marquess"},
+        "attendees": "Jacob, Marquess",
+        "detail": "Bring the contract.",
+    }
     roster = {"sys-1": "Marquess"}
     markdown = records.render_markdown(
         transcript, cfg.turn_labeller(roster), notes=notes
@@ -363,9 +367,10 @@ def test_a_call_page_lists_the_microphone_and_the_computer(cfg):
     html = records.render_transcript_html(
         transcript, cfg.turn_labeller(roster), notes=notes
     )
-    who = html.split("Who spoke", 1)[1].split("Voices", 1)[0]
+    who = html.split("Who spoke", 1)[1].split("Your notes", 1)[0]
     assert "Marquess" in who
     assert "Jacob" in who
+    assert html.index("Who spoke") < html.index("Your notes") < html.index("Voices")
 
 
 @needs_ffmpeg

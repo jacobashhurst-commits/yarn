@@ -70,6 +70,45 @@ def test_written_notes_appear_on_the_transcript(cfg):
     assert markdown.index("## Your notes") < markdown.index("## Summary")
     page = render_transcript_html(transcript, label, notes)
     assert "Your notes" in page and "Chase the contract." in page
+    # Under the listen and who-spoke cards, above the voice list.
+    assert page.index("Listen") < page.index("Who spoke") < page.index("Your notes")
+
+
+def test_notes_on_the_transcript_page_can_be_replaced_or_cleared(cfg):
+    from meeting_archive import library
+
+    library.save_meeting_notes(cfg, MEETING, "Bring the contract.")
+    page = cfg.transcript_html(MEETING).read_text()
+    assert "Bring the contract." in page
+    assert 'name="detail"' in page
+    assert "Save notes" in page
+    library.save_meeting_notes(cfg, MEETING, "")
+    saved = read_notes(cfg.notes_json(MEETING))
+    assert saved["detail"] == ""
+    assert saved["applied"] is False
+    assert "Bring the contract." not in cfg.transcript_html(MEETING).read_text()
+    assert "Save notes" in cfg.transcript_html(MEETING).read_text()
+
+
+def test_room_and_headphone_recordings_both_play(cfg):
+    from meeting_archive import library
+
+    archive = cfg.audio_archive_dir
+    (archive / f"{MEETING}__room.wav").write_bytes(b"RIFFroom")
+    room = library.recording_sources(cfg, MEETING, "tok")
+    assert [caption for caption, _href in room] == ["The recording"]
+    assert "channel=room" in room[0][1]
+    (archive / f"{MEETING}__room.wav").unlink()
+    (archive / f"{MEETING}__mic.wav").write_bytes(b"RIFFmic")
+    (archive / f"{MEETING}__sys.wav").write_bytes(b"RIFFsys")
+    (archive / f"{MEETING}__call.wav").write_bytes(b"RIFFcall")
+    call = library.recording_sources(cfg, MEETING, "tok")
+    assert [caption for caption, _href in call] == ["Jacob", "The other side"]
+    assert "channel=mic" in call[0][1] and "channel=sys" in call[1][1]
+    page = library.render_meeting_page(cfg, MEETING).decode()
+    assert "Play both" in page
+    assert "channel=mic" in page and "channel=sys" in page
+    assert "channel=call" not in page
 
 
 def test_no_notes_means_no_empty_section(cfg):

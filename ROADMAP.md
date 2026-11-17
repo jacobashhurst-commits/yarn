@@ -68,12 +68,10 @@ change a normal day against how much work they are.
    plain text and PDF with speakers and timestamps, from the app.
 3. **Correct a line.** Edit a transcript line or reassign its speaker, save
    to the JSON, reindex that one meeting. The JSON stays the record.
-4. **Glossary in Settings.** The word list that fixes names Whisper mishears
-   is still `[glossary]` in config.toml. It is the last common setting that
-   needs a text editor.
-5. **Audio on pages rendered on demand.** With Space saver on, an older
-   meeting opened from the library has no audio player. Serving the kept
-   audio from the same local server would close that gap.
+4. **Glossary in Settings.** Done. One line per word (`heard = correct`) in
+   Settings. `[glossary]` in config.toml still applies until that save.
+5. **Audio on pages rendered on demand.** Done. The library server plays a
+   room recording, and both sides of a headphone call.
 6. **Recovery in the app.** Stranded and failed recordings are listed in the
    menu bar and fixed with `ma recover`. A "Needs attention" row in the main
    window with Publish and Discard would mean never opening Terminal.

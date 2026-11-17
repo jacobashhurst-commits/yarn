@@ -446,3 +446,100 @@ def test_markdown_filename_puts_the_date_first():
 
     assert markdown_filename("2026-09-11T16-21-31", "Watch show") == "2026-09-11 Watch show.md"
     assert "/" not in markdown_filename("2026-09-11T16-21-31", "a/b:c")
+
+
+# --- time left ---------------------------------------------------------------
+
+import json as _json
+
+from meeting_archive import metrics as _metrics
+from meeting_archive.config import Config as _Config
+from meeting_archive.pipeline import _phase_estimate, meeting_percent, stage_seconds_left
+
+
+def _history(tmp_path, rows):
+    cfg = _Config(root=tmp_path)
+    cfg.logs_dir.mkdir(parents=True, exist_ok=True)
+    with (cfg.logs_dir / "performance.jsonl").open("w") as fh:
+        for stage, duration, wall in rows:
+            fh.write(
+                _json.dumps(
+                    {"stage": stage, "meeting_duration_s": duration, "wall_s": wall, "success": True}
+                )
+                + "\n"
+            )
+    _metrics._MODEL_CACHE.clear()
+    return cfg
+
+
+def test_a_new_mac_gets_a_rough_estimate_instead_of_none(tmp_path):
+    cfg = _Config(root=tmp_path)
+    seconds, learned = _metrics.expected_wall_s(cfg, "transcribe", 3600)
+    assert seconds > 0 and learned is False
+    text, _ = _phase_estimate(seconds, 0, learned, 10, 0, True)
+    assert "rough" in text
+
+
+def test_short_test_recordings_do_not_set_the_speed(tmp_path):
+    """A 2.5s recording took 12s. That is loading time, not 4.8x real time."""
+    cfg = _history(tmp_path, [("transcribe", 2.5, 12.0), ("transcribe", 41.0, 11.0)])
+    rate, overhead, learned = _metrics.stage_model(cfg, "transcribe")
+    assert rate == _metrics.STAGE_PRIORS["transcribe"][0] and learned is False
+    assert 0 < overhead < 20
+    hour, _ = _metrics.expected_wall_s(cfg, "transcribe", 3600)
+    assert hour < 30 * 60
+
+
+def test_speed_is_learned_from_real_meetings_on_this_mac(tmp_path):
+    cfg = _history(
+        tmp_path,
+        [
+            ("diarize", 30.0, 40.0),
+            ("diarize", 1800.0, 2700.0),
+            ("diarize", 3600.0, 5400.0),
+            ("diarize", 900.0, 1350.0),
+        ],
+    )
+    rate, overhead, learned = _metrics.stage_model(cfg, "diarize")
+    assert learned and abs(rate - 1.5) < 0.01
+    seconds, _ = _metrics.expected_wall_s(cfg, "diarize", 1200)
+    assert abs(seconds - (1800 + overhead)) < 1
+
+
+def test_one_stage_does_not_teach_another(tmp_path):
+    cfg = _history(tmp_path, [("diarize", 1800.0, 2700.0)])
+    assert _metrics.stage_model(cfg, "transcribe")[2] is False
+
+
+def test_early_progress_leans_on_history_and_late_progress_on_itself():
+    # 5% after 60s would say 19 minutes on its own. History says 5 minutes.
+    early = stage_seconds_left(300, 60, 5, False)
+    assert 240 <= early <= 300
+    # At 90% the step's own pace is what counts.
+    late = stage_seconds_left(300, 600, 90, False)
+    assert 55 <= late <= 70
+
+
+def test_time_left_covers_the_steps_still_to_come():
+    text, _ = _phase_estimate(120, 600, True, 60, 0, True)
+    assert text == "About 11m left"
+    assert _phase_estimate(40, 0, True, 10, 0, True)[0] == "Less than a minute left"
+
+
+def test_running_over_says_so_instead_of_counting_down_from_zero():
+    text, percent = _phase_estimate(120, 600, True, 400, 0, True)
+    assert text == "Taking longer than usual, then about 10m" and percent == 95
+
+
+def test_voice_separation_is_most_of_the_wait_not_a_sliver_at_the_end():
+    # Ten minutes already done, eighty still in this step, twenty after.
+    # About 9% of the meeting, not the old "voices start at 62%".
+    assert meeting_percent(600, 4800, 1200, 0, 0, True) < 20
+
+
+def test_a_new_mac_does_not_promise_voice_separation_faster_than_it_runs():
+    assert _metrics.STAGE_PRIORS["diarize"][0] >= 1.2
+
+
+def test_no_history_and_no_progress_shows_nothing():
+    assert _phase_estimate(0, 0, False, 30, 0, True) == ("", 0)

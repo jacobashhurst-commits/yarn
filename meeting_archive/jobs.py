@@ -65,9 +65,9 @@ STAGE_ORDER = (
     "transcribe",
     "diarize",
     "recognise",
+    "index",
     "cleanup",
     "summarize",
-    "index",
 )
 
 QUEUED = "queued"

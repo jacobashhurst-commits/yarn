@@ -15,7 +15,7 @@
     ma import-transcript PATH archive a coworker transcript without Whisper
     ma library                list meetings; --html writes a local viewer
     ma keep-audio / delete-audio
-    ma setting KEY VALUE      recognise_known, meeting_language, speaker_engine, audio_retention, thread
+    ma setting KEY VALUE      recognise_known, meeting_language, glossary, audio_retention, thread
     ma rediarize <id>         rebuild speaker labels without rerunning Whisper
     ma ingest <id>            reindex one meeting from its transcript
     ma rebuild                reindex every transcript on disk
@@ -1225,10 +1225,42 @@ def cmd_setting(cfg: Config, args) -> int:
         value = "1_month" if lowered in {"on", "true", "1"} else "never"
     elif args.key == "record_hotkey":
         # Read by the Yarn app, which owns the shortcut. Not a pipeline setting.
-        if lowered not in {"off", "room", "call"}:
-            print("value must be off, room, or call", file=sys.stderr)
+        # room and call are the older "always this one" choices. Both modes
+        # work from the shortcut: it starts whichever was used last.
+        if lowered not in {"off", "on", "room", "call"}:
+            print("value must be off or on", file=sys.stderr)
+            return 1
+        if lowered in {"room", "call"}:
+            write_setting(cfg, "record_mode", lowered)
+            value = "on"
+        elif lowered == "on":
+            path = cfg.root / ".yarn-settings.json"
+            try:
+                current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            except (OSError, ValueError):
+                current = {}
+            previous = str(current.get("record_hotkey") or "")
+            if previous in {"room", "call"} and current.get("record_mode") not in {
+                "room",
+                "call",
+            }:
+                write_setting(cfg, "record_mode", previous)
+            value = "on"
+        else:
+            value = "off"
+    elif args.key == "record_mode":
+        if lowered not in {"room", "call"}:
+            print("value must be room or call", file=sys.stderr)
             return 1
         value = lowered
+    elif args.key == "glossary":
+        from .glossary import format_glossary_lines, parse_glossary_lines
+
+        try:
+            value = format_glossary_lines(parse_glossary_lines(raw, strict=True))
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     elif args.key == "summary_profile":
         from .config import SUMMARY_PROFILES
 
@@ -1300,6 +1332,20 @@ def cmd_setting(cfg: Config, args) -> int:
             brief_mod.uninstall_login_agent()
             print("login brief disabled")
     print(f"{args.key} = {value}")
+    return 0
+
+
+def cmd_glossary(cfg: Config, args) -> int:
+    """Print the spelling list Settings and the pipeline both use."""
+    import json as _json
+
+    from .glossary import format_glossary_lines
+
+    text = format_glossary_lines(cfg.glossary.replacements)
+    if args.json:
+        print(_json.dumps({"text": text}))
+    elif text:
+        print(text)
     return 0
 
 
@@ -1801,12 +1847,18 @@ def build_parser() -> argparse.ArgumentParser:
             "min_participant_s",
             "own_name",
             "record_hotkey",
+            "record_mode",
             "page_retention",
             "external_apps",
+            "glossary",
         ),
     )
     p.add_argument("value")
     p.set_defaults(func=cmd_setting)
+
+    p = sub.add_parser("glossary", help="print the spelling list from Settings")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_glossary)
 
     p = sub.add_parser(
         "brief",

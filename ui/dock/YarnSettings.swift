@@ -25,7 +25,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
     )
     private let cleanup = SettingSwitch(
         title: "Tidy the transcript",
-        caption: "The local model fixes punctuation and obvious mishearings, and every line is checked against what was said. The original wording is kept. On a long meeting this adds a few minutes before the transcript appears."
+        caption: "The local model fixes punctuation and obvious mishearings, and every line is checked against what was said. The original wording is kept. The transcript is saved first, so this does not hold it up."
     )
     private let pressure = SettingSwitch(
         title: "Wait when the Mac is busy",
@@ -62,6 +62,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
     )
     private let briefTip = NSTextField(labelWithString: "Tip: try Open brief at login after a few mornings")
     private let thread = ThreadEditor()
+    private let glossary = ThreadEditor()
     private let status = NSTextField(labelWithString: "")
     private var writeGeneration = 0
     private var writing = false
@@ -107,6 +108,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         thread.commit()
+        glossary.commit()
     }
 
     private func build() {
@@ -199,6 +201,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         thread.onCommit = { [weak self] text in
             self?.write("thread", text)
         }
+        glossary.placeholderText = "Zora = Zuora"
+        glossary.limit = 4000
+        glossary.onCommit = { [weak self] text in
+            self?.write("glossary", text)
+        }
 
         let accurate = canAccurate
             ? "Accurate (9B)"
@@ -215,8 +222,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         ], selected: "en")
         hotkey.show([
             ("off", "Off", true),
-            ("room", "Starts In the room", true),
-            ("call", "Starts Headphones", true),
+            ("on", "On", true),
         ], selected: "off")
         floor.show([
             ("2", "2 seconds", true),
@@ -281,7 +287,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
 
             group(
                 "Keyboard shortcut",
-                caption: "Control-Option-Command-R from any app. Press it again to stop. Yarn has to be open. Recording still only starts when you press something.",
+                caption: "Control-Option-Command-R from any app. Press it again to stop. It starts In the room or Headphones, whichever you used last. Yarn has to be open. Recording still only starts when you press something.",
                 body: hotkey
             ),
 
@@ -299,6 +305,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
                 "Summary style",
                 caption: "What a summary leans towards. It never adds anything that was not said.",
                 body: profile
+            ),
+            group(
+                "Glossary",
+                caption: "Words Whisper mishears. One per line: what it writes, an equals sign, then the spelling you want.",
+                body: glossary
             ),
             settingsCard(stack([cleanup], spacing: 0)),
 
@@ -463,7 +474,13 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         let languageID = text(data["meeting_language"])
         language.select(known(languageID, fallback: "en", allowed: ["en", "auto", "ja", "zh", "es", "fr", "de", "ko"]))
         recognise.setOn(data["recognise_known"] == nil ? true : boolean(data["recognise_known"]))
-        hotkey.select(known(text(data["record_hotkey"]), fallback: "off", allowed: ["off", "room", "call"]))
+        let hot = text(data["record_hotkey"])
+        hotkey.select((hot == "on" || hot == "room" || hot == "call") ? "on" : "off")
+        if data["glossary"] != nil {
+            glossary.setText(text(data["glossary"]))
+        } else {
+            loadGlossary()
+        }
         // A missing key means the default the pipeline itself uses.
         identify.setOn(data["identify_popup"] == nil ? true : boolean(data["identify_popup"]))
         suggest.setOn(data["suggest_names_popup"] == nil ? true : boolean(data["suggest_names_popup"]))
@@ -529,6 +546,17 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
             guard let self, generation == self.writeGeneration, self.status.stringValue == text else { return }
             self.status.stringValue = ""
+        }
+    }
+
+    /// The list already in config.toml, until Settings has saved its own.
+    private func loadGlossary() {
+        let ma = paths.ma
+        writer.async { [weak self] in
+            let got = Self.capture(ma, ["glossary", "--json"])
+            DispatchQueue.main.async {
+                self?.glossary.showLoaded(text(got["text"]))
+            }
         }
     }
 
@@ -973,9 +1001,14 @@ private final class SettingClip: NSClipView {
 final class ThreadEditor: NSView, NSTextViewDelegate {
     static let example = "I'm Jacob. I manage Solution Consulting. Keep answers short, lead with decisions, and tell me who's doing what next."
     var onCommit: ((String) -> Void)?
+    var limit = 2000
+    var placeholderText = ThreadEditor.example {
+        didSet { textView.placeholder = placeholderText }
+    }
     private let textView = ThreadText()
     private let scroll = NSScrollView()
     private var saved = ""
+    private var touched = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -992,6 +1025,7 @@ final class ThreadEditor: NSView, NSTextViewDelegate {
 
         let wrapping = NSMutableParagraphStyle()
         wrapping.lineBreakMode = .byWordWrapping
+        textView.placeholder = placeholderText
         textView.delegate = self
         textView.isRichText = false
         textView.importsGraphics = false
@@ -1106,17 +1140,27 @@ final class ThreadEditor: NSView, NSTextViewDelegate {
         textView.needsDisplay = true
     }
 
+    /// The spelling list can arrive after the window is open. Apply it only
+    /// while the box is still what was last shown. Typing, or a save, wins.
+    func showLoaded(_ value: String) {
+        if touched { return }
+        let current = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        if current != saved { return }
+        setText(value)
+    }
+
     func commit() {
-        let value = String(textView.string.prefix(2000))
+        let value = String(textView.string.prefix(limit))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if value == saved { return }
+        touched = true
         saved = value
         onCommit?(value)
     }
 
     func textDidChange(_ notification: Notification) {
-        if textView.string.count > 2000 {
-            textView.string = String(textView.string.prefix(2000))
+        if textView.string.count > limit {
+            textView.string = String(textView.string.prefix(limit))
         }
         textView.needsDisplay = true
     }
@@ -1136,6 +1180,7 @@ private final class ThreadClip: NSClipView {
 
 private final class ThreadText: NSTextView {
     var ghost = yarn(0x617188).withAlphaComponent(0.8)
+    var placeholder = ThreadEditor.example
 
     override var wantsLayer: Bool {
         get { false }
@@ -1146,7 +1191,7 @@ private final class ThreadText: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty else { return }
         let shown = NSAttributedString(
-            string: ThreadEditor.example,
+            string: placeholder,
             attributes: [
                 .font: font ?? NSFont.systemFont(ofSize: 13),
                 .foregroundColor: ghost,

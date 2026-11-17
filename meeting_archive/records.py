@@ -566,7 +566,9 @@ def meeting_recordings(cfg, meeting_id: str) -> list[tuple[str, Path]]:
             continue
         for path in sorted(Path(folder).glob(f"{meeting_id}__*.wav")):
             channel = path.stem.split("__", 1)[-1]
-            if channel == "raw" or channel in found:
+            # The call file is the headphone tap before it is split into mic
+            # and sys. Playing it as well as those two would be a third copy.
+            if channel == "raw" or channel not in {"room", "mic", "sys"} or channel in found:
                 continue
             found[channel] = path
     order = {"room": 0, "mic": 1, "sys": 2}
@@ -606,6 +608,8 @@ def ensure_transcript_page(cfg, transcript: Transcript, notes: dict | None = Non
     titles, companies = library_details(cfg)
     page = cfg.transcript_html(transcript.meeting_id)
     page.parent.mkdir(parents=True, exist_ok=True)
+    from .library import disk_notes_form
+
     write_text_atomic(
         page,
         render_transcript_html(
@@ -615,6 +619,7 @@ def ensure_transcript_page(cfg, transcript: Transcript, notes: dict | None = Non
             titles=titles,
             companies=companies,
             recordings=meeting_recordings(cfg, transcript.meeting_id),
+            notes_form=disk_notes_form(cfg),
         ),
     )
     return page
@@ -628,8 +633,16 @@ def render_transcript_html(
     titles: dict[str, str] | None = None,
     companies: dict[str, str] | None = None,
     recordings: list[tuple[str, Path]] | None = None,
+    notes_form: tuple[str, str] | None = None,
+    audio_hrefs: list[tuple[str, str]] | None = None,
+    banner: str = "",
 ) -> str:
-    """Readable meeting page. Same facts as the markdown, in the Yarn style."""
+    """Readable meeting page. Same facts as the markdown, in the Yarn style.
+
+    `notes_form` is (post url, token) when the page can save notes back to
+    this Mac. `audio_hrefs` is (caption, url) when the page is served by the
+    library rather than opened as a file.
+    """
     from . import htmltheme
 
     notes = notes or {}
@@ -717,17 +730,19 @@ def render_transcript_html(
     attendee_line = (
         f'<p class="lede">{htmltheme.html_escape(attendees)}</p>' if attendees else ""
     )
-    if recordings:
+    if audio_hrefs is None:
+        audio_hrefs = [(caption, path.as_uri()) for caption, path in recordings]
+    if audio_hrefs:
         players = []
-        for caption, path in recordings:
+        for caption, href in audio_hrefs:
             players.append(
                 '<div class="player">'
                 f'<div class="item">{htmltheme.html_escape(caption)}</div>'
-                f'<audio controls preload="none" src="{htmltheme.html_escape(path.as_uri())}"></audio>'
+                f'<audio controls preload="metadata" src="{htmltheme.html_escape(href)}"></audio>'
                 "</div>"
             )
         tracks = ""
-        if len(recordings) > 1:
+        if len(audio_hrefs) > 1:
             tracks = '<p class="why">A call is two tracks. Play both to hear everyone.</p>'
         listen = (
             '<section class="card"><h2>Listen</h2>'
@@ -804,25 +819,21 @@ def render_transcript_html(
                 "</article>"
             )
     overview = summary_html
-    own_notes = str(notes.get("detail") or "").strip()
-    notes_card = ""
-    if own_notes:
-        paragraphs = "".join(
-            f"<p>{htmltheme.html_escape(part.strip())}</p>"
-            for part in own_notes.split("\n")
-            if part.strip()
-        )
-        notes_card = f'<section class="card"><h2>Your notes</h2>{paragraphs}</section>'
+    notes_card = _notes_section(notes, notes_form, transcript.meeting_id)
+    saved = (
+        f'<p class="hint">{htmltheme.html_escape(banner)}</p>' if banner.strip() else ""
+    )
     body = f"""
   {htmltheme.masthead("Transcript", heading)}
   <p class="when">{htmltheme.html_escape(when)} · {minutes}m {seconds:02d}s · saved on this Mac</p>
+  {saved}
   {attendee_line}
-  {notes_card}
   {overview}
   <div class="grid">
     {listen}
     {who}
   </div>
+  {notes_card}
   {voices_card}
   <section class="card"><h2>What was said</h2>{"".join(coloured)}</section>
 """
@@ -985,6 +996,38 @@ def speaker_roster(notes: dict | None) -> dict[str, str]:
     }
 
 
+def _notes_section(
+    notes: dict, notes_form: tuple[str, str] | None, meeting_id: str
+) -> str:
+    """Your notes. A form when this page can save them, otherwise the text."""
+    from . import htmltheme
+
+    own = str(notes.get("detail") or "")
+    if notes_form is None:
+        shown = own.strip()
+        if not shown:
+            return ""
+        paragraphs = "".join(
+            f"<p>{htmltheme.html_escape(part.strip())}</p>"
+            for part in shown.split("\n")
+            if part.strip()
+        )
+        return f'<section class="card"><h2>Your notes</h2>{paragraphs}</section>'
+    action, token = notes_form
+    return (
+        '<section class="card notes"><h2>Your notes</h2>'
+        f'<form method="post" action="{htmltheme.html_escape(action)}">'
+        f'<textarea name="detail" rows="6" aria-label="Your notes">'
+        f"{htmltheme.html_escape(own)}</textarea>"
+        f'<input type="hidden" name="meeting" value="{htmltheme.html_escape(meeting_id)}">'
+        f'<input type="hidden" name="token" value="{htmltheme.html_escape(token)}">'
+        '<button class="texty" type="submit">Save notes</button>'
+        "</form>"
+        '<p class="why">Saved on this Mac, and searchable. Never treated as something that was said.</p>'
+        "</section>"
+    )
+
+
 def write_notes(
     path: Path,
     meeting_id: str,
@@ -994,14 +1037,15 @@ def write_notes(
     applied: bool = False,
     keep_audio: bool | None = None,
     detail: str | None = None,
+    replace_detail: bool = False,
 ) -> dict:
     """Save popup output. `applied=False` tells the watcher to reindex.
 
     `notes` is the short name of the meeting: it became the title, which
     left nowhere to write anything longer. `detail` is that place. None
     means "not sent" and keeps what is there; an empty string from the
-    window is also kept, for the same reason blank input never wipes the
-    other answers.
+    on-stop window is also kept. `replace_detail` is the transcript page,
+    where an empty box deletes the note.
     """
     existing = read_notes(path)
     merged_speakers = dict(existing.get("speakers") or {})
@@ -1017,7 +1061,14 @@ def write_notes(
         # Blank input never wipes an earlier answer.
         "notes": notes or existing.get("notes", ""),
         "attendees": attendees or existing.get("attendees", ""),
-        "detail": (detail or "").strip() or existing.get("detail", ""),
+        # The on-stop window leaves this out when the box is empty, and that
+        # must not wipe a note. The transcript page sends the box itself,
+        # including empty, which is how a note is deleted.
+        "detail": (
+            (detail or "").strip()
+            if replace_detail
+            else (detail or "").strip() or existing.get("detail", "")
+        ),
         "speakers": merged_speakers,
         "keep_audio": (
             bool(existing.get("keep_audio")) if keep_audio is None else bool(keep_audio)

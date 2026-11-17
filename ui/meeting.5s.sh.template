@@ -88,6 +88,9 @@ proc_steps=""
 proc_eta=""
 proc_length=""
 expected_s=0
+after_s=0
+before_s=0
+estimate_learned=true
 phase_started=0
 now_epoch="$(date +%s)"
 if [[ -f "$PROCESS_STATUS" ]]; then
@@ -109,6 +112,14 @@ if [[ -f "$PROCESS_STATUS" ]]; then
   phase_started="$(json_raw "$PROCESS_STATUS" phase_started_epoch)"
   stale_after="$(json_raw "$PROCESS_STATUS" stale_after_epoch)"
   [[ "$expected_s" =~ ^[0-9]+$ ]] || expected_s=0
+  # Steps still to come after this one, so the time is for the whole meeting.
+  after_s="$(json_raw "$PROCESS_STATUS" after_s)"
+  [[ "$after_s" =~ ^[0-9]+$ ]] || after_s=0
+  before_s="$(json_raw "$PROCESS_STATUS" before_s)"
+  [[ "$before_s" =~ ^[0-9]+$ ]] || before_s=0
+  # Missing means an older status file. Don't call a known Mac rough.
+  estimate_learned="$(json_raw "$PROCESS_STATUS" estimate_learned)"
+  [[ -n "$estimate_learned" ]] || estimate_learned=true
   [[ "$phase_started" =~ ^[0-9]+$ ]] || phase_started=0
   # Voice separation can run for hours without rewriting the status, so a
   # fixed 2h freshness window made a busy watcher look idle.
@@ -138,20 +149,7 @@ span() {
 phase_elapsed=0
 (( phase_started > 0 )) && phase_elapsed=$(( now_epoch - phase_started ))
 (( phase_elapsed < 0 )) && phase_elapsed=0
-live_percent=""
 live_eta=""
-if [[ "$indeterminate" == "true" ]] && (( expected_s >= 1 )); then
-  live_percent=$(( phase_elapsed * 100 / expected_s ))
-  (( live_percent > 95 )) && live_percent=95
-  left=$(( expected_s - phase_elapsed ))
-  if (( left > 0 )); then
-    live_eta="about $(span "$left") left (estimate from past meetings)"
-  else
-    live_eta="taking longer than usual, still working"
-  fi
-elif [[ -n "$proc_eta" ]]; then
-  live_eta="$proc_eta"
-fi
 
 paused=false
 if [[ -f "$PROCESS_CONTROL" ]]; then
@@ -182,23 +180,102 @@ progress_bar() {
   printf '%s' "$bar"
 }
 
-# Whole-meeting percent. The Dock window uses the same bands in
-# YarnDock.phaseBand: a step at 50% is halfway through that step only.
-# Transcribing fills 8–62 of the meeting, voices 62–78, and so on.
+# Same seconds as pipeline.stage_seconds_left / _phase_estimate. The menu
+# cannot start Python every refresh, so this is the copy it recomputes.
+# TIME_LEFT
+stage_left() {
+  local expected="$1" elapsed="$2" percent="$3" indeterminate="$4"
+  local history=0 progress=-1 have_history=0
+  [[ "$expected" =~ ^[0-9]+$ ]] || expected=0
+  [[ "$elapsed" =~ ^[0-9]+$ ]] || elapsed=0
+  [[ "$percent" =~ ^[0-9]+$ ]] || percent=0
+  if (( expected > 0 )); then
+    have_history=1
+    history=$(( expected - elapsed ))
+  fi
+  if [[ "$indeterminate" != "true" ]] && (( percent >= 3 && percent < 100 && elapsed >= 10 )); then
+    progress=$(( elapsed * (100 - percent) / percent ))
+  fi
+  if (( progress >= 0 && have_history )); then
+    local hist=$history
+    (( hist < 0 )) && hist=0
+    echo $(( (percent * progress + (100 - percent) * hist) / 100 ))
+  elif (( progress >= 0 )); then
+    echo "$progress"
+  elif (( have_history )); then
+    echo "$history"
+  else
+    echo -1
+  fi
+}
+
+format_eta() {
+  local left="$1" after="$2" learned="$3" indeterminate="$4" percent="$5"
+  [[ "$left" =~ ^-?[0-9]+$ ]] || left=-1
+  [[ "$after" =~ ^[0-9]+$ ]] || after=0
+  [[ "$percent" =~ ^[0-9]+$ ]] || percent=0
+  if (( left < 0 )); then
+    if (( after > 0 )); then left=0; else echo ""; return; fi
+  fi
+  if (( left <= 0 )) && { [[ "$indeterminate" == "true" ]] || (( percent < 3 )); }; then
+    if (( after >= 60 )); then
+      echo "Taking longer than usual, then about $(span "$after")"
+    elif (( after > 0 )); then
+      echo "Taking longer than usual, then less than a minute"
+    else
+      echo "Taking longer than usual, still working"
+    fi
+    return
+  fi
+  local total text
+  if (( left > 0 )); then total=$(( left + after )); else total=$after; fi
+  if (( total < 60 )); then text="Less than a minute left"
+  else text="About $(span "$total") left"
+  fi
+  if [[ "$learned" != "true" ]]; then
+    text="$text (rough, Yarn is still learning this Mac)"
+  fi
+  echo "$text"
+}
+
+time_percent() {
+  local before="$1" expected="$2" after="$3" elapsed="$4" percent="$5" indeterminate="$6"
+  [[ "$before" =~ ^[0-9]+$ ]] || before=0
+  [[ "$expected" =~ ^[0-9]+$ ]] || expected=0
+  [[ "$after" =~ ^[0-9]+$ ]] || after=0
+  [[ "$elapsed" =~ ^[0-9]+$ ]] || elapsed=0
+  if (( before + expected + after <= 0 )); then echo 0; return; fi
+  local left remain spent total value
+  left="$(stage_left "$expected" "$elapsed" "$percent" "$indeterminate")"
+  (( left < 0 )) && left=0
+  if (( left > 0 )); then remain=$(( left + after )); else remain=$after; fi
+  spent=$(( before + elapsed ))
+  total=$(( spent + remain ))
+  (( total <= 0 )) && { echo 0; return; }
+  value=$(( (spent * 100 + total / 2) / total ))
+  (( remain > 0 && value > 99 )) && value=99
+  (( value < 0 )) && value=0
+  (( value > 100 )) && value=100
+  echo "$value"
+}
+# END_TIME_LEFT
+
+# Fallback when a status file has no timings yet. YarnDock.phaseBand matches.
+# Voice separation is most of the wait, so it owns most of the bar.
 # OVERALL_PERCENT
 overall_percent() {
   local phase_name="$1" stage_percent="$2" is_indeterminate="$3"
   local elapsed="$4" expected="$5"
-  local start=8 end=96 span inner_num inner_den
+  local start=2 end=16 span inner_num inner_den
   case "$phase_name" in
-    "Preparing audio") start=2; end=8 ;;
-    "Transcribing") start=8; end=62 ;;
-    "Identifying speakers") start=62; end=78 ;;
-    "Recognising known speakers") start=78; end=84 ;;
-    "Cleaning transcript") start=84; end=88 ;;
-    "Writing summary") start=88; end=96 ;;
-    "Indexing"|"Indexing for search") start=96; end=99 ;;
-    "Saving transcript") start=99; end=100 ;;
+    "Preparing audio") start=0; end=2 ;;
+    "Transcribing") start=2; end=16 ;;
+    "Identifying speakers") start=16; end=80 ;;
+    "Recognising known speakers") start=80; end=82 ;;
+    "Saving transcript") start=82; end=84 ;;
+    "Indexing"|"Indexing for search") start=84; end=86 ;;
+    "Cleaning transcript") start=86; end=97 ;;
+    "Writing summary") start=97; end=100 ;;
   esac
   span=$(( end - start ))
   (( span < 1 )) && span=1
@@ -316,7 +393,14 @@ elif $identifying; then
 elif $processing; then
   frac="$(fraction)"
   stage="$(short_phase)"
-  whole="$(overall_percent "$phase" "$percent" "$indeterminate" "$phase_elapsed" "$expected_s")"
+  if (( before_s + expected_s + after_s > 0 )); then
+    whole="$(time_percent "$before_s" "$expected_s" "$after_s" "$phase_elapsed" "$percent" "$indeterminate")"
+  else
+    whole="$(overall_percent "$phase" "$percent" "$indeterminate" "$phase_elapsed" "$expected_s")"
+  fi
+  left_now="$(stage_left "$expected_s" "$phase_elapsed" "$percent" "$indeterminate")"
+  live_eta="$(format_eta "$left_now" "$after_s" "$estimate_learned" "$indeterminate" "$percent")"
+  [[ -n "$live_eta" ]] || live_eta="$proc_eta"
   whole="$(hold_percent "$proc_id" "$whole")"
   menu_title "${frac:+$frac }${stage} ${whole}%"
 elif $paused; then

@@ -117,8 +117,11 @@ def _processing_status(
     meeting_s = float(audio_duration_s or (job.duration_s if job else 0.0) or 0.0)
     percent = min(max(int(percent), 0), 100)
     elapsed = max(0, now - phase_started)
-    eta, estimated = _phase_estimate(cfg, phase, meeting_s, elapsed, percent, indeterminate)
-    expected_s = _expected_phase_s(cfg, phase, meeting_s)
+    expected_s, learned = _expected_phase(cfg, phase, meeting_s)
+    after_s = _expected_after(cfg, job, phase, meeting_s)
+    eta, estimated = _phase_estimate(
+        expected_s, after_s, learned, elapsed, percent, indeterminate
+    )
     payload = {
         "meeting_id": meeting_id,
         "phase": phase,
@@ -137,6 +140,14 @@ def _processing_status(
         # Long silent stages (voice separation) never rewrite this file, so
         # the menu works out elapsed / remaining itself from these two.
         "expected_s": int(expected_s),
+        # What is still to come after this step, so the time shown is for
+        # the meeting and does not jump back up when a step finishes.
+        "after_s": int(after_s),
+        # Seconds already spent on earlier steps. The bar is spent / (spent
+        # + still to come), so voice separation is most of the wait instead
+        # of a thin slice near the end.
+        "before_s": int(_seconds_before(cfg, job, phase, meeting_s)),
+        "estimate_learned": bool(learned),
         "stale_after_epoch": now + int(max(7200, expected_s * 2.5)),
         "recording_length": _fmt_span(meeting_s) if meeting_s else "",
         **_step_summary(job, phase),
@@ -164,8 +175,8 @@ _STEP_LABELS = (
     ("transcribe", "Transcribe"),
     ("diarize", "Separate voices"),
     ("recognise", "Match known voices"),
-    ("cleanup", "Clean up"),
     ("index", "Search index"),
+    ("cleanup", "Clean up"),
     ("summarize", "Summary"),
 )
 
@@ -208,33 +219,159 @@ def _step_summary(job, phase: str) -> dict:
     return {"step": step, "steps": "  ".join(parts)}
 
 
+# The order the steps actually run in. Tidy-up and the summary come after
+# the transcript is saved and indexed.
+_RUN_ORDER = ("transcribe", "diarize", "recognise", "index", "cleanup", "summarize")
+
+
+def stage_seconds_left(
+    expected_s: float, elapsed: float, percent: int, indeterminate: bool
+) -> float:
+    """Seconds left in the current step, or -1 when there is nothing to go on.
+
+    A step with a real progress signal starts on the estimate from past
+    meetings and moves to its own measured pace as it gets further in. Early
+    progress is the least reliable number there is: the first few percent
+    include loading the model, so trusting it alone gave "about 40m left"
+    that fell to five within a minute.
+    """
+    by_history = expected_s - elapsed if expected_s > 0 else None
+    by_progress = None
+    if not indeterminate and 3 <= percent < 100 and elapsed >= 10:
+        by_progress = elapsed * (100 - percent) / percent
+    if by_progress is not None and by_history is not None:
+        trust = percent / 100.0
+        return max(0.0, trust * by_progress + (1 - trust) * max(0.0, by_history))
+    if by_progress is not None:
+        return by_progress
+    if by_history is not None:
+        return by_history
+    return -1.0
+
+
+def meeting_percent(
+    before_s: float,
+    expected_s: float,
+    after_s: float,
+    elapsed: float,
+    percent: int,
+    indeterminate: bool,
+) -> int:
+    """0–99 for the whole meeting, from time spent and time still to come.
+
+    A fixed slice per step made voice separation, which is most of the wait,
+    look nearly finished. The bar uses the same seconds as the time-left line.
+    """
+    before_s = max(0.0, float(before_s))
+    expected_s = max(0.0, float(expected_s))
+    after_s = max(0.0, float(after_s))
+    elapsed = max(0.0, float(elapsed))
+    if before_s <= 0 and expected_s <= 0 and after_s <= 0:
+        return 0
+    left = stage_seconds_left(expected_s, elapsed, int(percent), indeterminate)
+    if left < 0:
+        left = 0.0
+    remain = max(0.0, left) + after_s
+    spent = before_s + elapsed
+    total = spent + remain
+    if total <= 0:
+        return 0
+    value = int(round(spent * 100 / total))
+    if remain > 0:
+        value = min(value, 99)
+    return max(0, min(100, value))
+
+
 def _phase_estimate(
-    cfg: Config,
-    phase: str,
-    meeting_s: float,
+    expected_s: float,
+    after_s: float,
+    learned: bool,
     elapsed: int,
     percent: int,
     indeterminate: bool,
 ) -> tuple[str, int]:
-    """("about 40m left", estimated percent) from real progress or past speed."""
-    if not indeterminate and 3 <= percent < 100 and elapsed >= 20:
-        left = elapsed * (100 - percent) / percent
-        return f"about {_fmt_span(left)} left", percent
-    expected = _expected_phase_s(cfg, phase, meeting_s)
-    if expected < 30:
-        return "", 0
-    estimated = min(95, int(elapsed * 100 / expected))
-    left = expected - elapsed
-    if left <= 0:
-        return "taking longer than usual", 95
-    return f"about {_fmt_span(left)} left (typical for a {_fmt_span(meeting_s)} recording)", estimated
+    """("About 6m left", estimated percent) for the whole meeting."""
+    left = stage_seconds_left(expected_s, elapsed, percent, indeterminate)
+    if left < 0:
+        if after_s <= 0:
+            return "", 0
+        left = 0.0
+    if not indeterminate and percent >= 3:
+        estimated = percent
+    elif expected_s > 0:
+        estimated = min(95, int(elapsed * 100 / expected_s))
+    else:
+        estimated = 0
+    if left <= 0 and (indeterminate or percent < 3):
+        # Past the estimate with no signal of its own. Later steps are still
+        # known; hiding them made a long tidy-up look like it had stalled.
+        if after_s >= 60:
+            return f"Taking longer than usual, then about {_fmt_span(after_s)}", 95
+        if after_s > 0:
+            return "Taking longer than usual, then less than a minute", 95
+        return "Taking longer than usual, still working", 95
+    total = max(0.0, left) + max(0.0, after_s)
+    text = "Less than a minute left" if total < 60 else f"About {_fmt_span(total)} left"
+    if not learned:
+        text += " (rough, Yarn is still learning this Mac)"
+    return text, estimated
+
+
+def _expected_phase(cfg: Config, phase: str, meeting_s: float) -> tuple[float, bool]:
+    stage = _PHASE_STAGE.get(phase)
+    if not stage or meeting_s <= 0:
+        return 0.0, False
+    return metrics.expected_wall_s(cfg, stage, meeting_s)
 
 
 def _expected_phase_s(cfg: Config, phase: str, meeting_s: float) -> float:
-    stage = _PHASE_STAGE.get(phase)
-    if not stage or meeting_s <= 0:
+    return _expected_phase(cfg, phase, meeting_s)[0]
+
+
+def _will_run(cfg: Config, stage: str) -> bool:
+    """Steps the time-left line should count. Recognising is seconds."""
+    return {
+        "transcribe": True,
+        "diarize": cfg.diarize.enabled,
+        "recognise": False,
+        "index": True,
+        "cleanup": cfg.cleanup.enabled and cfg.summary.enabled,
+        "summarize": cfg.summary.enabled and cfg.summary.when == "after_meeting",
+    }.get(stage, False)
+
+
+def _seconds_before(cfg: Config, job, phase: str, meeting_s: float) -> float:
+    """Seconds already spent before this step, measured when we have it."""
+    current = _PHASE_STAGE.get(phase)
+    if current not in _RUN_ORDER or job is None:
         return 0.0
-    return metrics.typical_realtime_factor(cfg, stage) * meeting_s
+    total = 0.0
+    for stage in _RUN_ORDER:
+        if stage == current:
+            break
+        done = job.stages[stage]
+        if done.status == jobs.DONE and done.duration_s > 0:
+            total += done.duration_s
+        elif done.status in (jobs.SKIPPED, jobs.STAGE_FAILED):
+            continue
+        elif _will_run(cfg, stage) and meeting_s > 0:
+            total += metrics.expected_wall_s(cfg, stage, meeting_s)[0]
+    return total
+
+
+def _expected_after(cfg: Config, job, phase: str, meeting_s: float) -> float:
+    """Expected seconds for the steps still to run after this one."""
+    current = _PHASE_STAGE.get(phase)
+    if current not in _RUN_ORDER or meeting_s <= 0:
+        return 0.0
+    total = 0.0
+    for stage in _RUN_ORDER[_RUN_ORDER.index(current) + 1 :]:
+        if not _will_run(cfg, stage):
+            continue
+        if job is not None and job.stages[stage].status in (jobs.DONE, jobs.STAGE_FAILED):
+            continue
+        total += metrics.expected_wall_s(cfg, stage, meeting_s)[0]
+    return total
 
 
 def _clear_processing_status(cfg: Config, meeting_id: str) -> None:
@@ -673,6 +810,8 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
     from . import space_saver
 
     if space_saver.keeps_page(cfg, meeting_id):
+        from .library import disk_notes_form
+
         records.write_text_atomic(
             html_path,
             records.render_transcript_html(
@@ -682,6 +821,7 @@ def ingest(cfg: Config, meeting_id: str, store: MeetingStore) -> int:
                 titles=titles,
                 companies=companies,
                 recordings=records.meeting_recordings(cfg, meeting_id),
+                notes_form=disk_notes_form(cfg),
             ),
         )
     else:
@@ -732,6 +872,7 @@ def apply_summary(
         indeterminate=True,
         steal=False,
     )
+    summary_started = time.perf_counter()
     try:
         from .glossary import apply_glossary
 
@@ -749,6 +890,14 @@ def apply_summary(
         transcript.summary_model = cfg.summary.model
         transcript.summary_error = ""
         transcript.write(path)
+        metrics.record(
+            cfg,
+            meeting_id=meeting_id,
+            stage="summarize",
+            model=cfg.summary.model,
+            meeting_duration_s=transcript.duration_s,
+            wall_s=time.perf_counter() - summary_started,
+        )
         ingest(cfg, meeting_id, store)
         return True
     except SummaryUnavailable as exc:
@@ -763,6 +912,67 @@ def apply_summary(
         # in-flight Separate-voices card belonging to another meeting.
         if owned_status:
             _clear_processing_status(cfg, meeting_id)
+        queue_mod.refresh(cfg)
+
+
+def apply_cleanup(
+    cfg: Config,
+    meeting_id: str,
+    summarizer: Summarizer,
+    store: MeetingStore,
+) -> bool:
+    """Tidy a transcript that is already saved, and keep the original turns.
+
+    Returns True when the wording changed. A meeting tidied once is left
+    alone: `raw_turns` holds what Whisper wrote, and tidying the tidied text
+    would lose that.
+    """
+    path = cfg.transcript_json(meeting_id)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    transcript = Transcript.read(path)
+    if not transcript.turns or transcript.raw_turns:
+        return False
+    from . import cleanup as cleanup_mod
+    from . import queue as queue_mod
+    from .glossary import apply_glossary
+    from .models import speaker_display_indices
+
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    roster = records.speaker_roster(notes)
+    display = speaker_display_indices(transcript.speaker_profiles)
+    _processing_status(
+        cfg,
+        meeting_id,
+        "Cleaning transcript",
+        0,
+        "Checking punctuation and mishearings. The transcript is already saved.",
+        indeterminate=True,
+        steal=False,
+    )
+    cleanup_started = time.perf_counter()
+    try:
+        cleaned = cleanup_mod.cleanup_turns(
+            transcript.turns, cfg.turn_labeller(roster, display), summarizer
+        )
+        metrics.record(
+            cfg,
+            meeting_id=meeting_id,
+            stage="cleanup",
+            model=cfg.summary.model,
+            meeting_duration_s=transcript.duration_s,
+            wall_s=time.perf_counter() - cleanup_started,
+        )
+        for turn in cleaned:
+            turn.text = apply_glossary(turn.text, cfg.glossary.replacements)
+        transcript.raw_turns = list(transcript.turns)
+        transcript.turns = cleaned
+        transcript.write(path)
+        ingest(cfg, meeting_id, store)
+        return True
+    finally:
+        # Leave the status up. The summary, or the end of process(), clears
+        # it. Clearing here made the menu go idle between tidy-up and the summary.
         queue_mod.refresh(cfg)
 
 
@@ -1443,37 +1653,15 @@ def process(
         apply_guesses(profiles, speaker_guess_map(guesses))
         _keep_known_voices(cfg, meeting_id, guesses)
 
+        # Tidy-up runs after the transcript is on disk, further down. It is
+        # a second pass by the local model over the whole meeting, and doing
+        # it here meant a long meeting had no transcript at all until that
+        # pass finished.
         raw_turns: list = []
-        if cfg.cleanup.enabled and summarizer is not None and english_names:
-            jobs.begin_stage(cfg, job, "cleanup")
-            _processing_status(
-                cfg,
-                meeting_id,
-                "Cleaning transcript",
-                0,
-                "Proofreading ASR",
-                indeterminate=True,
-            )
-            try:
-                from . import cleanup as cleanup_mod
-
-                notes = records.read_notes(cfg.notes_json(meeting_id))
-                cleaned = cleanup_mod.cleanup_turns(
-                    turns,
-                    cfg.turn_labeller(records.speaker_roster(notes)),
-                    summarizer,
-                )
-                raw_turns = list(turns)
-                turns = cleaned
-                jobs.finish_stage(cfg, job, "cleanup")
-            except Exception as exc:
-                log.warning("cleanup skipped for meeting=%s: %s", meeting_id, exc)
-                jobs.finish_stage(
-                    cfg, job, "cleanup", status=jobs.SKIPPED, error=str(exc)
-                )
-                raw_turns = []
-        else:
-            jobs.finish_stage(cfg, job, "cleanup", status=jobs.SKIPPED)
+        attempt_cleanup = bool(
+            cfg.cleanup.enabled and summarizer is not None and english_names
+        )
+        jobs.finish_stage(cfg, job, "cleanup", status=jobs.SKIPPED)
 
         summary, summary_error = "", ""
         attempt_summary = False
@@ -1549,7 +1737,6 @@ def process(
         # transcript is on disk and the chunks are in Chroma.
         _archive_audio(cfg, claimed)
         titled = Transcript.read(cfg.transcript_json(meeting_id))
-        jobs.complete(cfg, job, title=titled.title)
         log.info(
             "processed meeting=%s turns=%d voices=%d names=%s",
             meeting_id,
@@ -1557,6 +1744,29 @@ def process(
             len(profiles),
             attendee_suggestion(candidates) or "-",
         )
+        if attempt_cleanup:
+            # Before the summary, so the summary reads the tidied wording.
+            # Nothing here can cost the meeting: the transcript is saved,
+            # indexed and its audio archived already.
+            try:
+                jobs.begin_stage(cfg, job, "cleanup")
+                done = apply_cleanup(cfg, meeting_id, summarizer, store)
+                jobs.finish_stage(
+                    cfg,
+                    job,
+                    "cleanup",
+                    status=jobs.DONE if done else jobs.SKIPPED,
+                )
+            except SummaryUnavailable as exc:
+                log.info("cleanup skipped for meeting=%s: %s", meeting_id, exc)
+                jobs.finish_stage(
+                    cfg, job, "cleanup", status=jobs.SKIPPED, error=str(exc)
+                )
+            except Exception as exc:
+                log.exception("cleanup failed for meeting=%s", meeting_id)
+                jobs.finish_stage(
+                    cfg, job, "cleanup", status=jobs.STAGE_FAILED, error=str(exc)
+                )
         if attempt_summary:
             try:
                 apply_summary(cfg, meeting_id, summarizer, store)
@@ -1571,6 +1781,10 @@ def process(
                 jobs.finish_stage(
                     cfg, job, "summarize", status=jobs.STAGE_FAILED, error=str(exc)
                 )
+        # Tidy-up and the summary run after the transcript is saved. Completing
+        # here, not before them, is what stops the job staying "running" after
+        # the watcher has finished.
+        jobs.complete(cfg, job, title=titled.title)
         _clear_processing_status(cfg, meeting_id)
         queue_mod.refresh(cfg)
         return meeting_id

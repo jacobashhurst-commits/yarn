@@ -256,6 +256,21 @@ a { color: var(--navy); }
 a:hover { color: var(--blue); }
 .note { color: var(--warn); }
 .err { color: var(--err); }
+.notes textarea {
+  display: block;
+  width: 100%;
+  min-height: 7.5em;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 12px;
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  resize: vertical;
+}
+.notes button.texty { margin: 10px 0 0; }
 button.delete {
   font: 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   color: var(--err);

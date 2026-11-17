@@ -713,6 +713,20 @@ def _apply_settings_overlay(cfg: Config) -> None:
                 cfg.summary.evening_hour = hour
         except (TypeError, ValueError):
             pass
+    if "glossary" in overlay:
+        # Present, including empty, replaces the list in config.toml. Settings
+        # is the editor; the file is the starting point until the first save.
+        from .glossary import parse_glossary_lines
+
+        raw = overlay["glossary"]
+        if isinstance(raw, dict):
+            cfg.glossary.replacements = {
+                str(key).strip(): str(value).strip()
+                for key, value in raw.items()
+                if str(key).strip() and str(value).strip()
+            }
+        else:
+            cfg.glossary.replacements = parse_glossary_lines(str(raw or ""))
 
 
 def write_setting(cfg: Config, key: str, value) -> dict:

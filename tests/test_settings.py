@@ -96,6 +96,29 @@ def test_an_empty_name_is_refused(home):
     assert tomllib.loads(path.read_text())["own_label"] == "Jacob"
 
 
+def test_the_shortcut_can_start_either_mode(home):
+    _, root = home
+    assert setting("record_hotkey", "on") == 0
+    assert setting("record_mode", "call") == 0
+    data = json.loads((root / ".yarn-settings.json").read_text())
+    assert (data["record_hotkey"], data["record_mode"]) == ("on", "call")
+    assert setting("record_hotkey", "room") == 0
+    data = json.loads((root / ".yarn-settings.json").read_text())
+    assert (data["record_hotkey"], data["record_mode"]) == ("on", "room")
+
+
+def test_glossary_in_settings_replaces_the_config_file(home):
+    path, _root = home
+    path.write_text(path.read_text() + '\n[glossary]\nZora = "Zuora"\n')
+    assert load_config().glossary.replacements == {"Zora": "Zuora"}
+    assert setting("glossary", "Fibre = fiber\nZora = Zuora") == 0
+    assert load_config().glossary.replacements == {"Fibre": "fiber", "Zora": "Zuora"}
+    assert setting("glossary", "no equals here") == 1
+    assert load_config().glossary.replacements["Zora"] == "Zuora"
+    assert setting("glossary", "") == 0
+    assert load_config().glossary.replacements == {}
+
+
 def test_settings_do_not_overwrite_each_other(home):
     setting("space_saver", "on")
     setting("summary_profile", "short")

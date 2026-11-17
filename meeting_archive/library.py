@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 LIBRARY_PORT = 47331
 # Bumped when the routes change, so a server left running from an older
 # Yarn is replaced instead of answering 404 to a link it does not know.
-_SERVER_MARK = b"yarn-library/3"
+_SERVER_MARK = b"yarn-library/4"
 
 
 @dataclass
@@ -271,12 +271,46 @@ def _meeting_href(cfg: Config, row: MeetingRow, token: str) -> str:
     return page.as_uri() if page.exists() else ""
 
 
-def render_meeting_page(cfg: Config, meeting_id: str) -> bytes:
+def disk_notes_form(cfg: Config) -> tuple[str, str]:
+    """(post url, token) embedded in a transcript page saved on disk."""
+    token = _delete_action(cfg)[2]
+    return (f"http://127.0.0.1:{LIBRARY_PORT}/notes", token)
+
+
+def recording_sources(cfg: Config, meeting_id: str, token: str) -> list[tuple[str, str]]:
+    """(caption, url) for room, or for both sides of a headphone call.
+
+    The page is served from this Mac, so the audio is too. A file:// address
+    inside an http page is blocked by the browser.
+    """
+    sources: list[tuple[str, str]] = []
+    for caption, path in records.meeting_recordings(cfg, meeting_id):
+        channel = path.stem.split("__", 1)[-1]
+        href = (
+            f"http://127.0.0.1:{LIBRARY_PORT}/audio?id={quote(meeting_id)}"
+            f"&channel={quote(channel)}&token={quote(token)}"
+        )
+        sources.append((caption, href))
+    return sources
+
+
+def audio_file(cfg: Config, meeting_id: str, channel: str) -> Path:
+    """The split wav for one channel. The channel name is not a path."""
+    if channel not in {"room", "mic", "sys"}:
+        raise ValueError("not a recording")
+    parse_meeting_id(meeting_id)
+    for _caption, path in records.meeting_recordings(cfg, meeting_id):
+        if path.stem.split("__", 1)[-1] == channel and path.is_file():
+            return path
+    raise FileNotFoundError(channel)
+
+
+def render_meeting_page(cfg: Config, meeting_id: str, *, banner: str = "") -> bytes:
     """One meeting's page, made now and not saved.
 
-    No audio player: a page served from the local server cannot play a file
-    from disk, which the browser blocks. Recent meetings keep a real page
-    file, and that is where recordings still within their retention play.
+    Audio is served from here, so a room recording and both sides of a
+    headphone call play. Recent meetings also keep a page file, which plays
+    the same wavs directly.
     """
     from .models import speaker_display_indices
     from .speakers import library_details
@@ -288,6 +322,7 @@ def render_meeting_page(cfg: Config, meeting_id: str) -> bytes:
     roster = records.speaker_roster(notes)
     display = speaker_display_indices(transcript.speaker_profiles)
     titles, companies = library_details(cfg)
+    _action, _rename, token = _delete_action(cfg)
     return records.render_transcript_html(
         transcript,
         cfg.turn_labeller(roster, display),
@@ -295,7 +330,56 @@ def render_meeting_page(cfg: Config, meeting_id: str) -> bytes:
         titles=titles,
         companies=companies,
         recordings=[],
+        notes_form=disk_notes_form(cfg),
+        audio_hrefs=recording_sources(cfg, meeting_id, token),
+        banner=banner,
     ).encode("utf-8")
+
+
+def save_meeting_notes(cfg: Config, meeting_id: str, detail: str) -> None:
+    """Replace the written notes and refresh the page. Search follows."""
+    from .models import speaker_display_indices
+    from .speakers import library_details
+    from . import space_saver
+
+    try:
+        parse_meeting_id(meeting_id)
+    except ValueError as exc:
+        raise ValueError("That is not a meeting.") from exc
+    detail = detail.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(detail) > 8000:
+        raise ValueError("Notes are limited to 8000 characters.")
+    path = cfg.transcript_json(meeting_id)
+    if not path.exists():
+        raise FileNotFoundError("That meeting has no transcript yet.")
+    records.write_notes(
+        cfg.notes_json(meeting_id),
+        meeting_id=meeting_id,
+        detail=detail,
+        replace_detail=True,
+        applied=False,
+    )
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    transcript = Transcript.read(path)
+    roster = records.speaker_roster(notes)
+    display = speaker_display_indices(transcript.speaker_profiles)
+    titles, companies = library_details(cfg)
+    records.write_text_atomic(
+        cfg.transcript_md(meeting_id),
+        records.render_markdown(
+            transcript,
+            cfg.turn_labeller(roster, display),
+            notes,
+            processing=records.processing_from_job(jobs.load(cfg, meeting_id)),
+            titles=titles,
+            companies=companies,
+        ),
+    )
+    page = cfg.transcript_html(meeting_id)
+    if space_saver.keeps_page(cfg, meeting_id):
+        records.ensure_transcript_page(cfg, transcript, notes)
+    else:
+        page.unlink(missing_ok=True)
 
 
 def _title_cell(action: tuple[str, str, str], row: MeetingRow, href: str) -> str:
@@ -569,12 +653,31 @@ def _handler(cfg: Config, token: str):
                 if not self._has_token((fields.get("token") or [""])[0]):
                     self._send(403, b"Refused", "text/plain")
                     return
+                banner = "Saved." if (fields.get("saved") or [""])[0] == "1" else ""
                 try:
-                    body = render_meeting_page(cfg, (fields.get("id") or [""])[0])
+                    body = render_meeting_page(
+                        cfg, (fields.get("id") or [""])[0], banner=banner
+                    )
                 except (OSError, ValueError):
                     self._send(404, b"That meeting is not here.", "text/plain")
                     return
                 self._send(200, body, "text/html; charset=utf-8")
+                return
+            if path == "/audio":
+                fields = parse_qs(query)
+                if not self._has_token((fields.get("token") or [""])[0]):
+                    self._send(403, b"Refused", "text/plain")
+                    return
+                try:
+                    audio = audio_file(
+                        cfg,
+                        (fields.get("id") or [""])[0],
+                        (fields.get("channel") or [""])[0],
+                    )
+                except (OSError, ValueError):
+                    self._send(404, b"That recording is not here.", "text/plain")
+                    return
+                self._send_file(audio)
                 return
             self._send(404, b"Not found", "text/plain")
 
@@ -583,11 +686,12 @@ def _handler(cfg: Config, token: str):
                 self._send(403, b"Refused", "text/plain")
                 return
             path = self.path.split("?", 1)[0]
-            if path not in ("/delete", "/rename"):
+            if path not in ("/delete", "/rename", "/notes"):
                 self._send(404, b"Not found", "text/plain")
                 return
             length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(min(max(length, 0), 20000))
+            limit = 100_000 if path == "/notes" else 20_000
+            raw = self.rfile.read(min(max(length, 0), limit))
             fields = parse_qs(raw.decode("utf-8", "replace"))
             given = (fields.get("token") or [""])[0]
             meeting_id = (fields.get("meeting") or [""])[0]
@@ -595,7 +699,9 @@ def _handler(cfg: Config, token: str):
                 self._send(403, b"Refused", "text/plain")
                 return
             try:
-                if path == "/rename":
+                if path == "/notes":
+                    save_meeting_notes(cfg, meeting_id, (fields.get("detail") or [""])[0])
+                elif path == "/rename":
                     rename_meeting(cfg, meeting_id, (fields.get("name") or [""])[0])
                 else:
                     delete_meeting(cfg, meeting_id)
@@ -603,10 +709,65 @@ def _handler(cfg: Config, token: str):
                 body = f"<p>{_esc(str(exc))}</p>".encode()
                 self._send(409, body, "text/html; charset=utf-8")
                 return
+            if path == "/notes":
+                loc = (
+                    f"/meeting?id={quote(meeting_id)}&token={quote(given)}&saved=1"
+                )
+                self.send_response(303)
+                self.send_header("Location", loc)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             self._send(200, render_html(cfg).read_bytes(), "text/html; charset=utf-8")
 
         def log_message(self, fmt: str, *args) -> None:
             return
+
+        def _send_file(self, path: Path) -> None:
+            """Stream a wav, including the Range request an audio control sends."""
+            size = path.stat().st_size
+            start, end = 0, max(0, size - 1)
+            status = 200
+            header = self.headers.get("Range") or ""
+            if header.startswith("bytes=") and size:
+                spec = header[6:].split(",", 1)[0].strip()
+                left, _, right = spec.partition("-")
+                try:
+                    if left:
+                        start = int(left)
+                        end = int(right) if right else size - 1
+                    elif right:
+                        start = max(0, size - int(right))
+                except ValueError:
+                    start, end = 0, size - 1
+                start = max(0, start)
+                end = min(size - 1, end)
+                if start >= size or start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                status = 206
+            length = 0 if size == 0 else end - start + 1
+            self.send_response(status)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            with path.open("rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    remaining -= len(chunk)
 
         def _send(self, status: int, body: bytes, content_type: str) -> None:
             self.send_response(status)

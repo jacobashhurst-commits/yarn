@@ -105,6 +105,7 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let footMeetings = NSTextField(labelWithString: "")
     let footTokens = NSTextField(labelWithString: "")
     let footSpace = NSTextField(labelWithString: "")
+    let footModel = NSTextField(labelWithString: "")
     let footRest = NSTextField(labelWithString: "")
     var tokensTip = ""
     var spaceTip = ""
@@ -340,26 +341,26 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         noteLabel.preferredMaxLayoutWidth = 340
         noteLabel.wantsLayer = true
         quips = QuipLine(label: noteLabel)
-        for part in [footMeetings, footTokens, footSpace, footRest] {
+        for part in [footMeetings, footTokens, footSpace, footModel, footRest] {
             style(part, size: 12, weight: .regular, color: YarnColor.slate, mono: true)
             part.maximumNumberOfLines = 1
             part.lineBreakMode = .byTruncatingTail
             part.setContentHuggingPriority(.required, for: .horizontal)
         }
-        // The model name has its own line. On one line it was cut to "·…"
-        // on a 13-inch screen, which is the one part nobody could read.
+        // One line. The model is short ("Fast" or "Accurate") so it stays
+        // visible; the token count is what gives up space if the window is tight.
+        footMeetings.setContentCompressionResistancePriority(.required, for: .horizontal)
+        footModel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        footTokens.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         footRest.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        footRest.setContentHuggingPriority(.defaultLow, for: .horizontal)
         footTokens.setAccessibilityHelp("Approximate cost if this had run on a hosted AI model")
         footSpace.setAccessibilityHelp("Disk space saved compared with keeping video recordings")
-        let footTop = stack([footMeetings, footTokens, footSpace], spacing: 0, horizontal: true)
-        footTop.detachesHiddenViews = true
-        let footer = NSStackView(views: [footTop, footRest])
-        footer.orientation = .vertical
-        footer.alignment = .leading
-        footer.spacing = 3
+        let footer = stack(
+            [footMeetings, footTokens, footSpace, footModel, footRest],
+            spacing: 0,
+            horizontal: true
+        )
         footer.detachesHiddenViews = true
-        footer.translatesAutoresizingMaskIntoConstraints = false
 
         let root = stack([header, now, progress, actions, noteLabel, footer], spacing: 14)
         root.detachesHiddenViews = true
@@ -463,14 +464,13 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         footSpace.stringValue = snap.space.isEmpty ? "" : " · \(snap.space)"
         footSpace.isHidden = snap.space.isEmpty
         footSpace.toolTip = spaceTip.isEmpty ? nil : spaceTip
-        var restParts: [String] = []
-        if !snap.model.isEmpty { restParts.append("summaries by \(snap.model)") }
-        if snap.failed > 0 { restParts.append("\(snap.failed) kept their audio") }
-        let rest = restParts.joined(separator: " · ")
+        footModel.stringValue = snap.model.isEmpty ? "" : " · \(snap.model)"
+        footModel.isHidden = snap.model.isEmpty
+        let rest = snap.failed > 0 ? " · \(snap.failed) kept their audio" : ""
         footRest.stringValue = rest
         footRest.isHidden = rest.isEmpty
         let footColor = snap.failed > 0 ? YarnColor.warn : YarnColor.slate
-        for part in [footMeetings, footTokens, footSpace, footRest] {
+        for part in [footMeetings, footTokens, footSpace, footModel, footRest] {
             part.textColor = footColor
         }
         if snap.ollamaDown {
@@ -547,17 +547,28 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let expected = integer(status["expected_s"]) ?? 0
             let indeterminate = boolean(status["indeterminate"])
             let stage = integer(status["percent"]) ?? 0
-            if !indeterminate, expected > 0 {
-                let left = expected - elapsed
-                snap.eta = left > 0 ? "About \(span(left)) left" : "Taking longer than usual"
-            }
+            // The same rule as pipeline.meeting_percent, worked out here each
+            // second because a long silent step does not rewrite the status file.
+            let after = integer(status["after_s"]) ?? 0
+            let before = integer(status["before_s"]) ?? 0
+            let learned = status["estimate_learned"] == nil ? true : boolean(status["estimate_learned"])
+            snap.eta = meetingEta(
+                expected: expected,
+                after: after,
+                learned: learned,
+                elapsed: elapsed,
+                stage: stage,
+                indeterminate: indeterminate
+            )
             let meeting = text(status["meeting_id"])
             snap.percent = forwardPercent(
                 meeting: meeting,
+                before: before,
+                expected: expected,
+                after: after,
                 phase: phase,
                 stage: stage,
                 elapsed: elapsed,
-                expected: expected,
                 measured: !indeterminate
             )
             if snap.eta.isEmpty { snap.eta = text(status["eta"]) }
@@ -586,9 +597,14 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         snap.space = spaceSaved
         snap.failed = countFiles(root + "/recordings/failed", suffix: ".json")
         let settings = json(root + "/.yarn-settings.json")
-        let model = text(settings["summary_model"])
-        snap.model = model
-        YarnHotKey.shared.apply(text(settings["record_hotkey"]))
+        snap.model = summaryLabel(text(settings["summary_model"]))
+        let hot = text(settings["record_hotkey"])
+        var startMode = text(settings["record_mode"])
+        if startMode != "room" && startMode != "call" {
+            startMode = hot == "call" ? "call" : "room"
+        }
+        let shortcutOn = hot == "on" || hot == "room" || hot == "call"
+        YarnHotKey.shared.apply(shortcutOn ? startMode : "off")
         snap.tokens = integer(json(root + "/.tokens-saved.json")["total"]) ?? 0
         let summaries = integer(queue["summaries_pending"]) ?? 0
         let ollama = NSWorkspace.shared.runningApplications.contains {
@@ -635,11 +651,19 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func startInRoom() {
+        rememberMode("room")
         launch(paths.rec, ["start", "room"])
     }
 
     @objc func startHeadphones() {
+        rememberMode("call")
         launch(paths.rec, ["start", "call"])
+    }
+
+    /// The shortcut starts whichever of these was pressed last, so one key
+    /// works for both. Recording itself does not wait on the save.
+    private func rememberMode(_ mode: String) {
+        launch(paths.ma, ["setting", "record_mode", mode])
     }
 
     @objc func toggleRecording() {
@@ -765,28 +789,42 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// creeps forward inside its own slice, and the number never goes back.
     func forwardPercent(
         meeting: String,
+        before: Int,
+        expected: Int,
+        after: Int,
         phase: String,
         stage: Int,
         elapsed: Int,
-        expected: Int,
         measured: Bool
     ) -> Int {
         if meeting != barMeeting {
             barMeeting = meeting
             barFloor = 0
         }
-        let (start, end) = phaseBand(phase)
-        let span = max(1, end - start)
-        let inner: Double
-        if measured {
-            inner = Double(min(100, max(0, stage))) / 100
-        } else if expected > 0 {
-            inner = min(0.92, Double(elapsed) / Double(expected))
+        let value: Int
+        if before > 0 || expected > 0 || after > 0 {
+            value = meetingPercent(
+                before: before,
+                expected: expected,
+                after: after,
+                elapsed: elapsed,
+                stage: stage,
+                indeterminate: !measured
+            )
         } else {
-            inner = min(0.9, Double(elapsed) / 40)
+            let (start, end) = phaseBand(phase)
+            let span = max(1, end - start)
+            let inner: Double
+            if measured {
+                inner = Double(min(100, max(0, stage))) / 100
+            } else if expected > 0 {
+                inner = min(0.92, Double(elapsed) / Double(expected))
+            } else {
+                inner = min(0.9, Double(elapsed) / 40)
+            }
+            value = start + Int((Double(span) * inner).rounded())
         }
-        let value = start + Int((Double(span) * inner).rounded())
-        barFloor = max(barFloor, min(end, value))
+        barFloor = max(barFloor, min(99, value))
         return barFloor
     }
 
@@ -823,17 +861,85 @@ private func identifyWaitAlive(_ path: String) -> Bool {
 
 /// Bands for the whole meeting. menu.sh copies these in overall_percent.
 private func phaseBand(_ phase: String) -> (Int, Int) {
+    // Fallback only, when the status file has no timings. The live bar uses
+    // meetingPercent. Voice separation is most of the wait.
     switch phase {
-    case "Preparing audio": return (2, 8)
-    case "Transcribing": return (8, 62)
-    case "Identifying speakers": return (62, 78)
-    case "Recognising known speakers": return (78, 84)
-    case "Cleaning transcript": return (84, 88)
-    case "Writing summary": return (88, 96)
-    case "Indexing", "Indexing for search": return (96, 99)
-    case "Saving transcript": return (99, 100)
-    default: return (8, 96)
+    case "Preparing audio": return (0, 2)
+    case "Transcribing": return (2, 16)
+    case "Identifying speakers": return (16, 80)
+    case "Recognising known speakers": return (80, 82)
+    case "Saving transcript": return (82, 84)
+    case "Indexing", "Indexing for search": return (84, 86)
+    case "Cleaning transcript": return (86, 97)
+    case "Writing summary": return (97, 100)
+    default: return (2, 97)
     }
+}
+
+/// Seconds left in the current step. Same blend as pipeline.stage_seconds_left.
+private func stageSecondsLeft(expected: Int, elapsed: Int, percent: Int, indeterminate: Bool) -> Int {
+    let history: Int? = expected > 0 ? expected - elapsed : nil
+    var progress: Int?
+    if !indeterminate, percent >= 3, percent < 100, elapsed >= 10 {
+        progress = elapsed * (100 - percent) / percent
+    }
+    if let progress, let history {
+        let hist = max(0, history)
+        return (percent * progress + (100 - percent) * hist) / 100
+    }
+    if let progress { return progress }
+    if let history { return history }
+    return -1
+}
+
+/// Whole-meeting percent. Same rule as pipeline.meeting_percent.
+private func meetingPercent(
+    before: Int, expected: Int, after: Int, elapsed: Int, stage: Int, indeterminate: Bool
+) -> Int {
+    if before <= 0 && expected <= 0 && after <= 0 { return 0 }
+    var left = stageSecondsLeft(
+        expected: expected, elapsed: elapsed, percent: stage, indeterminate: indeterminate
+    )
+    if left < 0 { left = 0 }
+    let remain = max(0, left) + max(0, after)
+    let spent = max(0, before) + max(0, elapsed)
+    let total = spent + remain
+    if total <= 0 { return 0 }
+    var value = Int((Double(spent) * 100 / Double(total)).rounded())
+    if remain > 0 { value = min(99, value) }
+    return min(100, max(0, value))
+}
+
+/// Same words as pipeline._phase_estimate.
+private func meetingEta(
+    expected: Int, after: Int, learned: Bool, elapsed: Int, stage: Int, indeterminate: Bool
+) -> String {
+    var left = stageSecondsLeft(
+        expected: expected, elapsed: elapsed, percent: stage, indeterminate: indeterminate
+    )
+    if left < 0 {
+        if after <= 0 { return "" }
+        left = 0
+    }
+    if left <= 0 && (indeterminate || stage < 3) {
+        if after >= 60 { return "Taking longer than usual, then about \(span(after))" }
+        if after > 0 { return "Taking longer than usual, then less than a minute" }
+        return "Taking longer than usual, still working"
+    }
+    let total = max(0, left) + max(0, after)
+    var text = total < 60 ? "Less than a minute left" : "About \(span(total)) left"
+    if !learned { text += " (rough, Yarn is still learning this Mac)" }
+    return text
+}
+
+private func summaryLabel(_ raw: String) -> String {
+    let model = raw.lowercased()
+    if model.isEmpty {
+        return ProcessInfo.processInfo.physicalMemory > 10_737_418_240 ? "Accurate" : "Fast"
+    }
+    if model.contains("9b") || model == "accurate" { return "Accurate" }
+    if model.contains("4b") || model == "fast" { return "Fast" }
+    return raw
 }
 
 final class YarnBar: NSView {
@@ -871,7 +977,7 @@ private func phaseHint(_ phase: String) -> String {
     case "Recognising known speakers":
         return "Comparing these voices with people Yarn already knows."
     case "Cleaning transcript":
-        return "Tidying the words before the transcript is saved."
+        return "Tidying punctuation and mishearings. The transcript is already saved."
     case "Indexing", "Indexing for search":
         return "Filing this meeting so Ask Yarn can search it."
     case "Writing summary":

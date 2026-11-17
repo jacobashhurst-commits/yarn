@@ -71,6 +71,7 @@ initial_prompt = ""
 [glossary]
 # Whole-word fixes after Whisper, before markdown and search. Keys are what
 # Whisper often writes; values are what you want in the archive.
+# Settings has the same list. Once it is saved there, it replaces this one.
 
 [diarize]
 # Distinguish individual voices on the system-audio and room channels. Runtime
