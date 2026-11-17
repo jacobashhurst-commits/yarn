@@ -4,7 +4,7 @@ Your meetings. Your memories. Your computer.
 
 Yarn records a meeting when you press the button, works out who said what, and keeps the transcript, the notes, and a daily brief on your Mac. No account. No subscription. Recording, transcription, summaries, and Ask Yarn stay on this machine.
 
-Apple Silicon only.
+Apple Silicon only for now, Windows coming soon.
 
 ## Download
 
