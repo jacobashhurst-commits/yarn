@@ -613,15 +613,20 @@ fi
 if [[ -z "$summary_model" ]]; then
   if $can_accurate; then summary_model="qwen3.5:9b"; else summary_model="qwen3.5:4b"; fi
 fi
-fast_mark=""; accurate_mark=""
+fast_mark=""; accurate_mark=""; other_mark=""
 case "$summary_model" in
-  *9b*|accurate)
+  qwen3.5:9b|accurate|9b)
     quality_label="Accurate (9B)"
     accurate_mark="checked=true"
     ;;
-  *)
+  qwen3.5:4b|fast|4b)
     quality_label="Fast (4B)"
     fast_mark="checked=true"
+    ;;
+  *)
+    # Some other model already on this Mac. Fast and Accurate stay unselected.
+    quality_label="$summary_model"
+    other_mark="checked=true"
     ;;
 esac
 echo "Summary model: ${quality_label} | size=11 color=#617188"
@@ -630,6 +635,9 @@ if $can_accurate; then
   echo "-- Accurate (9B) | bash=\"$MA\" param1=setting param2=summary_model param3=accurate terminal=false refresh=true ${accurate_mark}"
 else
   echo "-- Accurate (9B) needs about 16 GB | disabled=true size=11 color=#617188"
+fi
+if [[ -n "$other_mark" ]]; then
+  echo "-- On this Mac: ${summary_model} | disabled=true ${other_mark}"
 fi
 # Only once it has been switched on in Settings, where the warning is. With
 # it off Yarn is local end to end, and the menu should not offer otherwise.

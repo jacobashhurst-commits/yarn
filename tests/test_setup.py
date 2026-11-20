@@ -443,6 +443,33 @@ def test_neo_setup_will_not_download_accurate(monkeypatch):
     assert yarn_setup.requested_pulls() == ["fast"]
 
 
+def test_fast_and_accurate_are_not_rewritten_by_another_local_model():
+    from meeting_archive.resources import (
+        selectable_ollama_models,
+        stored_summary_model,
+        tidy_model_for,
+    )
+    from meeting_archive.config import Config, SummaryConfig
+
+    installed = ["qwen3.5:4b", "qwen3.5:9b", "llama3.1:8b", "nomic-embed-text"]
+    assert selectable_ollama_models(installed) == ["llama3.1:8b"]
+    assert stored_summary_model("fast", installed, allow_accurate=False) == ("qwen3.5:4b", "")
+    assert stored_summary_model("accurate", installed, allow_accurate=True) == ("qwen3.5:9b", "")
+    refused, reason = stored_summary_model("accurate", installed, allow_accurate=False)
+    assert refused == "" and "Fast" in reason
+    assert stored_summary_model("llama3.1:8b", installed, allow_accurate=False) == (
+        "llama3.1:8b",
+        "",
+    )
+    missing, why = stored_summary_model("missing:7b", installed, allow_accurate=True)
+    assert missing == "" and "not installed" in why
+    cfg = Config(root=Path("unused"))
+    cfg.summary = SummaryConfig(model="llama3.1:8b", builtin="accurate")
+    assert tidy_model_for(cfg) in {"qwen3.5:9b", "qwen3.5:4b"}
+    cfg.summary = SummaryConfig(model="qwen3.5:4b", builtin="accurate")
+    assert tidy_model_for(cfg) == "qwen3.5:4b"
+
+
 def test_summary_model_is_smaller_on_an_8gb_mac():
     from meeting_archive.resources import summary_model_choice
 

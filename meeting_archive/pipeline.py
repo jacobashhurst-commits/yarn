@@ -951,6 +951,21 @@ def apply_cleanup(
         steal=False,
     )
     cleanup_started = time.perf_counter()
+    # Tidy-up stays on Fast or Accurate even when summaries use another
+    # model already installed on this Mac. The shared summarizer is put
+    # back before the summary runs.
+    from .resources import tidy_model_for
+
+    tidy_model = tidy_model_for(cfg)
+    config = getattr(summarizer, "config", None)
+    previous_model = None
+    previous_checked = None
+    if config is not None and getattr(config, "model", None) != tidy_model:
+        previous_model = config.model
+        previous_checked = getattr(summarizer, "_checked", None)
+        config.model = tidy_model
+        if previous_checked is not None:
+            summarizer._checked = False
     try:
         cleaned = cleanup_mod.cleanup_turns(
             transcript.turns, cfg.turn_labeller(roster, display), summarizer
@@ -959,7 +974,7 @@ def apply_cleanup(
             cfg,
             meeting_id=meeting_id,
             stage="cleanup",
-            model=cfg.summary.model,
+            model=tidy_model,
             meeting_duration_s=transcript.duration_s,
             wall_s=time.perf_counter() - cleanup_started,
         )
@@ -971,6 +986,10 @@ def apply_cleanup(
         ingest(cfg, meeting_id, store)
         return True
     finally:
+        if previous_model is not None and config is not None:
+            config.model = previous_model
+            if previous_checked is not None:
+                summarizer._checked = previous_checked
         # Leave the status up. The summary, or the end of process(), clears
         # it. Clearing here made the menu go idle between tidy-up and the summary.
         queue_mod.refresh(cfg)

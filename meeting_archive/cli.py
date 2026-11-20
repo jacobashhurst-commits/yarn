@@ -1154,6 +1154,19 @@ def cmd_library(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_ollama_models(cfg: Config, args) -> int:
+    """Models already in Ollama, apart from Fast, Accurate, and embed models."""
+    from .resources import ollama_model_names, selectable_ollama_models
+
+    names = selectable_ollama_models(ollama_model_names(cfg.summary.host))
+    if getattr(args, "json", False):
+        print(json.dumps({"models": names}))
+    else:
+        for name in names:
+            print(name)
+    return 0
+
+
 def cmd_keep_audio(cfg: Config, args) -> int:
     retention.set_keep_audio(cfg, args.meeting_id, True)
     print(f"{args.meeting_id}: keep_audio on")
@@ -1305,15 +1318,38 @@ def cmd_setting(cfg: Config, args) -> int:
         value = raw[:THREAD_MAX].strip()
     elif args.key == "summary_model":
         from .resources import (
-            SUMMARY_MODEL_FULL,
             can_run_accurate,
-            model_for_quality,
+            is_builtin_summary_model,
+            ollama_model_names,
+            quality_for_model,
+            stored_summary_model,
+            summary_model_choice,
         )
 
-        value = model_for_quality(lowered)
-        if value == SUMMARY_MODEL_FULL and not can_run_accurate():
-            print("this Mac can only run Fast summaries", file=sys.stderr)
+        # Fast and Accurate do not ask Ollama. A closed Ollama must not
+        # stop those two from being saved.
+        installed = (
+            []
+            if is_builtin_summary_model(raw)
+            else ollama_model_names(cfg.summary.host)
+        )
+        value, refusal = stored_summary_model(
+            raw,
+            installed,
+            allow_accurate=can_run_accurate(),
+        )
+        if refusal:
+            print(refusal, file=sys.stderr)
             return 1
+        if is_builtin_summary_model(value):
+            write_setting(cfg, "summary_builtin", quality_for_model(value))
+        elif is_builtin_summary_model(cfg.summary.model) and cfg.summary.model.strip():
+            # Remember Fast or Accurate before summaries move to another model.
+            write_setting(cfg, "summary_builtin", quality_for_model(cfg.summary.model))
+        elif not str(cfg.summary.builtin or "").strip():
+            write_setting(
+                cfg, "summary_builtin", quality_for_model(summary_model_choice()[0])
+            )
     else:
         value = raw
     write_setting(cfg, args.key, value)
@@ -1817,6 +1853,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("library", help="list meetings in the archive")
     p.add_argument("--html", action="store_true")
     p.set_defaults(func=cmd_library)
+
+    p = sub.add_parser(
+        "ollama-models",
+        help="list other Ollama models already on this Mac",
+    )
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_ollama_models)
 
     p = sub.add_parser("keep-audio", help="exempt a meeting from audio pruning")
     p.add_argument("meeting_id")

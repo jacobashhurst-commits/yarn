@@ -975,15 +975,13 @@ private func summaryChoice(_ raw: String) -> (label: String, tip: String) {
             ? ("Accurate", "Accurate is qwen3.5:9b, running on this Mac.")
             : ("Fast", "Fast is qwen3.5:4b, running on this Mac.")
     }
-    if folded.contains("9b") || folded == "accurate" {
-        let name = folded.contains("qwen") ? trimmed : "qwen3.5:9b"
-        return ("Accurate", "Accurate is \(name), running on this Mac.")
+    if folded == "accurate" || folded == "9b" || folded == "qwen3.5:9b" {
+        return ("Accurate", "Accurate is qwen3.5:9b, running on this Mac.")
     }
-    if folded.contains("4b") || folded == "fast" {
-        let name = folded.contains("qwen") ? trimmed : "qwen3.5:4b"
-        return ("Fast", "Fast is \(name), running on this Mac.")
+    if folded == "fast" || folded == "4b" || folded == "qwen3.5:4b" {
+        return ("Fast", "Fast is qwen3.5:4b, running on this Mac.")
     }
-    return (trimmed, "Summaries use \(trimmed), running on this Mac.")
+    return (trimmed, "\(trimmed) is running on this Mac.")
 }
 
 final class YarnBar: NSView {

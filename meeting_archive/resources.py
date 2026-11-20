@@ -6,8 +6,12 @@ watcher start another heavy AI stage right now?
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .config import Config
@@ -44,6 +48,112 @@ def quality_for_model(model: str) -> str:
     if model_for_quality(model) == SUMMARY_MODEL_FULL:
         return QUALITY_ACCURATE
     return QUALITY_FAST
+
+
+# Fast and Accurate only. A name that merely contains "4b" is some other
+# model the user installed, and must not be rewritten into qwen3.5:4b.
+_BUILTIN_SUMMARY_NAMES = {
+    "",
+    QUALITY_FAST,
+    QUALITY_ACCURATE,
+    "4b",
+    "9b",
+    SUMMARY_MODEL_LOW_MEMORY,
+    SUMMARY_MODEL_FULL,
+}
+_OLLAMA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def is_builtin_summary_model(model: str) -> bool:
+    """True for Fast, Accurate, and the two qwen models Yarn ships."""
+    return str(model or "").strip().lower() in _BUILTIN_SUMMARY_NAMES
+
+
+def selectable_ollama_models(installed: list[str]) -> list[str]:
+    """Models already on this Mac, apart from Fast, Accurate, and embed models.
+
+    Embed models answer a search, not a summary. The two Yarn models stay
+    on the Fast and Accurate choices so this list cannot replace them.
+    """
+    known = {SUMMARY_MODEL_FULL.lower(), SUMMARY_MODEL_LOW_MEMORY.lower()}
+    chosen: list[str] = []
+    for name in installed:
+        text = str(name or "").strip()
+        lowered = text.lower()
+        if not text or lowered in known or "embed" in lowered:
+            continue
+        if text not in chosen:
+            chosen.append(text)
+    return chosen
+
+
+def stored_summary_model(
+    value: str, installed: list[str], *, allow_accurate: bool
+) -> tuple[str, str]:
+    """The model name to save, and an error when the choice is refused.
+
+    Fast and Accurate go through model_for_quality, including the 8 GB
+    refusal of Accurate. Any other name is kept only when Ollama already
+    has it. Nothing here downloads a model.
+    """
+    raw = str(value or "").strip()
+    if is_builtin_summary_model(raw):
+        model = model_for_quality(raw)
+        if model == SUMMARY_MODEL_FULL and not allow_accurate:
+            return "", "this Mac can only run Fast summaries"
+        return model, ""
+    if not _OLLAMA_NAME.match(raw) or "embed" in raw.lower():
+        return "", "that model cannot write a Yarn summary"
+    have = {str(name).lower(): str(name) for name in installed}
+    found = have.get(raw.lower())
+    if not found or found.lower() in {
+        SUMMARY_MODEL_FULL.lower(),
+        SUMMARY_MODEL_LOW_MEMORY.lower(),
+    }:
+        return "", "that model is not installed in Ollama on this Mac"
+    return found, ""
+
+
+def ollama_model_names(host: str) -> list[str]:
+    """Models the running Ollama is serving. A closed Ollama returns nothing.
+
+    `ollama list` starts the daemon. This asks the one that is already up.
+    """
+    url = str(host or "").rstrip("/") + "/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=0.4) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+        return []
+    names: list[str] = []
+    for item in payload.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def tidy_model_for(cfg: Config) -> str:
+    """The model that proofreads a transcript.
+
+    A summary may use another model already on this Mac. Tidy-up stays on
+    Fast or Accurate: the one chosen there, or that choice remembered from
+    before a different summary model was picked.
+    """
+    current = str(cfg.summary.model or "")
+    if is_builtin_summary_model(current) and current.strip():
+        model = model_for_quality(current)
+    else:
+        remembered = str(getattr(cfg.summary, "builtin", "") or "")
+        if is_builtin_summary_model(remembered) and remembered.strip():
+            model = model_for_quality(remembered)
+        else:
+            model = summary_model_choice()[0]
+    if model == SUMMARY_MODEL_FULL and not can_run_accurate():
+        return SUMMARY_MODEL_LOW_MEMORY
+    return model
 
 
 def summary_model_choice(ram_gb: float | None = None) -> tuple[str, str]:

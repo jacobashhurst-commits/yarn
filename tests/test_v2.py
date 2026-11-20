@@ -313,6 +313,35 @@ def test_summary_setting_accepts_fast_and_accurate_names(cfg):
     other = Config(root=cfg.root)
     _apply_settings_overlay(other)
     assert other.summary.model == "qwen3.5:4b"
+    assert other.summary.builtin == "fast"
+
+
+def test_another_model_on_this_mac_does_not_replace_fast(cfg, monkeypatch):
+    from meeting_archive.cli import cmd_setting
+    from meeting_archive.config import _apply_settings_overlay
+    from meeting_archive.resources import tidy_model_for
+
+    monkeypatch.setattr(
+        "meeting_archive.resources.ollama_model_names",
+        lambda host: ["qwen3.5:4b", "llama3.1:8b", "nomic-embed-text"],
+    )
+    assert cmd_setting(cfg, SimpleNamespace(key="summary_model", value="fast")) == 0
+    assert cmd_setting(cfg, SimpleNamespace(key="summary_model", value="llama3.1:8b")) == 0
+    other = Config(root=cfg.root)
+    _apply_settings_overlay(other)
+    assert other.summary.model == "llama3.1:8b"
+    assert other.summary.builtin == "fast"
+    assert tidy_model_for(other) == "qwen3.5:4b"
+    assert cmd_setting(cfg, SimpleNamespace(key="summary_model", value="nomic-embed-text")) == 1
+    assert cmd_setting(cfg, SimpleNamespace(key="summary_model", value="missing:7b")) == 1
+    again = Config(root=cfg.root)
+    _apply_settings_overlay(again)
+    assert again.summary.model == "llama3.1:8b"
+    assert cmd_setting(cfg, SimpleNamespace(key="summary_model", value="fast")) == 0
+    restored = Config(root=cfg.root)
+    _apply_settings_overlay(restored)
+    assert restored.summary.model == "qwen3.5:4b"
+    assert restored.summary.builtin == "fast"
 
 
 def test_summary_model_setting_overlay(cfg):

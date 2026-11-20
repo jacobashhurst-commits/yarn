@@ -52,6 +52,9 @@ final class YarnSettings: NSObject, NSWindowDelegate {
     private let retention = SettingChoices()
     private let process = SettingChoices()
     private let summary = SettingChoices()
+    private let onMac = SettingChoices()
+    private var onMacModels: [String] = []
+    private var summaryPick = "fast"
     private let recognise = SettingSwitch(
         title: "Recognise known speakers",
         caption: "A voice Yarn already knows can keep its name."
@@ -75,6 +78,7 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             current = YarnSettings(paths: paths)
         }
         current?.reload()
+        current?.loadOnMac()
         current?.window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -189,8 +193,20 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             self?.write("summarize_when", id)
         }
         summary.onPick = { [weak self] id in
-            self?.summary.select(id)
-            self?.write("summary_model", id)
+            guard let self else { return }
+            self.summaryPick = id
+            self.summary.select(id)
+            self.onMac.select("builtin")
+            self.write("summary_model", id)
+        }
+        onMac.onPick = { [weak self] id in
+            guard let self else { return }
+            self.onMac.select(id)
+            if id == "builtin" {
+                self.write("summary_model", self.summaryPick)
+            } else {
+                self.write("summary_model", id)
+            }
         }
         recognise.onChange = { [weak self] on in
             self?.write("recognise_known", on ? "on" : "off")
@@ -256,6 +272,8 @@ final class YarnSettings: NSObject, NSWindowDelegate {
             ("fast", "Fast (4B)", true),
             ("accurate", accurate, canAccurate),
         ], selected: canAccurate ? "accurate" : "fast")
+        summaryPick = canAccurate ? "accurate" : "fast"
+        onMac.show([("builtin", "Fast or Accurate", true)], selected: "builtin")
 
         briefTip.font = .systemFont(ofSize: 12)
         briefTip.textColor = YarnColor.slate
@@ -301,6 +319,11 @@ final class YarnSettings: NSObject, NSWindowDelegate {
 
             section("Transcription and models"),
             group("Summary model", body: summary),
+            group(
+                "On this Mac",
+                caption: "Another model already in Ollama, when Ollama is open. Summaries and Ask use it. Tidy-up stays on Fast or Accurate. Yarn does not download a model.",
+                body: onMac
+            ),
             group(
                 "Summary style",
                 caption: "What a summary leans towards. It never adds anything that was not said.",
@@ -506,12 +529,45 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         brief.setOn(briefOn)
         let manual = integer(data["brief_manual_count"]) ?? 0
         briefTip.isHidden = briefOn || manual < 3
-        let model = text(data["summary_model"]).lowercased()
-        let accurate = model.contains("9b") || model == "accurate"
-        if model.isEmpty {
-            summary.select(canAccurate ? "accurate" : "fast")
+        let model = text(data["summary_model"])
+        let folded = model.lowercased()
+        let knownAccurate = folded == "accurate" || folded == "9b" || folded == "qwen3.5:9b"
+        let knownFast = folded.isEmpty || folded == "fast" || folded == "4b" || folded == "qwen3.5:4b"
+        let remembered = text(data["summary_builtin"]).lowercased()
+        if knownAccurate {
+            summaryPick = "accurate"
+        } else if knownFast {
+            summaryPick = folded.isEmpty && canAccurate ? "accurate" : "fast"
+        } else if remembered == "accurate" || remembered == "fast" {
+            summaryPick = remembered
         } else {
-            summary.select(accurate ? "accurate" : "fast")
+            summaryPick = canAccurate ? "accurate" : "fast"
+        }
+        summary.select(summaryPick)
+        var options: [(String, String, Bool)] = [("builtin", "Fast or Accurate", true)]
+        var seen = Set<String>()
+        for name in onMacModels where seen.insert(name).inserted {
+            options.append((name, name, true))
+        }
+        let custom = (knownAccurate || knownFast) ? "" : model
+        if !custom.isEmpty && seen.insert(custom).inserted {
+            options.append((custom, custom, true))
+        }
+        onMac.show(options, selected: custom.isEmpty ? "builtin" : custom)
+    }
+
+    /// Other Ollama models, from a running Ollama. A closed Ollama leaves
+    /// the row on Fast or Accurate.
+    private func loadOnMac() {
+        let ma = paths.ma
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let got = Self.capture(ma, ["ollama-models", "--json"])
+            let names = got["models"] as? [String] ?? []
+            DispatchQueue.main.async {
+                guard let self, !self.writing else { return }
+                self.onMacModels = names
+                self.reload()
+            }
         }
     }
 

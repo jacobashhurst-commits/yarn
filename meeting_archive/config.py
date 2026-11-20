@@ -189,6 +189,9 @@ class SummaryConfig:
     # is turned on by hand in config.toml. No menu or window sets it.
     allow_remote_host: bool = False
     model: str = "qwen3.5:9b"
+    # Fast or Accurate, remembered when summaries use some other local model.
+    # Tidy-up reads this and keeps using a Yarn model.
+    builtin: str = ""
     timeout_s: int = 900
     # Longer transcripts are summarized in local chunks, then combined.
     # 12k keeps a 9B model inside 8 GB unified memory; 40k was one prompt
@@ -692,6 +695,8 @@ def _apply_settings_overlay(cfg: Config) -> None:
         cfg.summary.when = str(overlay["summarize_when"])
     if "summary_model" in overlay:
         cfg.summary.model = str(overlay["summary_model"])
+    if "summary_builtin" in overlay:
+        cfg.summary.builtin = str(overlay["summary_builtin"])
     if "meeting_language" in overlay:
         from .languages import normalise_language
 
