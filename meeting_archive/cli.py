@@ -550,6 +550,11 @@ def cmd_notes(cfg: Config, args) -> int:
 
 
 def cmd_watch(cfg: Config, args) -> int:
+    from . import library
+
+    # The meeting page's copy button posts here. The watcher is what stays
+    # running, so the listener starts with it.
+    library.ensure_server(cfg)
     watcher.run(cfg, interval=args.interval, once=False)
     return 0
 
@@ -1114,11 +1119,9 @@ def cmd_import_transcript(cfg: Config, args) -> int:
 def cmd_transcripts(cfg: Config, args) -> int:
     from . import library
 
-    from . import space_saver
-
-    if space_saver.is_on(cfg):
-        # Older meetings link to the local server, so it has to be awake.
-        library.ensure_server(cfg)
+    # The copy button and, with Space saver on, the older meeting links
+    # both post to this Mac. Wake the listener either way.
+    library.ensure_server(cfg)
     path = library.render_transcript_index(cfg)
     print(path)
     if getattr(args, "open", False):

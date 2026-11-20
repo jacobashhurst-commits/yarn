@@ -48,6 +48,7 @@ struct Snapshot {
     var meetings = 0
     var failed = 0
     var model = ""
+    var modelTip = ""
     var tokens = 0
     var space = ""
     var ollamaDown = false
@@ -100,8 +101,8 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let processButton = NSButton(title: "Process waiting", target: nil, action: nil)
     let resumeButton = NSButton(title: "Resume", target: nil, action: nil)
     let noteLabel = NSTextField(wrappingLabelWithString: "")
-    // The footer is separate labels so "tokens saved" and "GB saved" can
-    // each explain themselves on hover. One label has one tooltip.
+    // The footer is separate labels so tokens, disk and the model can each
+    // explain themselves on hover. One label has one tooltip.
     let footMeetings = NSTextField(labelWithString: "")
     let footTokens = NSTextField(labelWithString: "")
     let footSpace = NSTextField(labelWithString: "")
@@ -223,6 +224,9 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // The saved frame is where it was left. The width follows the footer,
+        // so a restored frame does not keep the old gap on the right.
+        fitWindow()
         offerWelcome()
     }
 
@@ -338,7 +342,6 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         style(noteLabel, size: 12, weight: .regular, color: YarnColor.slate)
         noteLabel.maximumNumberOfLines = 2
-        noteLabel.preferredMaxLayoutWidth = 340
         noteLabel.wantsLayer = true
         quips = QuipLine(label: noteLabel)
         for part in [footMeetings, footTokens, footSpace, footModel, footRest] {
@@ -347,11 +350,12 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
             part.lineBreakMode = .byTruncatingTail
             part.setContentHuggingPriority(.required, for: .horizontal)
         }
-        // One line. The model is short ("Fast" or "Accurate") so it stays
-        // visible; the token count is what gives up space if the window is tight.
+        // One line. The count, the space and the model stay whole. A rare
+        // "kept their audio" note is the only part that may shorten.
         footMeetings.setContentCompressionResistancePriority(.required, for: .horizontal)
+        footTokens.setContentCompressionResistancePriority(.required, for: .horizontal)
+        footSpace.setContentCompressionResistancePriority(.required, for: .horizontal)
         footModel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        footTokens.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         footRest.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         footTokens.setAccessibilityHelp("Approximate cost if this had run on a hosted AI model")
         footSpace.setAccessibilityHelp("Disk space saved compared with keeping video recordings")
@@ -377,20 +381,44 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fitWindow()
     }
 
-    /// The window is only as tall as what is on screen. A fixed height was
-    /// stretching the recording card into a blank band whenever the timer
-    /// was hidden.
+    /// The window is only as tall as what is on screen, and only as wide as
+    /// the footer. A fixed width left an empty gap after the model name.
     func fitWindow() {
         guard let rootStack, let content = window.contentView else { return }
+        let width = fittedWidth()
+        noteLabel.preferredMaxLayoutWidth = width - 40
         content.layoutSubtreeIfNeeded()
         let height = ceil(rootStack.fittingSize.height) + 24
-        let current = window.contentRect(forFrameRect: window.frame).height
-        guard abs(current - height) > 2 else { return }
+        let current = window.contentRect(forFrameRect: window.frame)
+        guard abs(current.height - height) > 2 || abs(current.width - width) > 2 else { return }
         var frame = window.frame
-        let next = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 400, height: height))
+        let next = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: height))
         frame.origin.y += frame.size.height - next.height
         frame.size = next.size
         window.setFrame(frame, display: true)
+    }
+
+    /// Footer text, or the title and the two record buttons when the footer
+    /// is shorter than those.
+    private func fittedWidth() -> CGFloat {
+        func words(_ text: String, _ font: NSFont) -> CGFloat {
+            ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        }
+        let footer = [footMeetings, footTokens, footSpace, footModel, footRest].reduce(CGFloat(0)) { sum, field in
+            guard !field.isHidden, !field.stringValue.isEmpty, let font = field.font else { return sum }
+            field.invalidateIntrinsicContentSize()
+            let intrinsic = field.intrinsicContentSize.width
+            let drawn = words(field.stringValue, font)
+            let width = intrinsic > drawn && intrinsic < 800 ? intrinsic : drawn
+            return sum + width
+        }
+        let header = 108 + 12 + words("Everything stays on this Mac", NSFont.systemFont(ofSize: 13))
+        let buttonWidth = { (button: NSButton) -> CGFloat in
+            let size = button.intrinsicContentSize.width
+            return size > 0 && size < 400 ? size : 0
+        }
+        let buttons = buttonWidth(roomButton) + buttonWidth(headphonesButton) + 8 + 28
+        return max(header, footer, buttons) + 40
     }
 
     func refresh() {
@@ -459,13 +487,15 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         progressTitle.isHidden = snap.heading.isEmpty
 
         footMeetings.stringValue = "\(snap.meetings) meeting\(snap.meetings == 1 ? "" : "s")"
-        footTokens.stringValue = " · \(formatTokens(snap.tokens)) tokens saved"
+        footTokens.stringValue = " · \(formatTokens(snap.tokens)) tokens"
         footTokens.toolTip = tokensTip.isEmpty ? nil : tokensTip
         footSpace.stringValue = snap.space.isEmpty ? "" : " · \(snap.space)"
         footSpace.isHidden = snap.space.isEmpty
         footSpace.toolTip = spaceTip.isEmpty ? nil : spaceTip
         footModel.stringValue = snap.model.isEmpty ? "" : " · \(snap.model)"
         footModel.isHidden = snap.model.isEmpty
+        footModel.toolTip = snap.modelTip.isEmpty ? nil : snap.modelTip
+        footModel.setAccessibilityHelp(snap.modelTip)
         let rest = snap.failed > 0 ? " · \(snap.failed) kept their audio" : ""
         footRest.stringValue = rest
         footRest.isHidden = rest.isEmpty
@@ -597,7 +627,9 @@ final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         snap.space = spaceSaved
         snap.failed = countFiles(root + "/recordings/failed", suffix: ".json")
         let settings = json(root + "/.yarn-settings.json")
-        snap.model = summaryLabel(text(settings["summary_model"]))
+        let summary = summaryChoice(text(settings["summary_model"]))
+        snap.model = summary.label
+        snap.modelTip = summary.tip
         let hot = text(settings["record_hotkey"])
         var startMode = text(settings["record_mode"])
         if startMode != "room" && startMode != "call" {
@@ -932,14 +964,26 @@ private func meetingEta(
     return text
 }
 
-private func summaryLabel(_ raw: String) -> String {
-    let model = raw.lowercased()
-    if model.isEmpty {
-        return ProcessInfo.processInfo.physicalMemory > 10_737_418_240 ? "Accurate" : "Fast"
+/// Fast and Accurate are the names in the footer. The hover says which
+/// model that is. The ids match meeting_archive/resources.py.
+private func summaryChoice(_ raw: String) -> (label: String, tip: String) {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let folded = trimmed.lowercased()
+    if folded.isEmpty {
+        let accurate = ProcessInfo.processInfo.physicalMemory > 10_737_418_240
+        return accurate
+            ? ("Accurate", "Accurate is qwen3.5:9b, running on this Mac.")
+            : ("Fast", "Fast is qwen3.5:4b, running on this Mac.")
     }
-    if model.contains("9b") || model == "accurate" { return "Accurate" }
-    if model.contains("4b") || model == "fast" { return "Fast" }
-    return raw
+    if folded.contains("9b") || folded == "accurate" {
+        let name = folded.contains("qwen") ? trimmed : "qwen3.5:9b"
+        return ("Accurate", "Accurate is \(name), running on this Mac.")
+    }
+    if folded.contains("4b") || folded == "fast" {
+        let name = folded.contains("qwen") ? trimmed : "qwen3.5:4b"
+        return ("Fast", "Fast is \(name), running on this Mac.")
+    }
+    return (trimmed, "Summaries use \(trimmed), running on this Mac.")
 }
 
 final class YarnBar: NSView {

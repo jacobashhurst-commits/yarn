@@ -292,6 +292,25 @@ button.texty {
   margin-left: 8px;
 }
 button.texty:hover { background: var(--cloud); }
+form.share {
+  margin: 0 0 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--cloud);
+}
+button.send {
+  font: 600 16px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: #fff;
+  background: #167DFF;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px 18px;
+  cursor: pointer;
+}
+button.send:hover { background: #0f6ae0; }
+form.share .why { margin: 10px 0 0; }
+.hint a { font-weight: 600; }
 .name-line { display: flex; align-items: center; gap: 8px; }
 .name-edit {
   display: flex;

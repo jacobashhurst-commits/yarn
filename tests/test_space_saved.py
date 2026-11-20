@@ -28,11 +28,16 @@ def test_the_unit_grows_from_megabytes_to_terabytes():
 import json
 
 from meeting_archive.config import Config, load_config
+from datetime import date
+
 from meeting_archive.space_saved import (
+    earliest_recording,
     format_usd,
+    months_between,
     report,
     saved_bytes,
     space_breakdown,
+    subscription_sentence,
     token_cost_usd,
 )
 from meeting_archive.summarize import (
@@ -115,6 +120,7 @@ def test_the_token_tooltip_names_its_assumptions(tmp_path):
     tip = tokens["tooltip"]
     assert tip.startswith("Approx. $3.00")
     assert "Claude Sonnet 5.5" in tip and "$2 per million" in tip and "$10 per million" in tip
+    assert "paid meeting service" not in tip
 
 
 def test_an_empty_archive_has_honest_tooltips(tmp_path):
@@ -129,6 +135,7 @@ def test_prices_and_the_video_rate_come_from_config(tmp_path):
         f'root = "{tmp_path}"\n[savings]\nreference_model = "Some Model"\n'
         "input_usd_per_million = 1.5\noutput_usd_per_million = 6\n"
         'video_gb_per_hour = 2\nvideo_label = "1080p video"\n'
+        "subscription_usd_per_month = 10\n"
     )
     cfg = load_config(path)
     _meeting(tmp_path, "2026-09-11T10-00-00", 3600)
@@ -141,3 +148,28 @@ def test_prices_and_the_video_rate_come_from_config(tmp_path):
     assert "1080p video" in data["space"]["tooltip"]
     assert data["tokens"]["cost_usd"] == 1.5
     assert "Some Model" in data["tokens"]["tooltip"]
+    priced = report(cfg, today=date(2026, 11, 20))["tokens"]["tooltip"]
+    assert "about $10 a month" in priced
+    assert "about $20" in priced
+
+
+def test_a_part_month_is_not_billed_as_a_whole_one():
+    start = date(2026, 10, 21)
+    assert months_between(start, date(2026, 11, 20)) == 0
+    assert months_between(start, date(2026, 11, 21)) == 1
+    assert months_between(date(2026, 9, 11), date(2026, 11, 20)) == 2
+
+
+def test_the_hover_adds_a_paid_service_since_the_first_recording(tmp_path):
+    cfg = Config(root=tmp_path)
+    _meeting(tmp_path, "2026-11-19T10-00-00", 60)
+    _meeting(tmp_path, "2026-09-11T10-00-00", 60)
+    (tmp_path / "recordings").mkdir()
+    (tmp_path / "recordings" / "notes.txt").write_text("not a recording")
+    assert earliest_recording(tmp_path) == date(2026, 9, 11)
+    fresh = subscription_sentence(date(2026, 11, 10), date(2026, 11, 20), 30)
+    assert "less than a month" in fresh and "under $30" in fresh
+    tip = report(cfg, today=date(2026, 11, 20))["tokens"]["tooltip"]
+    assert "about $30 a month" in tip
+    assert "11 September 2026" in tip
+    assert "about 2 months, that is about $60" in tip

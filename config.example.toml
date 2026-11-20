@@ -159,3 +159,6 @@ output_usd_per_million = 10.0
 # A recording of a video call. 1 GB an hour is ordinary 720p; 1080p is nearer 2.
 video_gb_per_hour = 1.0
 video_label = "720p video"
+# What a paid meeting product tends to charge. The hover multiplies this by
+# the months since the first recording, and says it is about that much.
+subscription_usd_per_month = 30

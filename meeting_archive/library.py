@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 LIBRARY_PORT = 47331
 # Bumped when the routes change, so a server left running from an older
 # Yarn is replaced instead of answering 404 to a link it does not know.
-_SERVER_MARK = b"yarn-library/4"
+_SERVER_MARK = b"yarn-library/6"
 
 
 @dataclass
@@ -334,6 +334,69 @@ def render_meeting_page(cfg: Config, meeting_id: str, *, banner: str = "") -> by
         audio_hrefs=recording_sources(cfg, meeting_id, token),
         banner=banner,
     ).encode("utf-8")
+
+
+def copy_to_downloads(
+    cfg: Config, meeting_id: str, folder: Path | None = None, *, reveal: bool = True
+) -> Path:
+    """Write a shareable page in Downloads and show it in Finder.
+
+    The page is made for this send. It is not the transcript Yarn keeps.
+    Notes and the recording are left out, and the file says it is a copy.
+    """
+    from .models import speaker_display_indices
+    from .speakers import library_details
+
+    try:
+        parse_meeting_id(meeting_id)
+    except ValueError as exc:
+        raise ValueError("That is not a meeting.") from exc
+    path = cfg.transcript_json(meeting_id)
+    if not path.exists():
+        raise FileNotFoundError("That meeting has no transcript yet.")
+    transcript = Transcript.read(path)
+    notes = records.read_notes(cfg.notes_json(meeting_id))
+    roster = records.speaker_roster(notes)
+    display = speaker_display_indices(transcript.speaker_profiles)
+    titles, companies = library_details(cfg)
+    heading = transcript.title.strip() or records.meeting_title(notes, transcript)
+    folder = folder or (Path.home() / "Downloads")
+    folder.mkdir(parents=True, exist_ok=True)
+    destination = _unused_path(folder, records.share_filename(meeting_id, heading))
+    records.write_text_atomic(
+        destination,
+        records.render_transcript_html(
+            transcript,
+            cfg.turn_labeller(roster, display),
+            notes,
+            titles=titles,
+            companies=companies,
+            for_copy=True,
+        ),
+    )
+    if reveal:
+        subprocess.run(
+            ["open", "-R", str(destination)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return destination
+
+
+def _unused_path(folder: Path, name: str) -> Path:
+    """A free name in the folder. A second copy becomes 'name 2', never a clobber."""
+    path = folder / name
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    number = 2
+    while True:
+        candidate = folder / f"{stem} {number}{suffix}"
+        if not candidate.exists():
+            return candidate
+        number += 1
 
 
 def save_meeting_notes(cfg: Config, meeting_id: str, detail: str) -> None:
@@ -686,7 +749,7 @@ def _handler(cfg: Config, token: str):
                 self._send(403, b"Refused", "text/plain")
                 return
             path = self.path.split("?", 1)[0]
-            if path not in ("/delete", "/rename", "/notes"):
+            if path not in ("/delete", "/rename", "/notes", "/share"):
                 self._send(404, b"Not found", "text/plain")
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -701,6 +764,8 @@ def _handler(cfg: Config, token: str):
             try:
                 if path == "/notes":
                     save_meeting_notes(cfg, meeting_id, (fields.get("detail") or [""])[0])
+                elif path == "/share":
+                    saved = copy_to_downloads(cfg, meeting_id)
                 elif path == "/rename":
                     rename_meeting(cfg, meeting_id, (fields.get("name") or [""])[0])
                 else:
@@ -708,6 +773,16 @@ def _handler(cfg: Config, token: str):
             except (OSError, RuntimeError, ValueError) as exc:
                 body = f"<p>{_esc(str(exc))}</p>".encode()
                 self._send(409, body, "text/html; charset=utf-8")
+                return
+            if path == "/share":
+                from . import htmltheme
+
+                page = htmltheme.document(
+                    "Yarn",
+                    htmltheme.masthead("Transcript", "Saved in Downloads")
+                    + f"<p>The copy is {htmltheme.html_escape(saved.name)}. Finder is showing it.</p>",
+                ).encode()
+                self._send(200, page, "text/html; charset=utf-8")
                 return
             if path == "/notes":
                 loc = (

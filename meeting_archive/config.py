@@ -222,6 +222,9 @@ class SavingsConfig:
     # which is ordinary 720p. 1080p is nearer 2 GB an hour.
     video_gb_per_hour: float = 1.0
     video_label: str = "720p video"
+    # A typical paid meeting product, per month. Not a quote of one bill.
+    # The hover uses it from the first recording, and rounds the months down.
+    subscription_usd_per_month: float = 30.0
 
 
 @dataclass
@@ -572,7 +575,12 @@ def load_config(path: Path | None = None) -> Config:
     for key in ("reference_model", "video_label"):
         if key in sv:
             setattr(cfg.savings, key, str(sv[key]))
-    for key in ("input_usd_per_million", "output_usd_per_million", "video_gb_per_hour"):
+    for key in (
+        "input_usd_per_million",
+        "output_usd_per_million",
+        "video_gb_per_hour",
+        "subscription_usd_per_month",
+    ):
         if key in sv:
             try:
                 value = float(sv[key])

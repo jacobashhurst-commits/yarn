@@ -88,12 +88,24 @@ def meeting_title(notes: dict | None, transcript: "Transcript") -> str:
 
 def markdown_filename(meeting_id: str, title: str) -> str:
     """`2026-09-11 Watch show.md` - date first so a folder sorts chronologically."""
+    return _readable_name(meeting_id, title) + ".md"
+
+
+def share_filename(meeting_id: str, title: str) -> str:
+    """Downloads name for a copy someone else can open.
+
+    The date keeps two meetings apart. The rest is the meeting's name.
+    """
+    return _readable_name(meeting_id, title) + ".html"
+
+
+def _readable_name(meeting_id: str, title: str) -> str:
     date = meeting_id[:10] if len(meeting_id) >= 10 else meeting_id
     cleaned = _UNSAFE_FILENAME.sub(" ", title).strip(" .")
     cleaned = re.sub(r"\s+", " ", cleaned)
     if not cleaned:
         cleaned = "Meeting"
-    return f"{date} {cleaned}.md"
+    return f"{date} {cleaned}"
 
 
 def write_json_atomic(path: Path, payload: dict) -> Path:
@@ -625,6 +637,23 @@ def ensure_transcript_page(cfg, transcript: Transcript, notes: dict | None = Non
     return page
 
 
+# The public page. A shared copy links here so someone who has just read a
+# meeting can get Yarn. It is a page, not the installer itself.
+YARN_DOWNLOAD_PAGE = "https://jacobashhurst-commits.github.io/yarn/"
+
+
+def yarn_offer() -> str:
+    """The line on a shared copy, with the link to Yarn's download page."""
+    from . import htmltheme
+
+    return (
+        "Shared from Yarn: this copy has the summary and transcript. "
+        "The private notes and audio never left the Mac they were recorded on. "
+        f'<a href="{htmltheme.html_escape(YARN_DOWNLOAD_PAGE)}">'
+        "Get Yarn, a free meeting assistant that runs entirely on your Mac</a>."
+    )
+
+
 def render_transcript_html(
     transcript: Transcript,
     label_fn,
@@ -636,16 +665,26 @@ def render_transcript_html(
     notes_form: tuple[str, str] | None = None,
     audio_hrefs: list[tuple[str, str]] | None = None,
     banner: str = "",
+    for_copy: bool = False,
 ) -> str:
     """Readable meeting page. Same facts as the markdown, in the Yarn style.
 
     `notes_form` is (post url, token) when the page can save notes back to
     this Mac. `audio_hrefs` is (caption, url) when the page is served by the
-    library rather than opened as a file.
+    library rather than opened as a file. `for_copy` is the page written to
+    Downloads for someone else: no notes, no recording, and a line that
+    says so.
     """
     from . import htmltheme
 
-    notes = notes or {}
+    notes = dict(notes or {})
+    if for_copy:
+        # The copy is a fresh page. Notes and audio stay on this Mac even if
+        # a caller passed them in.
+        notes["detail"] = ""
+        notes_form = None
+        recordings = []
+        audio_hrefs = []
     titles = titles or {}
     companies = companies or {}
     recordings = recordings or []
@@ -730,31 +769,36 @@ def render_transcript_html(
     attendee_line = (
         f'<p class="lede">{htmltheme.html_escape(attendees)}</p>' if attendees else ""
     )
-    if audio_hrefs is None:
-        audio_hrefs = [(caption, path.as_uri()) for caption, path in recordings]
-    if audio_hrefs:
-        players = []
-        for caption, href in audio_hrefs:
-            players.append(
-                '<div class="player">'
-                f'<div class="item">{htmltheme.html_escape(caption)}</div>'
-                f'<audio controls preload="metadata" src="{htmltheme.html_escape(href)}"></audio>'
-                "</div>"
-            )
-        tracks = ""
-        if len(audio_hrefs) > 1:
-            tracks = '<p class="why">A call is two tracks. Play both to hear everyone.</p>'
-        listen = (
-            '<section class="card"><h2>Listen</h2>'
-            '<p class="why">Still on this Mac.</p>'
-            f"{tracks}{''.join(players)}</section>"
-        )
+    if for_copy:
+        # The copy has no player. Saying the recording was cleared would be
+        # the wrong reason: it was left behind on purpose.
+        listen = ""
     else:
-        listen = (
-            '<section class="card"><h2>Listen</h2>'
-            '<p class="empty">The recording has been cleared. The transcript stays.</p>'
-            "</section>"
-        )
+        if audio_hrefs is None:
+            audio_hrefs = [(caption, path.as_uri()) for caption, path in recordings]
+        if audio_hrefs:
+            players = []
+            for caption, href in audio_hrefs:
+                players.append(
+                    '<div class="player">'
+                    f'<div class="item">{htmltheme.html_escape(caption)}</div>'
+                    f'<audio controls preload="metadata" src="{htmltheme.html_escape(href)}"></audio>'
+                    "</div>"
+                )
+            tracks = ""
+            if len(audio_hrefs) > 1:
+                tracks = '<p class="why">A call is two tracks. Play both to hear everyone.</p>'
+            listen = (
+                '<section class="card"><h2>Listen</h2>'
+                '<p class="why">Still on this Mac.</p>'
+                f"{tracks}{''.join(players)}</section>"
+            )
+        else:
+            listen = (
+                '<section class="card"><h2>Listen</h2>'
+                '<p class="empty">The recording has been cleared. The transcript stays.</p>'
+                "</section>"
+            )
     bars = []
     spoken: list[tuple[str, float]] = []
     if transcript.speaker_profiles:
@@ -823,21 +867,54 @@ def render_transcript_html(
     saved = (
         f'<p class="hint">{htmltheme.html_escape(banner)}</p>' if banner.strip() else ""
     )
+    if for_copy:
+        stamp = f"{when} · {minutes}m {seconds:02d}s · a copy made to share"
+        offer = yarn_offer()
+        copy_note = f'<p class="hint">{offer}</p>'
+        share_bar = ""
+        middle = who
+        footer = f"<footer><p>{offer}</p></footer>"
+    else:
+        stamp = f"{when} · {minutes}m {seconds:02d}s · saved on this Mac"
+        copy_note = ""
+        share_bar = _share_bar(notes_form, transcript.meeting_id)
+        middle = f'<div class="grid">{listen}{who}</div>'
+        footer = ""
     body = f"""
   {htmltheme.masthead("Transcript", heading)}
-  <p class="when">{htmltheme.html_escape(when)} · {minutes}m {seconds:02d}s · saved on this Mac</p>
+  <p class="when">{htmltheme.html_escape(stamp)}</p>
   {saved}
+  {copy_note}
+  {share_bar}
   {attendee_line}
   {overview}
-  <div class="grid">
-    {listen}
-    {who}
-  </div>
+  {middle}
   {notes_card}
   {voices_card}
   <section class="card"><h2>What was said</h2>{"".join(coloured)}</section>
+  {footer}
 """
     return htmltheme.document(f"Yarn transcript, {heading}", body)
+
+
+def _share_bar(notes_form: tuple[str, str] | None, meeting_id: str) -> str:
+    """The button that writes a Downloads copy. Absent on the copy itself."""
+    if not notes_form:
+        return ""
+    from . import htmltheme
+
+    action, token = notes_form
+    share = action.rsplit("/", 1)[0] + "/share"
+    return (
+        '<form class="share" method="post" action="'
+        f'{htmltheme.html_escape(share)}">'
+        f'<input type="hidden" name="meeting" value="{htmltheme.html_escape(meeting_id)}">'
+        f'<input type="hidden" name="token" value="{htmltheme.html_escape(token)}">'
+        '<button class="send" type="submit">Copy a version to send</button>'
+        '<p class="why">Puts a page in Downloads, named after this meeting. '
+        "Your notes and the recording stay here.</p>"
+        "</form>"
+    )
 
 
 def _format_processing_span(seconds: float) -> str:

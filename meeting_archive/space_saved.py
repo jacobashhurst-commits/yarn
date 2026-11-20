@@ -19,6 +19,8 @@ of them is edited.
 from __future__ import annotations
 
 import json
+import re
+from datetime import date
 from pathlib import Path
 
 # A plain video recording of the meeting is 1 GB an hour. The figure used at
@@ -158,6 +160,72 @@ def format_usd(amount: float) -> str:
     return f"${amount:,.0f}"
 
 
+_STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def earliest_recording(root: Path) -> date | None:
+    """The day of the oldest recording or transcript still in the archive.
+
+    The id starts with the day the recording began. File dates move when
+    Yarn copies a meeting, so they are not the start.
+    """
+    found: date | None = None
+    for folder in (root / "transcripts", root / "recordings"):
+        if not folder.is_dir():
+            continue
+        for path in folder.rglob("*"):
+            if not path.is_file():
+                continue
+            match = _STAMP.match(path.name)
+            if match is None:
+                continue
+            try:
+                day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            except ValueError:
+                continue
+            if found is None or day < found:
+                found = day
+    return found
+
+
+def months_between(start: date, today: date) -> int:
+    """Whole months from start to today. A part month does not count.
+
+    Rounding up would bill a paid service for a month Yarn had barely started.
+    """
+    if today <= start:
+        return 0
+    months = (today.year - start.year) * 12 + (today.month - start.month)
+    if today.day < start.day:
+        months -= 1
+    return max(0, months)
+
+
+def _plain_usd(amount: float) -> str:
+    if float(amount) == int(amount):
+        return f"${int(amount):,}"
+    return format_usd(amount)
+
+
+def subscription_sentence(start: date, today: date, monthly: float) -> str:
+    """What a paid meeting product would have charged since the first recording."""
+    when = f"{start.day} {start.strftime('%B %Y')}"
+    rate = _plain_usd(monthly)
+    months = months_between(start, today)
+    if months <= 0:
+        return (
+            f"A paid meeting service is about {rate} a month. "
+            f"The first recording was {when}, less than a month ago, "
+            f"so that is under {rate}."
+        )
+    unit = "month" if months == 1 else "months"
+    total = _plain_usd(months * monthly)
+    return (
+        f"A paid meeting service is about {rate} a month. "
+        f"Since {when}, about {months} {unit}, that is about {total}."
+    )
+
+
 def _hours(seconds: float) -> str:
     hours = seconds / 3600
     if hours < 1:
@@ -168,11 +236,12 @@ def _hours(seconds: float) -> str:
     return f"{round(hours):,} hours"
 
 
-def report(cfg) -> dict:
+def report(cfg, today: date | None = None) -> dict:
     """Everything the Dock footer shows about savings, with its explanations."""
     from .summarize import saved_token_split
 
     savings = cfg.savings
+    today = today or date.today()
     read, written, unsplit = saved_token_split(cfg.root)
     cost = token_cost_usd(
         read,
@@ -196,6 +265,11 @@ def report(cfg) -> dict:
         tokens_tip = (
             "Tokens are counted when Yarn writes a summary, a brief or an answer "
             "on this Mac. Nothing yet."
+        )
+    started = earliest_recording(cfg.root)
+    if started is not None and savings.subscription_usd_per_month > 0:
+        tokens_tip += "\n" + subscription_sentence(
+            started, today, savings.subscription_usd_per_month
         )
 
     if space["meetings"]:

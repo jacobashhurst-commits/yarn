@@ -126,6 +126,65 @@ def test_written_notes_are_searchable_and_not_passed_off_as_speech(cfg):
     assert "Ask Priya" not in store.documents[0]
 
 
+def test_a_shared_copy_leaves_notes_and_the_recording_behind(cfg, tmp_path):
+    from meeting_archive import library
+    from meeting_archive.records import YARN_DOWNLOAD_PAGE
+
+    transcript = Transcript.read(cfg.transcript_json(MEETING))
+    transcript.title = "Launch planning"
+    transcript.summary = "Ship on Thursday."
+    transcript.write(cfg.transcript_json(MEETING))
+    write_notes(
+        cfg.notes_json(MEETING),
+        MEETING,
+        notes="Launch planning",
+        detail="Ask Priya about the budget.",
+    )
+    wav = cfg.audio_archive_dir / f"{MEETING}__room.wav"
+    wav.write_bytes(b"RIFF")
+    downloads = tmp_path / "Downloads"
+    path = library.copy_to_downloads(cfg, MEETING, downloads, reveal=False)
+    assert path.parent == downloads
+    assert path.name == "2026-11-10 Launch planning.html"
+    text = path.read_text(encoding="utf-8")
+    assert "a copy made to share" in text
+    offer = "Get Yarn, a free meeting assistant that runs entirely on your Mac"
+    note = text.split("Shared from Yarn:", 1)[1].split("</p>", 1)[0]
+    assert "this copy has the summary and transcript" in note
+    assert "The private notes and audio never left the Mac they were recorded on." in note
+    assert offer in note and YARN_DOWNLOAD_PAGE in note
+    assert text.count(offer) == 2
+    assert "Ask Priya about the budget." not in text
+    assert "Your notes" not in text
+    assert "<audio" not in text
+    assert "Listen" not in text
+    assert "Copy a version to send" not in text
+    assert "Ship on Thursday." in text
+    assert "We agreed to ship on Thursday." in text
+    assert YARN_DOWNLOAD_PAGE in text
+    assert offer in text
+    again = library.copy_to_downloads(cfg, MEETING, downloads, reveal=False)
+    assert again.name == "2026-11-10 Launch planning 2.html"
+    transcript.title = "Q3/budget: review"
+    transcript.write(cfg.transcript_json(MEETING))
+    escaped = library.copy_to_downloads(cfg, MEETING, downloads, reveal=False)
+    assert escaped.parent == downloads
+    assert escaped.name == "2026-11-10 Q3 budget review.html"
+    page = render_transcript_html(
+        transcript,
+        cfg.turn_labeller({}, {}),
+        {"detail": "Ask Priya about the budget."},
+        notes_form=("http://127.0.0.1:47331/notes", "tok"),
+        recordings=[("The recording", wav)],
+    )
+    assert "Copy a version to send" in page
+    assert 'class="send"' in page
+    assert "Downloads" in page
+    assert 'action="http://127.0.0.1:47331/share"' in page
+    assert "Ask Priya about the budget." in page
+    assert "<audio" in page
+
+
 def test_notes_markup_cannot_break_the_page(cfg):
     transcript = Transcript.read(cfg.transcript_json(MEETING))
     page = render_transcript_html(
