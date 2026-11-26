@@ -31,6 +31,9 @@ from meeting_archive import records
 from meeting_archive.config import Config, DiarizeConfig
 from meeting_archive.diarize import (
     DiarizationUnavailable,
+    Diarizer,
+    _diarization_config,
+    diarization_provider,
     assign_speakers,
     absorb_short_voices,
     settle_brief_voices,
@@ -57,6 +60,101 @@ from meeting_archive.names import infer_speaker_names, speaker_guess_map
 from meeting_archive.audio import spoken_seconds
 from meeting_archive.quips import pick_quip, profile_speakers, score_sentence, trim
 from meeting_archive.records import Transcript
+
+
+def test_apple_uses_the_graphics_path_and_windows_stays_on_the_processor():
+    assert diarization_provider("darwin") == "coreml"
+    assert diarization_provider("win32") == "cpu"
+    assert diarization_provider("linux") == "cpu"
+
+
+def test_both_speaker_models_are_asked_for_the_same_path():
+    seen = {}
+
+    class Piece:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Sherpa:
+        def OfflineSpeakerSegmentationPyannoteModelConfig(self, **kwargs):
+            return Piece(**kwargs)
+
+        def OfflineSpeakerSegmentationModelConfig(self, **kwargs):
+            seen["segmentation"] = kwargs["provider"]
+            return Piece(**kwargs)
+
+        def SpeakerEmbeddingExtractorConfig(self, **kwargs):
+            seen["embedding"] = kwargs["provider"]
+            return Piece(**kwargs)
+
+        def FastClusteringConfig(self, **kwargs):
+            return Piece(**kwargs)
+
+        def OfflineSpeakerDiarizationConfig(self, **kwargs):
+            return Piece(**kwargs)
+
+    _diarization_config(
+        Sherpa(),
+        segmentation="seg.onnx",
+        embedding="emb.onnx",
+        num_threads=4,
+        provider="coreml",
+        cluster_count=-1,
+        distance=0.9,
+        min_span_s=0.6,
+    )
+    assert seen == {"segmentation": "coreml", "embedding": "coreml"}
+
+
+def test_a_missing_graphics_path_uses_the_processor(tmp_path, monkeypatch):
+    segmentation = tmp_path / "seg.onnx"
+    embedding = tmp_path / "emb.onnx"
+    segmentation.write_bytes(b"x")
+    embedding.write_bytes(b"x")
+    tried: list[str] = []
+
+    class Config:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def validate(self):
+            return True
+
+    class Sherpa:
+        def OfflineSpeakerSegmentationPyannoteModelConfig(self, **kwargs):
+            return kwargs
+
+        def OfflineSpeakerSegmentationModelConfig(self, **kwargs):
+            return kwargs
+
+        def SpeakerEmbeddingExtractorConfig(self, **kwargs):
+            return kwargs
+
+        def FastClusteringConfig(self, **kwargs):
+            return kwargs
+
+        def OfflineSpeakerDiarizationConfig(self, **kwargs):
+            return Config(kwargs["segmentation"]["provider"])
+
+        def OfflineSpeakerDiarization(self, config):
+            tried.append(config.provider)
+            if config.provider == "coreml":
+                raise RuntimeError("CoreML rejected the model")
+            return object()
+
+    monkeypatch.setitem(__import__("sys").modules, "sherpa_onnx", Sherpa())
+    monkeypatch.setattr(
+        "meeting_archive.diarize.diarization_provider", lambda platform=None: "coreml"
+    )
+    diarizer = Diarizer(
+        DiarizeConfig(
+            segmentation_model=str(segmentation),
+            embedding_model=str(embedding),
+        )
+    )
+    diarizer._pipeline_for(2)
+    diarizer._pipeline_for(4)
+    assert tried == ["coreml", "cpu", "cpu"]
 
 
 # ---------------------------------------------------------------------------

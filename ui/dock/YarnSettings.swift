@@ -5,6 +5,7 @@
 // write one file and cannot disagree.
 
 import AppKit
+import UniformTypeIdentifiers
 
 final class YarnSettings: NSObject, NSWindowDelegate {
     private let paths: Paths
@@ -739,15 +740,45 @@ final class YarnSettings: NSObject, NSWindowDelegate {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.message = kind == "audio"
-            ? "Choose a recording to add to Yarn. It is copied in and transcribed on this Mac."
-            : "Choose a transcript to add to Yarn."
+        // The type list is a hint. allowsOtherFileTypes keeps a recording
+        // selectable when macOS does not recognise its extension.
+        panel.allowsOtherFileTypes = true
+        if kind == "audio" {
+            panel.allowedContentTypes = [.wav, .mp3, .mpeg4Audio, .mpeg4Movie, .quickTimeMovie, .audio]
+            panel.message = "Choose a recording to add to Yarn. A long meeting is copied in first, then transcribed on this Mac."
+        } else {
+            panel.allowedContentTypes = [.plainText, .text, .utf8PlainText]
+            panel.message = "Choose a transcript to add to Yarn."
+        }
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         panel.beginSheetModal(for: window) { [weak self] answer in
             guard let self, answer == .OK, let url = panel.url else { return }
             let ma = self.paths.ma
-            self.flash("Importing \(url.lastPathComponent)\u{2026}")
+            let name = url.lastPathComponent
+            self.flash(
+                kind == "audio"
+                    ? "Copying \(name) in. A long recording takes a few minutes."
+                    : "Importing \(name)\u{2026}"
+            )
+            // The open panel's permission does not pass to `ma`. Downloads is
+            // one of the folders a child process is silently refused, so the
+            // file is copied into the archive while this window can still read it.
             self.writer.async {
-                let result = Self.run(ma, [kind == "audio" ? "import-audio" : "import-transcript", url.path])
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                let staged: (path: String, temporary: Bool)
+                do {
+                    staged = try self.stageImport(url)
+                } catch {
+                    DispatchQueue.main.async {
+                        self.flash("That file could not be read. \(error.localizedDescription)", warn: true)
+                    }
+                    return
+                }
+                let result = Self.run(ma, [kind == "audio" ? "import-audio" : "import-transcript", staged.path])
+                if staged.temporary {
+                    try? FileManager.default.removeItem(atPath: staged.path)
+                }
                 DispatchQueue.main.async {
                     self.flash(
                         result.ok ? "Imported. It will appear once it has been processed." : (result.err.isEmpty ? "That file could not be imported." : result.err),
@@ -756,6 +787,25 @@ final class YarnSettings: NSObject, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    /// Copy a picked file into the archive so `ma` can read it.
+    /// A file that is already inside the archive is used where it is.
+    private func stageImport(_ url: URL) throws -> (path: String, temporary: Bool) {
+        let root = URL(fileURLWithPath: paths.root, isDirectory: true)
+        let source = url.standardizedFileURL
+        if source.path.hasPrefix(root.standardizedFileURL.path + "/") {
+            return (source.path, false)
+        }
+        let folder = root.appendingPathComponent("imports", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let leaf = source.lastPathComponent.isEmpty ? "import" : source.lastPathComponent
+        let dest = folder.appendingPathComponent(leaf)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try FileManager.default.removeItem(at: dest)
+        }
+        try FileManager.default.copyItem(at: source, to: dest)
+        return (dest.path, true)
     }
 
     @objc private func pauseProcessing() { simple(["pause"], done: "Processing is paused. Recording is not affected.") }

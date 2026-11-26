@@ -1350,6 +1350,37 @@ def ensure_library_clip(cfg: Config, person: KnownSpeaker) -> Path | None:
     return None
 
 
+def rename_known_speaker(cfg: Config, current: str, name: str) -> KnownSpeaker:
+    """Correct the name of a saved voice. The clip and the voiceprint stay.
+
+    Meetings already named are left alone. A correction there is a different
+    edit, on that meeting, so one typo cannot rename a person through the
+    whole archive.
+    """
+    current = " ".join(str(current or "").split())
+    name = " ".join(str(name or "").split())
+    if not is_real_name(name):
+        raise ValueError("That is not a person's name.")
+    if len(name) > 80:
+        raise ValueError("A name is limited to 80 characters.")
+    people = load_library(cfg)
+    found = next((p for p in people if fold_name(p.name) == fold_name(current)), None)
+    if found is None:
+        raise FileNotFoundError(f"No saved voice named {current}.")
+    if fold_name(name) != fold_name(found.name) and any(
+        fold_name(person.name) == fold_name(name) for person in people
+    ):
+        raise ValueError(
+            f"{name} is already a saved voice. This one was left as {found.name}."
+        )
+    if fold_name(name) != fold_name(found.name) and found.name not in found.aliases:
+        found.aliases.append(found.name)
+    found.name = name
+    save_library(cfg, people)
+    render_voices_html(cfg, people)
+    return found
+
+
 def forget_speaker(cfg: Config, name: str) -> bool:
     speakers = load_library(cfg)
     removed = [s for s in speakers if s.name.casefold() == name.casefold()]
@@ -1364,6 +1395,22 @@ def forget_speaker(cfg: Config, name: str) -> bool:
     return True
 
 
+def _known_name_form(cfg: Config, person: KnownSpeaker) -> str:
+    """Edit the saved name. The meeting page edits one meeting, not this."""
+    from .library import LIBRARY_PORT, _delete_action
+
+    token = _delete_action(cfg)[2]
+    action = f"http://127.0.0.1:{LIBRARY_PORT}/known-name"
+    return (
+        f'<form class="name-edit" method="post" action="{action}">'
+        f'<input name="name" value="{_esc(person.name)}" aria-label="Person\'s name">'
+        f'<input type="hidden" name="current" value="{_esc(person.name)}">'
+        f'<input type="hidden" name="token" value="{_esc(token)}">'
+        '<button class="texty" type="submit">Save name</button>'
+        "</form>"
+    )
+
+
 def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) -> Path:
     from . import htmltheme
 
@@ -1372,7 +1419,9 @@ def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) ->
         htmltheme.masthead("Speakers", "Known speakers"),
         "<p class=\"lede\">These are voices you have named. Play a clip to check it is the "
         "right person. Yarn will only attach a name to new speech after you "
-        "confirm it in a meeting.</p>",
+        "confirm it in a meeting. A wrong name can be corrected here. The clip "
+        "stays with the voice. Meetings you already named keep their names "
+        "until you edit them on the meeting.</p>",
     ]
     if not people:
         lines.append("<p>No named voices yet. Identify speakers after a meeting.</p>")
@@ -1387,6 +1436,7 @@ def render_voices_html(cfg: Config, people: list[KnownSpeaker] | None = None) ->
         lines.append(
             '<div class="voice">'
             f"<strong>{_esc(person.name)}</strong>"
+            + _known_name_form(cfg, person)
             + (
                 f'<div class="mono">{_esc(", ".join(bit for bit in (person.title, person.company) if bit.strip()))}</div>'
                 if person.title.strip() or person.company.strip()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -47,7 +46,7 @@ def import_audio(cfg: Config, src: Path, *, title: str = "") -> Manifest:
     cfg.ensure_dirs()
     meeting_id = new_meeting_id()
     wav = cfg.in_progress_dir / f"{meeting_id}__import.wav"
-    _ffmpeg_to_wav(src, wav)
+    _ffmpeg_to_wav(src, wav, cfg.audio.sample_rate)
     info = audio.probe(wav)
     if audio.is_silent(wav):
         wav.unlink(missing_ok=True)
@@ -149,28 +148,22 @@ def import_transcript(
     return transcript
 
 
-def _ffmpeg_to_wav(src: Path, dst: Path) -> Path:
-    audio.require_tool("ffmpeg")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + ".partial")
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-i", str(src),
-            "-ac", "1",
-            "-ar", "16000",
-            "-c:a", "pcm_s16le",
-            "-f", "wav",
-            str(tmp),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        tmp.unlink(missing_ok=True)
-        raise ImportFailed(f"ffmpeg could not read {src.name}: {proc.stderr.strip()}")
-    tmp.replace(dst)
-    return dst
+def _ffmpeg_to_wav(src: Path, dst: Path, sample_rate: int) -> Path:
+    """Resample to mono without dropping a stored channel.
+
+    `-ac 1` follows ffmpeg's guessed layout. Three channels are guessed as
+    2.1, and that downmix throws away the third channel. A meeting whose
+    speech sits only there then arrives as digital silence and is refused.
+    The channels are averaged in the order they are stored.
+    """
+    info = audio.probe(src)
+    count = int(info["channels"] or 0)
+    if count < 1:
+        raise ImportFailed(f"{src.name} has no audio stream")
+    try:
+        return audio.extract_mono(src, dst, list(range(count)), sample_rate)
+    except audio.AudioError as exc:
+        raise ImportFailed(f"ffmpeg could not read {src.name}: {exc}") from exc
 
 
 def _hms(h: int, m: int, s: int, ms: int = 0) -> float:

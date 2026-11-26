@@ -379,6 +379,39 @@ def _across(seconds, turns) -> str:
     return f"{format_duration(seconds)} across {count} {word}"
 
 
+def _person_form(
+    notes_form: tuple[str, str] | None,
+    meeting_id: str,
+    keys: list[str],
+    current: str,
+) -> str:
+    """A box to correct one voice in this meeting.
+
+    The microphone has no box: that channel is already one known person.
+    Saving here does not rename the voice in any other meeting.
+    """
+    if not notes_form or not keys:
+        return ""
+    from . import htmltheme
+
+    action, token = notes_form
+    post = action.rsplit("/", 1)[0] + "/voice"
+    hidden = "".join(
+        f'<input type="hidden" name="speaker" value="{htmltheme.html_escape(key)}">'
+        for key in keys
+    )
+    return (
+        f'<form class="name-edit" method="post" action="{htmltheme.html_escape(post)}">'
+        f'<input name="name" value="{htmltheme.html_escape(current)}" '
+        'placeholder="Who is this?" aria-label="Person\'s name">'
+        f'<input type="hidden" name="meeting" value="{htmltheme.html_escape(meeting_id)}">'
+        f'<input type="hidden" name="token" value="{htmltheme.html_escape(token)}">'
+        f"{hidden}"
+        '<button class="texty" type="submit">Save name</button>'
+        "</form>"
+    )
+
+
 def _voice_name(profile, roster: dict, label_turn) -> str:
     """The name to show for one profile.
 
@@ -732,11 +765,13 @@ def render_transcript_html(
             key = name.casefold()
             bucket = named.setdefault(
                 key,
-                {"name": name, "speaking_s": 0.0, "turns": 0, "quip": ""},
+                {"name": name, "speaking_s": 0.0, "turns": 0, "quip": "", "keys": []},
             )
             speaking = float(profile.speaking_s or 0.0)
             bucket["speaking_s"] += speaking
             bucket["turns"] += int(profile.turns or 0)
+            if speaker_index(profile.speaker) is not None:
+                bucket["keys"].append(profile.speaker)
             if profile.quip and speaking >= float(bucket.get("quip_s", -1)):
                 bucket["quip"] = profile.quip
                 bucket["quip_s"] = speaking
@@ -749,7 +784,9 @@ def render_transcript_html(
             voice_rows.append(
                 f'<li><div class="item">{titled(bucket["name"])}</div>'
                 f'<div class="mono">{htmltheme.html_escape(_across(bucket["speaking_s"], bucket["turns"]))}'
-                f"</div>{quip}</li>"
+                f"</div>{quip}"
+                f"{_person_form(notes_form, transcript.meeting_id, bucket['keys'], bucket['name'])}"
+                "</li>"
             )
         display = speaker_display_indices(transcript.speaker_profiles)
         for profile in unnamed:
@@ -759,10 +796,15 @@ def render_transcript_html(
                 if profile.quip
                 else ""
             )
+            keys = (
+                [profile.speaker] if speaker_index(profile.speaker) is not None else []
+            )
             voice_rows.append(
                 f'<li><div class="item">Speaker {htmltheme.html_escape(str(index))}</div>'
                 f'<div class="mono">{htmltheme.html_escape(_across(profile.speaking_s, profile.turns))}'
-                f", not yet identified</div>{quip}</li>"
+                f", not yet identified</div>{quip}"
+                f"{_person_form(notes_form, transcript.meeting_id, keys, '')}"
+                "</li>"
             )
 
     attendees = str(notes.get("attendees") or "").strip()
@@ -832,8 +874,18 @@ def render_transcript_html(
     )
     voices_card = ""
     if voice_rows:
+        # The box is this meeting only. A saved voice is a different name,
+        # edited on the Speakers page, and must not be rewritten from here.
+        correction = (
+            '<p class="why">Correct a name if it is the wrong person. '
+            "It changes this meeting only. A saved voice is changed under Speakers.</p>"
+            if notes_form and any("Save name" in row for row in voice_rows)
+            else ""
+        )
         voices_card = (
-            '<section class="card"><h2>Voices</h2><ol class="items">'
+            '<section class="card"><h2>Voices</h2>'
+            + correction
+            + '<ol class="items">'
             + "".join(voice_rows)
             + "</ol></section>"
         )

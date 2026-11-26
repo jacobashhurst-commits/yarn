@@ -193,6 +193,115 @@ def test_notes_markup_cannot_break_the_page(cfg):
     assert "<script>alert(1)</script>" not in page
 
 
+def _with_voices(cfg, meeting_id=MEETING):
+    from meeting_archive.models import SpeakerProfile
+
+    transcript = Transcript.read(cfg.transcript_json(meeting_id))
+    transcript.speaker_profiles = [
+        SpeakerProfile(
+            "room-1", ROOM, turns=4, speaking_s=40, quip="We should start with the budget."
+        ),
+        SpeakerProfile(
+            "room-2", ROOM, turns=2, speaking_s=12, quip="I can take the notes."
+        ),
+    ]
+    transcript.write(cfg.transcript_json(meeting_id))
+    return transcript
+
+
+def test_a_wrong_name_can_be_corrected_in_that_meeting_only(cfg):
+    from meeting_archive import library
+
+    _with_voices(cfg)
+    write_notes(
+        cfg.notes_json(MEETING),
+        MEETING,
+        notes="Launch planning",
+        speakers={"room-1": "Sam"},
+    )
+    other = "2026-11-11T10-00-00"
+    other_transcript = Transcript(
+        meeting_id=other,
+        segments=[Segment(ROOM, 0.0, 4.0, "See you next week.")],
+        turns=merge_segments([Segment(ROOM, 0.0, 4.0, "See you next week.")]),
+        duration_s=30,
+    )
+    other_transcript.write(cfg.transcript_json(other))
+    _with_voices(cfg, other)
+    write_notes(cfg.notes_json(other), other, speakers={"room-1": "Sam"})
+
+    library.rename_meeting_voice(cfg, MEETING, ["room-1"], "Priya")
+    saved = read_notes(cfg.notes_json(MEETING))
+    assert saved["speakers"]["room-1"] == "Priya"
+    assert saved["notes"] == "Launch planning"
+    assert saved["applied"] is False
+    page = cfg.transcript_html(MEETING).read_text()
+    assert 'value="Priya"' in page
+    assert "Save name" in page
+    assert "this meeting only" in page
+    assert read_notes(cfg.notes_json(other))["speakers"]["room-1"] == "Sam"
+
+    library.rename_meeting_voice(cfg, MEETING, ["room-1"], "")
+    assert "room-1" not in read_notes(cfg.notes_json(MEETING))["speakers"]
+    cleared = cfg.transcript_html(MEETING).read_text()
+    assert 'placeholder="Who is this?"' in cleared
+    assert read_notes(cfg.notes_json(other))["speakers"]["room-1"] == "Sam"
+
+
+def test_the_microphone_cannot_be_renamed_and_a_copy_has_no_name_box(cfg):
+    from meeting_archive import library
+    from meeting_archive.models import MIC, SpeakerProfile
+
+    transcript = _with_voices(cfg)
+    transcript.speaker_profiles.append(
+        SpeakerProfile("mic", MIC, turns=1, speaking_s=8, quip="It's Jacob.")
+    )
+    transcript.write(cfg.transcript_json(MEETING))
+    with pytest.raises(ValueError):
+        library.rename_meeting_voice(cfg, MEETING, ["mic"], "Someone else")
+    page = render_transcript_html(
+        transcript,
+        cfg.turn_labeller({}, {}),
+        {},
+        notes_form=("http://127.0.0.1:47331/notes", "tok"),
+    )
+    assert "Save name" in page
+    assert 'name="speaker" value="room-1"' in page
+    assert 'name="speaker" value="mic"' not in page
+    shared = render_transcript_html(
+        transcript, cfg.turn_labeller({}, {}), {}, for_copy=True
+    )
+    assert "Save name" not in shared
+
+
+def test_a_saved_voice_can_be_renamed_without_touching_meetings(cfg):
+    from meeting_archive.speakers import (
+        KnownSpeaker,
+        load_library,
+        rename_known_speaker,
+        save_library,
+    )
+
+    _with_voices(cfg)
+    write_notes(cfg.notes_json(MEETING), MEETING, speakers={"room-1": "Sam"})
+    save_library(
+        cfg,
+        [KnownSpeaker(name="Sam", embedding=[0.2, 0.4], clip="sam.wav", meeting_ids=[MEETING])],
+    )
+    renamed = rename_known_speaker(cfg, "Sam", "Priya")
+    assert renamed.name == "Priya"
+    assert renamed.embedding == [0.2, 0.4]
+    assert renamed.clip == "sam.wav"
+    assert "Sam" in renamed.aliases
+    assert read_notes(cfg.notes_json(MEETING))["speakers"]["room-1"] == "Sam"
+    page = (cfg.root / "speakers" / "library.html").read_text()
+    assert 'value="Priya"' in page
+    assert "/known-name" in page
+    with pytest.raises(ValueError):
+        rename_known_speaker(cfg, "Priya", "unsure")
+    assert load_library(cfg)[0].name == "Priya"
+
+
 # --- apps outside Yarn -----------------------------------------------------------
 
 

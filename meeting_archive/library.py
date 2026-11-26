@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 LIBRARY_PORT = 47331
 # Bumped when the routes change, so a server left running from an older
 # Yarn is replaced instead of answering 404 to a link it does not know.
-_SERVER_MARK = b"yarn-library/6"
+_SERVER_MARK = b"yarn-library/7"
 
 
 @dataclass
@@ -445,6 +445,75 @@ def save_meeting_notes(cfg: Config, meeting_id: str, detail: str) -> None:
         page.unlink(missing_ok=True)
 
 
+def rename_meeting_voice(
+    cfg: Config, meeting_id: str, keys: list[str], name: str
+) -> None:
+    """Correct who a voice was in this meeting.
+
+    Other meetings keep the names they already have. The saved-voice library
+    is a separate person and is not renamed from here: a wrong guess in one
+    room must not become the name Yarn suggests everywhere.
+    """
+    from .models import speaker_display_indices, speaker_index
+    from .speakers import is_real_name, library_details
+    from . import space_saver
+
+    try:
+        parse_meeting_id(meeting_id)
+    except ValueError as exc:
+        raise ValueError("That is not a meeting.") from exc
+    path = cfg.transcript_json(meeting_id)
+    if not path.exists():
+        raise FileNotFoundError("That meeting has no transcript yet.")
+    transcript = Transcript.read(path)
+    valid = {
+        profile.speaker
+        for profile in transcript.speaker_profiles
+        if speaker_index(profile.speaker) is not None
+    }
+    chosen: list[str] = []
+    for key in keys:
+        text = str(key).strip()
+        if text in valid and text not in chosen:
+            chosen.append(text)
+    if not chosen:
+        raise ValueError("That voice is not in this meeting.")
+    name = " ".join(str(name or "").split())
+    if len(name) > 80:
+        raise ValueError("A name is limited to 80 characters.")
+    notes_path = cfg.notes_json(meeting_id)
+    if name and is_real_name(name):
+        records.write_notes(
+            notes_path,
+            meeting_id=meeting_id,
+            speakers={key: name for key in chosen},
+            applied=False,
+        )
+    else:
+        # Blank, or "unsure", means this voice is unnamed again.
+        records.clear_speaker_names(notes_path, chosen)
+    notes = records.read_notes(notes_path)
+    roster = records.speaker_roster(notes)
+    display = speaker_display_indices(transcript.speaker_profiles)
+    titles, companies = library_details(cfg)
+    records.write_text_atomic(
+        cfg.transcript_md(meeting_id),
+        records.render_markdown(
+            transcript,
+            cfg.turn_labeller(roster, display),
+            notes,
+            processing=records.processing_from_job(jobs.load(cfg, meeting_id)),
+            titles=titles,
+            companies=companies,
+        ),
+    )
+    page = cfg.transcript_html(meeting_id)
+    if space_saver.keeps_page(cfg, meeting_id):
+        records.ensure_transcript_page(cfg, transcript, notes)
+    else:
+        page.unlink(missing_ok=True)
+
+
 def _title_cell(action: tuple[str, str, str], row: MeetingRow, href: str) -> str:
     _, rename, token = action
     shown = row.title
@@ -749,7 +818,14 @@ def _handler(cfg: Config, token: str):
                 self._send(403, b"Refused", "text/plain")
                 return
             path = self.path.split("?", 1)[0]
-            if path not in ("/delete", "/rename", "/notes", "/share"):
+            if path not in (
+                "/delete",
+                "/rename",
+                "/notes",
+                "/share",
+                "/voice",
+                "/known-name",
+            ):
                 self._send(404, b"Not found", "text/plain")
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -762,12 +838,27 @@ def _handler(cfg: Config, token: str):
                 self._send(403, b"Refused", "text/plain")
                 return
             try:
-                if path == "/notes":
+                if path == "/known-name":
+                    from .speakers import rename_known_speaker
+
+                    rename_known_speaker(
+                        cfg,
+                        (fields.get("current") or [""])[0],
+                        (fields.get("name") or [""])[0],
+                    )
+                elif path == "/notes":
                     save_meeting_notes(cfg, meeting_id, (fields.get("detail") or [""])[0])
                 elif path == "/share":
                     saved = copy_to_downloads(cfg, meeting_id)
                 elif path == "/rename":
                     rename_meeting(cfg, meeting_id, (fields.get("name") or [""])[0])
+                elif path == "/voice":
+                    rename_meeting_voice(
+                        cfg,
+                        meeting_id,
+                        fields.get("speaker") or [],
+                        (fields.get("name") or [""])[0],
+                    )
                 else:
                     delete_meeting(cfg, meeting_id)
             except (OSError, RuntimeError, ValueError) as exc:
@@ -784,7 +875,11 @@ def _handler(cfg: Config, token: str):
                 ).encode()
                 self._send(200, page, "text/html; charset=utf-8")
                 return
-            if path == "/notes":
+            if path == "/known-name":
+                page = cfg.root / "speakers" / "library.html"
+                self._send(200, page.read_bytes(), "text/html; charset=utf-8")
+                return
+            if path in ("/notes", "/voice"):
                 loc = (
                     f"/meeting?id={quote(meeting_id)}&token={quote(given)}&saved=1"
                 )
