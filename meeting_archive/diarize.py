@@ -31,7 +31,6 @@ archive and search index remain correct, just less specific.
 from __future__ import annotations
 
 import logging
-import sys
 import wave
 from pathlib import Path
 
@@ -85,53 +84,6 @@ RETRY_CLUSTER_THRESHOLD = 0.5
 SINGLE_VOICE_RETRY_S = 8.0
 
 
-def diarization_provider(platform: str | None = None) -> str:
-    """Where separating voices should run on this computer.
-
-    The same kind of choice as the summary model. A Mac with the graphics
-    path uses it. A machine without that path stays on the processor, which
-    is what a Windows copy of this file does until that project has its own.
-    """
-    system = sys.platform if platform is None else platform
-    if system == "darwin":
-        return "coreml"
-    return "cpu"
-
-
-def _diarization_config(
-    sherpa,
-    *,
-    segmentation: str,
-    embedding: str,
-    num_threads: int,
-    provider: str,
-    cluster_count: int,
-    distance: float,
-    min_span_s: float,
-):
-    """Sherpa pipeline config. `provider` is coreml or cpu for both models."""
-    return sherpa.OfflineSpeakerDiarizationConfig(
-        segmentation=sherpa.OfflineSpeakerSegmentationModelConfig(
-            pyannote=sherpa.OfflineSpeakerSegmentationPyannoteModelConfig(
-                model=segmentation
-            ),
-            num_threads=num_threads,
-            provider=provider,
-        ),
-        embedding=sherpa.SpeakerEmbeddingExtractorConfig(
-            model=embedding,
-            num_threads=num_threads,
-            provider=provider,
-        ),
-        clustering=sherpa.FastClusteringConfig(
-            num_clusters=cluster_count,
-            threshold=distance,
-        ),
-        min_duration_on=min_span_s,
-        min_duration_off=0.5,
-    )
-
-
 class DiarizationUnavailable(RuntimeError):
     """Diarization cannot run at all: missing package or model files."""
 
@@ -151,9 +103,6 @@ class Diarizer:
         # remain supported without reloading models every time.
         self._pipelines: dict[tuple[int, float], object] = {}
         self._unavailable: str | None = None
-        # CoreML is tried once. If this Mac's build cannot run it, the rest
-        # of the process stays on the processor instead of failing every file.
-        self._graphics_failed = False
 
     @property
     def enabled(self) -> bool:
@@ -210,54 +159,41 @@ class Diarizer:
             self._unavailable = "missing local diarization model(s): " + ", ".join(missing)
             raise DiarizationUnavailable(self._unavailable)
 
-        preferred = diarization_provider()
-        providers = (
-            ["cpu"]
-            if preferred == "cpu" or self._graphics_failed
-            else [preferred, "cpu"]
+        # The processor, not the graphics chip. CoreML was tried on a
+        # MacBook Pro and this stage went from 5 minutes to more than 12.
+        log.info(
+            "loading diarization pipeline model=%s speakers=%s",
+            self.config.model,
+            cluster_count if cluster_count > 0 else "automatic",
         )
-        last_error: Exception | None = None
-        for provider in providers:
-            log.info(
-                "loading diarization pipeline model=%s speakers=%s provider=%s",
-                self.config.model,
-                cluster_count if cluster_count > 0 else "automatic",
-                provider,
-            )
-            try:
-                config = _diarization_config(
-                    sherpa_onnx,
-                    segmentation=str(segmentation),
-                    embedding=str(embedding),
+        try:
+            config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+                segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                    pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+                        model=str(segmentation)
+                    ),
                     num_threads=self.config.num_threads,
-                    provider=provider,
-                    cluster_count=cluster_count,
-                    distance=distance,
-                    min_span_s=self.config.min_span_s,
-                )
-                if not config.validate():
-                    raise ValueError("sherpa-onnx rejected the diarization configuration")
-                pipeline = sherpa_onnx.OfflineSpeakerDiarization(config)
-            except Exception as exc:
-                last_error = exc
-                if provider != "cpu":
-                    # The graphics path is missing or rejected this model.
-                    # The processor still separates voices.
-                    self._graphics_failed = True
-                    log.warning(
-                        "graphics path for speakers is not available (%s); "
-                        "using the processor",
-                        exc,
-                    )
-                    continue
-                self._unavailable = f"could not load local diarization models: {exc}"
-                raise DiarizationUnavailable(self._unavailable) from exc
+                ),
+                embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                    model=str(embedding),
+                    num_threads=self.config.num_threads,
+                ),
+                clustering=sherpa_onnx.FastClusteringConfig(
+                    num_clusters=cluster_count,
+                    threshold=distance,
+                ),
+                min_duration_on=self.config.min_span_s,
+                min_duration_off=0.5,
+            )
+            if not config.validate():
+                raise ValueError("sherpa-onnx rejected the diarization configuration")
+            pipeline = sherpa_onnx.OfflineSpeakerDiarization(config)
+        except Exception as exc:
+            self._unavailable = f"could not load local diarization models: {exc}"
+            raise DiarizationUnavailable(self._unavailable) from exc
 
-            self._pipelines[key] = pipeline
-            return pipeline
-
-        self._unavailable = f"could not load local diarization models: {last_error}"
-        raise DiarizationUnavailable(self._unavailable)
+        self._pipelines[key] = pipeline
+        return pipeline
 
     def diarize_file(
         self,
